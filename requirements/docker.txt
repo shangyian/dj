@@ -26,6 +26,8 @@ pyasn1==0.4.8
     #   rsa
 pyasn1-modules==0.2.8
     # via google-auth
+pyhive[presto]==0.6.3
+    # via -r requirements/docker.in
 rsa==4.9
     # via google-auth
 shillelagh[gsheetsapi]==1.1.3

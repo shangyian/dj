@@ -10,7 +10,7 @@ from pytest_mock import MockerFixture
 from sqlmodel import Session
 
 from dj.models.column import Column
-from dj.models.node import Node, NodeType
+from dj.models.node import Node, NodeType, NodeStatus
 from dj.models.query import Database, QueryCreate, QueryWithResults
 from dj.models.table import Table
 from dj.typing import ColumnType
@@ -39,6 +39,56 @@ def test_read_metrics(session: Session, client: TestClient) -> None:
     assert len(data) == 1
     assert data[0]["name"] == "a-metric"
     assert data[0]["query"] == "SELECT COUNT(*) FROM my_table"
+
+#
+# def test_read_metric2s(session: Session, client: TestClient) -> None:
+#     """
+#     Test ``GET /metrics/``.
+#     """
+#     database = Database(name="test", URI="sqlite://")
+#     table_a = Table(
+#         database=database,
+#         table="ab_nm_alloc_a",
+#         columns=[
+#             Column(name="test_cell_nbr", type=ColumnType.INT),
+#             Column(name="tenure_grouping", type=ColumnType.INT),
+#             Column(name="country_iso_code", type=ColumnType.STR),
+#             Column(name="allocation_region_date", type=ColumnType.INT),
+#         ],
+#     )
+#
+#     source_node = Node(
+#         name="ab_nm_alloc_a",
+#         tables=[table_a],
+#     )
+#     transform_node_a = Node(
+#         name="nm_funnel_adjusted",
+#         query="SELECT * FROM etl.ab_nm_alloc_a WHERE membership_status <> 2",
+#     )
+#     transform_node_b = Node(
+#         name="nm_funnel",
+#         query="SELECT * FROM etl.ab_nm_alloc_a",
+#     )
+#
+#     metric_node1 = Node(
+#         name="random",
+#         query="SELECT * FROM nm_funnel WHERE test_od",
+#         type=NodeType.METRIC,
+#     )
+#     session.add(database)
+#     session.add(table_a)
+#     session.add(source_node)
+#     session.add(transform_node_a)
+#     session.add(transform_node_b)
+#     session.commit()
+#
+#     response = client.get("/metrics/")
+#     data = response.json()
+#
+#     assert response.status_code == 200
+#     assert len(data) == 1
+#     assert data[0]["name"] == "a-metric"
+#     assert data[0]["query"] == "SELECT COUNT(*) FROM my_table"
 
 
 def test_read_metric(session: Session, client: TestClient) -> None:

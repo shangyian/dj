@@ -3,7 +3,7 @@ Model for nodes.
 """
 
 import enum
-from collections import defaultdict
+from collections import defaultdict, deque
 from datetime import datetime, timezone
 from functools import partial
 from typing import Dict, List, Optional, TypedDict, cast
@@ -110,16 +110,45 @@ class NodeYAML(TypedDict, total=False):
     tables: Dict[str, List[TableYAML]]
 
 
+class NodeHistory(SQLModel, table=True):
+    """
+    Stores all versions of nodes. This contains all of the fields that can be modified by a
+    user and should be tracked by version control. Each entry represents a new version.
+    """
+
+    node_id: int = Field(
+        foreign_key="node.id",
+        primary_key=True,
+    )
+    version: int = Field(
+        default=0,
+        primary_key=True,
+    )
+    updated_at: datetime = Field(
+        sa_column=SqlaColumn(DateTime(timezone=True)),
+        default_factory=partial(datetime.now, timezone.utc),
+    )
+    description: str = ""
+    query: Optional[str] = None
+    mode: NodeMode = NodeMode.PUBLISHED
+
+    latest_node: List["Node"] = Relationship(
+        sa_relationship_kwargs={
+            "primaryjoin": "NodeHistory.node_id==Node.id",
+        },
+    )
+
+
 class NodeBase(SQLModel):
     """
     A base node.
     """
 
     name: str = Field(sa_column=SqlaColumn("name", String, unique=True))
-    description: str = ""
     type: NodeType = Field(sa_column=SqlaColumn(Enum(NodeType)))
-    query: Optional[str] = None
-    mode: NodeMode = NodeMode.PUBLISHED
+    current_version: int = Field(
+        default=0,
+    )
 
 
 class MissingParent(SQLModel, table=True):  # type: ignore
@@ -209,6 +238,12 @@ class Node(NodeBase, table=True):  # type: ignore
         },
     )
 
+    revisions: List[NodeHistory] = Relationship(
+        sa_relationship_kwargs={
+            "primaryjoin": "Node.id==NodeHistory.node_id",
+        },
+    )
+
     def to_yaml(self) -> NodeYAML:
         """
         Serialize the node for YAML.
@@ -262,3 +297,17 @@ class Node(NodeBase, table=True):  # type: ignore
                     f"Node {self.name} of type metric has an invalid query, "
                     "should have a single aggregation",
                 )
+
+    def downstream_metrics(self) -> List["Node"]:
+        if self.type == NodeType.METRIC:
+            return []
+
+        q = deque([self])
+        metrics = deque()
+        while q:
+            curr = q.pop()
+            if curr.type == NodeType.METRIC:
+                metrics.append(curr)
+            q.extend(curr.children)
+        return list(metrics)
+

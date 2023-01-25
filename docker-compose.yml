@@ -82,6 +82,7 @@ services:
     image: postgres:latest
     volumes:
       - ./examples/docker/postgres_init.sql:/docker-entrypoint-initdb.d/init.sql
+      - ./examples/docker/ab_nm_alloc_a.csv:/docker-entrypoint-initdb.d/ab_nm_alloc_a.csv
       - postgres_data:/var/lib/postgresql/data
       # dbt
       - ./examples/dbt/postgres_init.sql:/docker-entrypoint-initdb.d/init_dbt.sql
