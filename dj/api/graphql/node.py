@@ -40,7 +40,7 @@ if TYPE_CHECKING:
 
 @strawberry.experimental.pydantic.type(
     model=Node_,
-    fields=["id", "name", "description", "created_at", "updated_at", "query"],
+    fields=["id", "name", "description", "created_at", "updated_at"],
 )
 class Node:  # type: ignore
     """
