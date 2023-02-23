@@ -1,5 +1,8 @@
 name: Generate Clients From OpenAPI Spec
-on: [push, pull_request]
+on:
+  push:
+    branches:
+      - main
 jobs:
   generate-python-client:
     runs-on: ubuntu-latest
