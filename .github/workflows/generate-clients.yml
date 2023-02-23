@@ -21,17 +21,22 @@ jobs:
       - name: Generate OpenAPI Spec
         run: ./scripts/generate-openapi.py -o openapi.json
 
+      - name: Configure Git
+        run: |
+          git config user.name "GitHub Actions Bot"
+          git config user.email "<>"
+
+      - name: Commit OpenAPI Spec
+        run: |
+          git add openapi.json
+          git commit -m "Updating OpenAPI Spec"
+
       - name: Generate Python client
         uses: openapi-generators/openapitools-generator-action@v1.4.0
         with:
           generator: python
           openapi-file: openapi.json
           config-file: ./.github/files/python-client-gen.yml
-
-      - name: Configure Git
-        run: |
-          git config user.name "GitHub Actions Bot"
-          git config user.email "<>"
 
       - name: Move client to right directory
         run: |
