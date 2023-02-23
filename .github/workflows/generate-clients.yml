@@ -14,9 +14,15 @@ jobs:
           generator: python
           openapi-file: openapi.json
           config-file: ./.github/files/python-client-gen.yml
+    - name: Cleans the branch up.
+      run: |
+        mkdir clients
+        mv python-client/* ./clients/
+        rm -rf python-client
+
       - name: Commit generated files
         run: |
-          git add dj-client
-          git commit -m "Update client" -a
+          git add clients/dj-python-client/
+          git commit -m "Update DJ Python client" -a
           git pull
           git push
