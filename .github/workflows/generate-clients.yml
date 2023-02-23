@@ -13,7 +13,7 @@ jobs:
         with:
           generator: python
           openapi-file: openapi.json
-          config-file: ./.github/files/python-openapi-gen.yml
+          config-file: ./.github/files/python-client-gen.yml
       - name: Commit generated files
         run: |
           git add dj-client
