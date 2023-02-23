@@ -1,0 +1,21 @@
+name: Generate Clients From OpenAPI Spec
+on: [push, pull_request]
+jobs:
+  generate-python-client:
+    runs-on: ubuntu-latest
+    name: Generate Python Client
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Generate Python Client
+        uses: openapi-generators/openapitools-generator-action@v1
+        with:
+          generator: python
+          openapi-file: openapi.json
+      - name: Commit generated files
+        run: |
+          git add client
+          git commit -m "Update client" -a
+          git pull
+          git push
