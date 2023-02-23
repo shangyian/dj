@@ -13,9 +13,10 @@ jobs:
         with:
           generator: python
           openapi-file: openapi.json
+          config-file: ./.github/files/python-openapi-gen.yml
       - name: Commit generated files
         run: |
-          git add client
+          git add dj-client
           git commit -m "Update client" -a
           git pull
           git push
