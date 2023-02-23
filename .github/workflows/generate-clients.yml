@@ -37,6 +37,7 @@ jobs:
           generator: python
           openapi-file: openapi.json
           config-file: ./.github/files/python-client-gen.yml
+          command-args: --skip-validate-spec
 
       - name: Move client to right directory
         run: |
