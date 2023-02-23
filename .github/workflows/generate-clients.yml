@@ -2,6 +2,7 @@ name: Generate Clients From OpenAPI Spec
 on: push
 jobs:
   generate-python-client:
+    needs: [update-openapi-spec]
     runs-on: ubuntu-latest
     name: Generate Python Client
     steps:
