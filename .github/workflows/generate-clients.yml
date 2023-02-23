@@ -22,8 +22,8 @@ jobs:
 
       - name: Move client to right directory
         run: |
-          mkdir -p clients
-          mv python-client/* ./clients/
+          mkdir -p ./clients/python
+          mv python-client/* ./clients/python/
           rm -rf python-client
 
       - name: Get Pull Request Number
@@ -34,8 +34,8 @@ jobs:
 
       - name: Commit generated files
         run: |
-          git add clients/dj-python-client/
-          git commit -m "Update DJ Python client" -a
+          git add clients/python/
+          git commit -m "Update DJ Python client"
           git checkout -b ci-pr/python-client-${{ steps.pr.outputs.pull_request_number }}
           git push --set-upstream origin ci-pr/python-client-${{ steps.pr.outputs.pull_request_number }}
 
