@@ -25,7 +25,7 @@ import frozendict  # noqa: F401
 
 from djclient import schemas  # noqa: F401
 
-from djclient.model.node_metadata import NodeMetadata
+from djclient.model.node_output import NodeOutput
 
 
 
@@ -37,12 +37,12 @@ class SchemaFor200ResponseBodyApplicationJson(
     class MetaOapg:
         
         @staticmethod
-        def items() -> typing.Type['NodeMetadata']:
-            return NodeMetadata
+        def items() -> typing.Type['NodeOutput']:
+            return NodeOutput
 
     def __new__(
         cls,
-        _arg: typing.Union[typing.Tuple['NodeMetadata'], typing.List['NodeMetadata']],
+        _arg: typing.Union[typing.Tuple['NodeOutput'], typing.List['NodeOutput']],
         _configuration: typing.Optional[schemas.Configuration] = None,
     ) -> 'SchemaFor200ResponseBodyApplicationJson':
         return super().__new__(
@@ -51,7 +51,7 @@ class SchemaFor200ResponseBodyApplicationJson(
             _configuration=_configuration,
         )
 
-    def __getitem__(self, i: int) -> 'NodeMetadata':
+    def __getitem__(self, i: int) -> 'NodeOutput':
         return super().__getitem__(i)
 
 
