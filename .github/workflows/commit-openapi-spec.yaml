@@ -1,5 +1,5 @@
 name: Update and Commit OpenAPI Spec
-on: [workflow_dispatch]
+on: [push, pull_request]
 jobs:
   update-openapi-spec:
     runs-on: ubuntu-latest
@@ -31,7 +31,7 @@ jobs:
       - name: Commit OpenAPI Spec & Push to ci-pr/openapi Branch
         run: |
           git add openapi.json
-          git commit -m "Adding updated OpenAPI Spec"
+          git commit -m "Updating OpenAPI Spec"
           git checkout -b ci-pr/openapi-${{ steps.date.outputs.date }}
           git push --set-upstream origin ci-pr/openapi-${{ steps.date.outputs.date }}
 
