@@ -1,5 +1,8 @@
 name: Update and Commit OpenAPI Spec
-on: [push, pull_request]
+on:
+  push:
+    branches:
+      - main
 jobs:
   update-openapi-spec:
     runs-on: ubuntu-latest

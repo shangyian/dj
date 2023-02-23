@@ -1,5 +1,5 @@
 name: Generate Clients From OpenAPI Spec
-on: [push, pull_request]
+on: push
 jobs:
   generate-python-client:
     runs-on: ubuntu-latest
@@ -23,7 +23,7 @@ jobs:
       - name: Move client to right directory
         run: |
           mkdir -p ./clients/python
-          mv python-client/* ./clients/python/
+          cp -r python-client/* ./clients/python/
           rm -rf python-client
 
       - name: Set short sha
