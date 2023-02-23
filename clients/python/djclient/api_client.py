@@ -948,6 +948,7 @@ class OpenApiResponse(JSONDetector):
                 content_type = 'multipart/form-data'
             else:
                 raise NotImplementedError('Deserialization of {} has not yet been implemented'.format(content_type))
+            print("body_data", body_data)
             deserialized_body = body_schema.from_openapi_data_oapg(
                 body_data, _configuration=configuration)
         elif streamed:
