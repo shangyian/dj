@@ -14,11 +14,12 @@ jobs:
           generator: python
           openapi-file: openapi.json
           config-file: ./.github/files/python-client-gen.yml
-    - name: Cleans the branch up.
-      run: |
-        mkdir clients
-        mv python-client/* ./clients/
-        rm -rf python-client
+
+      - name: Cleans the branch up.
+        run: |
+          mkdir clients
+          mv python-client/* ./clients/
+          rm -rf python-client
 
       - name: Commit generated files
         run: |
