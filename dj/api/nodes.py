@@ -342,6 +342,10 @@ def create_node_revision(
         MissingParent(name=missing_parent) for missing_parent in missing_parents_map
     ]
     new_parents = [node.name for node in dependencies_map]
+    catalog_ids = [node.catalog_id for node in dependencies_map]
+    if not len(set(catalog_ids)) == 1:
+        raise DJException(f"Cannot create nodes with multi-catalog dependencies: {set(catalog_ids)}")
+    catalog_id = catalog_ids[0]  # find the catalog
     parent_refs = session.exec(
         select(Node).where(
             # pylint: disable=no-member
@@ -359,6 +363,7 @@ def create_node_revision(
         [p.name for p in node_revision.parents],
     )
     node_revision.columns = validated_node.columns or []
+    node_revision.catalog_id = catalog_id
     return node_revision
 
 
@@ -376,8 +381,10 @@ def create_cube_node_revision(
         )
     metrics = []
     dimensions = []
+    catalogs = []
     for node_name in data.cube_elements:
         cube_element = get_node_by_name(session=session, name=node_name)
+        catalogs.append(cube_element.current.catalog.name)
         if cube_element.type == NodeType.METRIC:
             metrics.append(cube_element)
         elif cube_element.type == NodeType.DIMENSION:
@@ -399,6 +406,10 @@ def create_cube_node_revision(
         raise DJException(
             message=("At least one dimension is required to create a cube node"),
             http_status_code=http.client.UNPROCESSABLE_ENTITY,
+        )
+    if len(set(catalogs)) != 1:
+        raise DJException(
+            message=(f"Cannot create cube using nodes from multiple catalogs: {catalogs}")
         )
     return NodeRevision(
         name=data.name,
@@ -428,6 +439,13 @@ def create_node(
     raise_on_query_not_allowed(data)
 
     if data.type == NodeType.SOURCE:
+        try:
+            catalog = get_catalog(session=session, name=data.catalog)
+        except AttributeError as exc:
+            raise DJException(
+                f"Nodes of type `{NodeType.SOURCE}` must have `catalog`, "
+                "`schema_`, and `table` set"
+            ) from exc
         node_revision = NodeRevision(
             name=data.name,
             display_name=data.display_name
@@ -436,6 +454,9 @@ def create_node(
             description=data.description,
             type=data.type,
             status=NodeStatus.VALID,
+            catalog_id=catalog.id,
+            schema_=data.schema,
+            table=data.table,
             columns=[
                 Column(
                     name=column_name,
@@ -492,7 +513,13 @@ def add_dimension_to_node(
         name=dimension,
         node_type=NodeType.DIMENSION,
     )
-
+    if node.current.catalog.name != dimension_node.current.catalog.name:
+        raise DJException(
+            message=(
+                "Cannot add dimension to column, dimensions do not match: "
+                f"{node.current.catalog.name}, {dimension_node.current.catalog.name}"
+            )
+        )
     if dimension_column:  # Check that the column exists before linking
         get_column(dimension_node.current, dimension_column)
 
@@ -510,79 +537,6 @@ def add_dimension_to_node(
             "message": (
                 f"Dimension node {dimension} has been successfully "
                 f"linked to column {column} on node {name}"
-            ),
-        },
-    )
-
-
-@router.post("/nodes/{name}/table/", status_code=201)
-def add_table_to_node(
-    name: str,
-    data: CreateTable,
-    *,
-    session: Session = Depends(get_session),
-    query_service_client: QueryServiceClient = Depends(get_query_service_client),
-) -> JSONResponse:
-    """
-    Add a table to a node
-    """
-    node = get_node_by_name(session=session, name=name)
-    database = get_database_by_name(session=session, name=data.database_name)
-    catalog = get_catalog(session=session, name=data.catalog_name)
-    for existing_table in node.current.tables:
-        if (
-            existing_table.database == database
-            and existing_table.catalog == catalog
-            and existing_table.table == data.table
-        ):
-            raise DJException(
-                message=(
-                    f"Table {data.table} in database {database.name} in "
-                    f"catalog {catalog.name} already exists for node {name}"
-                ),
-                http_status_code=HTTPStatus.CONFLICT,
-            )
-
-    # When no columns are provided, attempt to find actual table columns
-    # if a query service is set
-    columns = [
-        Column(name=column.name, type=ColumnType(column.type))
-        for column in data.columns
-    ]
-    if not columns:
-        if not query_service_client:
-            raise DJException(
-                message="No table columns were provided and no query "
-                "service is configured for table columns inference!",
-            )
-        columns = query_service_client.get_columns_for_table(
-            data.catalog_name,
-            data.schema_,  # type: ignore
-            data.table,
-        )
-
-    table = Table(
-        catalog_id=catalog.id,
-        schema=data.schema_,
-        table=data.table,
-        database_id=database.id,
-        cost=data.cost,
-        columns=columns,
-    )
-
-    session.add(table)
-    session.commit()
-    session.refresh(table)
-    node.current.columns = columns
-    node.current.tables.append(table)
-    session.add(node)
-    session.commit()
-    session.refresh(node)
-    return JSONResponse(
-        status_code=201,
-        content={
-            "message": (
-                f"Table {data.table} has been successfully linked to node {name}"
             ),
         },
     )

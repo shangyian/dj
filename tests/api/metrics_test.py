@@ -169,9 +169,10 @@ def test_read_metrics_sql(
         name=source_node.name,
         node=source_node,
         version="1",
+        schema_="rev",
+        table="my_table",
         columns=[Column(name="one", type=ColumnType["STR"])],
         type=NodeType.SOURCE,
-        tables=[table],
     )
 
     node = Node(name="a-metric", type=NodeType.METRIC, current_version="1")
@@ -189,12 +190,11 @@ def test_read_metrics_sql(
 
     response = client.get("/metrics/a-metric/sql/?check_database_online=false")
     assert response.json() == {
-        "database_id": 1,
-        "sql": "SELECT  COUNT(*) AS col0 \n FROM basic.rev.my_table",
+        "sql": "SELECT  COUNT(*) AS col0 \n FROM default.rev.my_table",
     }
 
     response = client.get("/metrics/a-metric/sql/?check_database_online=true")
-    assert response.json()["message"] == "No active database was found"
+    assert response.json() == {'sql': 'SELECT  COUNT(*) AS col0 \n FROM default.rev.my_table'}
 
 
 def test_common_dimensions(

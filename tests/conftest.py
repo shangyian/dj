@@ -542,209 +542,209 @@ def client(  # pylint: disable=too-many-statements
             "/catalogs/public/engines/",
             json=[{"name": "spark", "version": "3.1.1"}],
         )
-        client.post(
-            "/nodes/repair_orders/table/",
-            json={
-                "database_name": "roads",
-                "catalog_name": "public",
-                "cost": 0.1,
-                "schema": "roads",
-                "table": "repair_orders",
-                "columns": [
-                    {"name": "repair_order_id", "type": "INT"},
-                    {"name": "municipality_id", "type": "STR"},
-                    {"name": "hard_hat_id", "type": "INT"},
-                    {"name": "order_date", "type": "DATETIME"},
-                    {"name": "required_date", "type": "DATETIME"},
-                    {"name": "dispatched_date", "type": "DATETIME"},
-                    {"name": "dispatcher_id", "type": "INT"},
-                ],
-            },
-        )
-        client.post(
-            "/nodes/repair_order_details/table/",
-            json={
-                "database_name": "roads",
-                "catalog_name": "public",
-                "cost": 0.1,
-                "schema": "roads",
-                "table": "repair_order_details",
-                "columns": [
-                    {"name": "repair_order_id", "type": "INT"},
-                    {"name": "repair_type_id", "type": "INT"},
-                    {"name": "price", "type": "FLOAT"},
-                    {"name": "quantity", "type": "INT"},
-                    {"name": "discount", "type": "FLOAT"},
-                ],
-            },
-        )
-        client.post(
-            "/nodes/repair_type/table/",
-            json={
-                "database_name": "roads",
-                "catalog_name": "public",
-                "cost": 0.1,
-                "schema": "roads",
-                "table": "repair_type",
-                "columns": [
-                    {"name": "repair_type_id", "type": "INT"},
-                    {"name": "repair_type_name", "type": "STR"},
-                    {"name": "contractor_id", "type": "INT"},
-                ],
-            },
-        )
-        client.post(
-            "/nodes/municipality/table/",
-            json={
-                "database_name": "roads",
-                "catalog_name": "public",
-                "cost": 0.1,
-                "schema": "roads",
-                "table": "municipality",
-                "columns": [
-                    {"name": "municipality_id", "type": "STR"},
-                    {"name": "contact_name", "type": "STR"},
-                    {"name": "contact_title", "type": "STR"},
-                    {"name": "local_region", "type": "STR"},
-                    {"name": "phone", "type": "STR"},
-                    {"name": "state_id", "type": "INT"},
-                ],
-            },
-        )
-        client.post(
-            "/nodes/municipality_municipality_type/table/",
-            json={
-                "database_name": "roads",
-                "catalog_name": "public",
-                "cost": 0.1,
-                "schema": "roads",
-                "table": "municipality_municipality_type",
-                "columns": [
-                    {"name": "municipality_id", "type": "STR"},
-                    {"name": "municipality_type_id", "type": "STR"},
-                ],
-            },
-        )
-        client.post(
-            "/nodes/municipality_type/table/",
-            json={
-                "database_name": "roads",
-                "catalog_name": "public",
-                "cost": 0.1,
-                "schema": "roads",
-                "table": "municipality_type",
-                "columns": [
-                    {"name": "municipality_type_id", "type": "STR"},
-                    {"name": "municipality_type_desc", "type": "STR"},
-                ],
-            },
-        )
-        client.post(
-            "/nodes/dispatchers/table/",
-            json={
-                "database_name": "roads",
-                "catalog_name": "public",
-                "cost": 0.1,
-                "schema": "roads",
-                "table": "dispatchers",
-                "columns": [
-                    {"name": "dispatcher_id", "type": "INT"},
-                    {"name": "company_name", "type": "STR"},
-                    {"name": "phone", "type": "STR"},
-                ],
-            },
-        )
-        client.post(
-            "/nodes/us_region/table/",
-            json={
-                "database_name": "roads",
-                "catalog_name": "public",
-                "cost": 0.1,
-                "schema": "roads",
-                "table": "us_region",
-                "columns": [
-                    {"name": "us_region_id", "type": "INT"},
-                    {"name": "us_region_description", "type": "STR"},
-                ],
-            },
-        )
-        client.post(
-            "/nodes/us_states/table/",
-            json={
-                "database_name": "roads",
-                "catalog_name": "public",
-                "cost": 0.1,
-                "schema": "roads",
-                "table": "us_states",
-                "columns": [
-                    {"name": "state_id", "type": "INT"},
-                    {"name": "state_name", "type": "STR"},
-                    {"name": "state_abbr", "type": "STR"},
-                    {"name": "state_region", "type": "INT"},
-                ],
-            },
-        )
-        client.post(
-            "/nodes/hard_hat_state/table/",
-            json={
-                "database_name": "roads",
-                "catalog_name": "public",
-                "cost": 0.1,
-                "schema": "roads",
-                "table": "hard_hat_state",
-                "columns": [
-                    {"name": "hard_hat_id", "type": "INT"},
-                    {"name": "state_id", "type": "STR"},
-                ],
-            },
-        )
-        client.post(
-            "/nodes/hard_hats/table/",
-            json={
-                "database_name": "roads",
-                "catalog_name": "public",
-                "cost": 0.1,
-                "schema": "roads",
-                "table": "hard_hats",
-                "columns": [
-                    {"name": "hard_hat_id", "type": "INT"},
-                    {"name": "last_name", "type": "STR"},
-                    {"name": "first_name", "type": "STR"},
-                    {"name": "title", "type": "STR"},
-                    {"name": "birth_date", "type": "DATETIME"},
-                    {"name": "hire_date", "type": "DATETIME"},
-                    {"name": "address", "type": "STR"},
-                    {"name": "city", "type": "STR"},
-                    {"name": "state", "type": "STR"},
-                    {"name": "postal_code", "type": "STR"},
-                    {"name": "country", "type": "STR"},
-                    {"name": "manager", "type": "INT"},
-                    {"name": "contractor_id", "type": "INT"},
-                ],
-            },
-        )
-        client.post(
-            "/nodes/contractors/table/",
-            json={
-                "database_name": "roads",
-                "catalog_name": "public",
-                "cost": 0.1,
-                "schema": "roads",
-                "table": "contractors",
-                "columns": [
-                    {"name": "contractor_id", "type": "INT"},
-                    {"name": "company_name", "type": "STR"},
-                    {"name": "contact_name", "type": "STR"},
-                    {"name": "contact_title", "type": "STR"},
-                    {"name": "address", "type": "STR"},
-                    {"name": "city", "type": "STR"},
-                    {"name": "state", "type": "STR"},
-                    {"name": "postal_code", "type": "STR"},
-                    {"name": "country", "type": "STR"},
-                    {"name": "phone", "type": "STR"},
-                ],
-            },
-        )
+        # client.post(
+        #     "/nodes/repair_orders/table/",
+        #     json={
+        #         "database_name": "roads",
+        #         "catalog_name": "public",
+        #         "cost": 0.1,
+        #         "schema": "roads",
+        #         "table": "repair_orders",
+        #         "columns": [
+        #             {"name": "repair_order_id", "type": "INT"},
+        #             {"name": "municipality_id", "type": "STR"},
+        #             {"name": "hard_hat_id", "type": "INT"},
+        #             {"name": "order_date", "type": "DATETIME"},
+        #             {"name": "required_date", "type": "DATETIME"},
+        #             {"name": "dispatched_date", "type": "DATETIME"},
+        #             {"name": "dispatcher_id", "type": "INT"},
+        #         ],
+        #     },
+        # )
+        # client.post(
+        #     "/nodes/repair_order_details/table/",
+        #     json={
+        #         "database_name": "roads",
+        #         "catalog_name": "public",
+        #         "cost": 0.1,
+        #         "schema": "roads",
+        #         "table": "repair_order_details",
+        #         "columns": [
+        #             {"name": "repair_order_id", "type": "INT"},
+        #             {"name": "repair_type_id", "type": "INT"},
+        #             {"name": "price", "type": "FLOAT"},
+        #             {"name": "quantity", "type": "INT"},
+        #             {"name": "discount", "type": "FLOAT"},
+        #         ],
+        #     },
+        # )
+        # client.post(
+        #     "/nodes/repair_type/table/",
+        #     json={
+        #         "database_name": "roads",
+        #         "catalog_name": "public",
+        #         "cost": 0.1,
+        #         "schema": "roads",
+        #         "table": "repair_type",
+        #         "columns": [
+        #             {"name": "repair_type_id", "type": "INT"},
+        #             {"name": "repair_type_name", "type": "STR"},
+        #             {"name": "contractor_id", "type": "INT"},
+        #         ],
+        #     },
+        # )
+        # client.post(
+        #     "/nodes/municipality/table/",
+        #     json={
+        #         "database_name": "roads",
+        #         "catalog_name": "public",
+        #         "cost": 0.1,
+        #         "schema": "roads",
+        #         "table": "municipality",
+        #         "columns": [
+        #             {"name": "municipality_id", "type": "STR"},
+        #             {"name": "contact_name", "type": "STR"},
+        #             {"name": "contact_title", "type": "STR"},
+        #             {"name": "local_region", "type": "STR"},
+        #             {"name": "phone", "type": "STR"},
+        #             {"name": "state_id", "type": "INT"},
+        #         ],
+        #     },
+        # )
+        # client.post(
+        #     "/nodes/municipality_municipality_type/table/",
+        #     json={
+        #         "database_name": "roads",
+        #         "catalog_name": "public",
+        #         "cost": 0.1,
+        #         "schema": "roads",
+        #         "table": "municipality_municipality_type",
+        #         "columns": [
+        #             {"name": "municipality_id", "type": "STR"},
+        #             {"name": "municipality_type_id", "type": "STR"},
+        #         ],
+        #     },
+        # )
+        # client.post(
+        #     "/nodes/municipality_type/table/",
+        #     json={
+        #         "database_name": "roads",
+        #         "catalog_name": "public",
+        #         "cost": 0.1,
+        #         "schema": "roads",
+        #         "table": "municipality_type",
+        #         "columns": [
+        #             {"name": "municipality_type_id", "type": "STR"},
+        #             {"name": "municipality_type_desc", "type": "STR"},
+        #         ],
+        #     },
+        # )
+        # client.post(
+        #     "/nodes/dispatchers/table/",
+        #     json={
+        #         "database_name": "roads",
+        #         "catalog_name": "public",
+        #         "cost": 0.1,
+        #         "schema": "roads",
+        #         "table": "dispatchers",
+        #         "columns": [
+        #             {"name": "dispatcher_id", "type": "INT"},
+        #             {"name": "company_name", "type": "STR"},
+        #             {"name": "phone", "type": "STR"},
+        #         ],
+        #     },
+        # )
+        # client.post(
+        #     "/nodes/us_region/table/",
+        #     json={
+        #         "database_name": "roads",
+        #         "catalog_name": "public",
+        #         "cost": 0.1,
+        #         "schema": "roads",
+        #         "table": "us_region",
+        #         "columns": [
+        #             {"name": "us_region_id", "type": "INT"},
+        #             {"name": "us_region_description", "type": "STR"},
+        #         ],
+        #     },
+        # )
+        # client.post(
+        #     "/nodes/us_states/table/",
+        #     json={
+        #         "database_name": "roads",
+        #         "catalog_name": "public",
+        #         "cost": 0.1,
+        #         "schema": "roads",
+        #         "table": "us_states",
+        #         "columns": [
+        #             {"name": "state_id", "type": "INT"},
+        #             {"name": "state_name", "type": "STR"},
+        #             {"name": "state_abbr", "type": "STR"},
+        #             {"name": "state_region", "type": "INT"},
+        #         ],
+        #     },
+        # )
+        # client.post(
+        #     "/nodes/hard_hat_state/table/",
+        #     json={
+        #         "database_name": "roads",
+        #         "catalog_name": "public",
+        #         "cost": 0.1,
+        #         "schema": "roads",
+        #         "table": "hard_hat_state",
+        #         "columns": [
+        #             {"name": "hard_hat_id", "type": "INT"},
+        #             {"name": "state_id", "type": "STR"},
+        #         ],
+        #     },
+        # )
+        # client.post(
+        #     "/nodes/hard_hats/table/",
+        #     json={
+        #         "database_name": "roads",
+        #         "catalog_name": "public",
+        #         "cost": 0.1,
+        #         "schema": "roads",
+        #         "table": "hard_hats",
+        #         "columns": [
+        #             {"name": "hard_hat_id", "type": "INT"},
+        #             {"name": "last_name", "type": "STR"},
+        #             {"name": "first_name", "type": "STR"},
+        #             {"name": "title", "type": "STR"},
+        #             {"name": "birth_date", "type": "DATETIME"},
+        #             {"name": "hire_date", "type": "DATETIME"},
+        #             {"name": "address", "type": "STR"},
+        #             {"name": "city", "type": "STR"},
+        #             {"name": "state", "type": "STR"},
+        #             {"name": "postal_code", "type": "STR"},
+        #             {"name": "country", "type": "STR"},
+        #             {"name": "manager", "type": "INT"},
+        #             {"name": "contractor_id", "type": "INT"},
+        #         ],
+        #     },
+        # )
+        # client.post(
+        #     "/nodes/contractors/table/",
+        #     json={
+        #         "database_name": "roads",
+        #         "catalog_name": "public",
+        #         "cost": 0.1,
+        #         "schema": "roads",
+        #         "table": "contractors",
+        #         "columns": [
+        #             {"name": "contractor_id", "type": "INT"},
+        #             {"name": "company_name", "type": "STR"},
+        #             {"name": "contact_name", "type": "STR"},
+        #             {"name": "contact_title", "type": "STR"},
+        #             {"name": "address", "type": "STR"},
+        #             {"name": "city", "type": "STR"},
+        #             {"name": "state", "type": "STR"},
+        #             {"name": "postal_code", "type": "STR"},
+        #             {"name": "country", "type": "STR"},
+        #             {"name": "phone", "type": "STR"},
+        #         ],
+        #     },
+        # )
         client.post(
             (
                 "/nodes/repair_order_details/columns/repair_order_id/"

@@ -94,74 +94,6 @@ def get_query_service_client() -> Optional[QueryServiceClient]:
     return QueryServiceClient(settings.query_service)
 
 
-def get_name_from_path(repository: Path, path: Path) -> str:
-    """
-    Compute the name of a node given its path and the repository path.
-    """
-    # strip anything before the repository
-    relative_path = path.relative_to(repository)
-
-    if len(relative_path.parts) < 2 or relative_path.parts[0] not in {
-        "nodes",
-        "databases",
-    }:
-        raise Exception(f"Invalid path: {path}")
-
-    # remove the "nodes" directory from the path
-    relative_path = relative_path.relative_to(relative_path.parts[0])
-
-    # remove extension
-    relative_path = relative_path.with_suffix("")
-
-    # encode percent symbols and periods
-    encoded = (
-        str(relative_path)
-        .replace("%", "%25")
-        .replace(".", "%2E")
-        .replace(os.path.sep, ".")
-    )
-
-    return encoded
-
-
-def get_more_specific_type(
-    current_type: Optional[ColumnType],
-    new_type: ColumnType,
-) -> ColumnType:
-    """
-    Given two types, return the most specific one.
-
-    Different databases might store the same column as different types. For example, Hive
-    might store timestamps as strings, while Postgres would store the same data as a
-    datetime.
-
-        >>> get_more_specific_type(ColumnType.STR, ColumnType.TIMESTAMP)
-        'TIMESTAMP'
-        >>> get_more_specific_type(ColumnType.STR, ColumnType.INT)
-        'INT'
-
-    """
-    if current_type is None:
-        return new_type
-
-    hierarchy = [
-        ColumnType.BYTES,
-        ColumnType.STR,
-        ColumnType.FLOAT,
-        ColumnType.INT,
-        ColumnType.DECIMAL,
-        ColumnType.BOOL,
-        ColumnType.TIMESTAMP,
-        ColumnType.DATE,
-        ColumnType.TIME,
-        ColumnType.TIMEDELTA,
-        ColumnType.ARRAY,
-        ColumnType.MAP,
-    ]
-
-    return sorted([current_type, new_type], key=hierarchy.index)[1]
-
-
 def get_issue_url(
     baseurl: URL = URL("https://github.com/DataJunction/dj/issues/new"),
     title: Optional[str] = None,
@@ -181,24 +113,6 @@ def get_issue_url(
     query_arguments = {k: v for k, v in query_arguments.items() if v is not None}
 
     return baseurl % query_arguments
-
-
-def str_representer(dumper: yaml.representer.SafeRepresenter, data: str):
-    """
-    Multiline string presenter for Node yaml printing.
-
-    Source: https://stackoverflow.com/questions/8640959/how-can-i-control-what-scalar-form-pyyaml-uses-for-my-data
-    """
-    if len(data.splitlines()) > 1:  # check for multiline string
-        return dumper.represent_scalar("tag:yaml.org,2002:str", data, style="|")
-    return dumper.represent_scalar("tag:yaml.org,2002:str", data)
-
-
-def sql_format(sql: str) -> str:
-    """
-    Let's pick one way to format SQL strings.
-    """
-    return sqlparse.format(sql, reindent=True, keyword_case="upper")
 
 
 class UTCDatetime(datetime.datetime):

@@ -22,7 +22,7 @@ from dj.models.catalog import Catalog
 from dj.models.column import Column, ColumnYAML
 from dj.models.database import Database
 from dj.models.engine import Engine, EngineInfo
-from dj.models.table import Table, TableNodeRevision, TableYAML
+# from dj.models.table import Table, TableNodeRevision, TableYAML
 from dj.models.tag import Tag, TagNodeRelationship
 from dj.sql.parse import is_metric
 from dj.typing import ColumnType
@@ -149,7 +149,6 @@ class NodeYAML(TypedDict, total=False):
     type: NodeType
     query: str
     columns: Dict[str, ColumnYAML]
-    tables: Dict[str, List[TableYAML]]
 
 
 class NodeBase(BaseSQLModel):
@@ -336,6 +335,10 @@ class NodeRevision(NodeRevisionBase, table=True):  # type: ignore
     version: Optional[str] = Field(default=str(DEFAULT_DRAFT_VERSION))
     node_id: Optional[int] = Field(foreign_key="node.id")
     node: Node = Relationship(back_populates="revisions")
+    catalog_id: Optional[int] = Field(default=None, foreign_key="catalog.id")
+    catalog: Optional[Catalog] = Relationship(back_populates="node_revisions")
+    schema_: Optional[str] = None
+    table: Optional[str] = None
     cube_elements: List["Node"] = Relationship(  # Only used by cube nodes
         back_populates="cubes",
         link_model=CubeRelationship,
@@ -349,16 +352,6 @@ class NodeRevision(NodeRevisionBase, table=True):  # type: ignore
     updated_at: UTCDatetime = Field(
         sa_column=SqlaColumn(DateTime(timezone=True)),
         default_factory=partial(datetime.now, timezone.utc),
-    )
-
-    tables: List[Table] = Relationship(
-        back_populates="node",
-        link_model=TableNodeRevision,
-        sa_relationship_kwargs={
-            "primaryjoin": "NodeRevision.id==TableNodeRevision.node_revision_id",
-            "secondaryjoin": "Table.id==TableNodeRevision.table_id",
-            "cascade": "all, delete",
-        },
     )
 
     parents: List["Node"] = Relationship(
@@ -408,31 +401,6 @@ class NodeRevision(NodeRevisionBase, table=True):  # type: ignore
     materialization_configs: List[MaterializationConfig] = Relationship(
         back_populates="node_revision",
     )
-
-    def to_yaml(self) -> NodeYAML:
-        """
-        Serialize the node for YAML.
-
-        This is used to update the original configuration with information about columns.
-        """
-        tables = defaultdict(list)
-        for table in self.tables:  # pylint: disable=not-an-iterable
-            tables[table.database.name].append(table.to_yaml())
-
-        data = {
-            "description": self.description,
-            "display_name": self.display_name,
-            "type": self.type.value,  # pylint: disable=no-member
-            "query": self.query,
-            "columns": {
-                column.name: column.to_yaml()
-                for column in self.columns  # pylint: disable=not-an-iterable
-            },
-            "tables": dict(tables),
-        }
-        filtered = {key: value for key, value in data.items() if value}
-
-        return cast(NodeYAML, filtered)
 
     def __hash__(self) -> int:
         return hash(self.id)
@@ -501,6 +469,9 @@ class SourceNodeFields(BaseSQLModel):
     Source node fields that can be changed.
     """
 
+    catalog: str
+    schema_: str
+    table: str
     columns: Dict[str, SourceNodeColumnType]
 
 
@@ -655,11 +626,13 @@ class NodeRevisionOutput(SQLModel):
     version: str
     status: NodeStatus
     mode: NodeMode
+    catalog: Optional[Catalog]
+    schema_: Optional[str]
+    table: Optional[str]
     description: str = ""
     query: Optional[str] = None
     availability: Optional[AvailabilityState] = None
     columns: List[ColumnOutput]
-    tables: List[TableOutput]
     updated_at: UTCDatetime
     materialization_configs: List[MaterializationConfigOutput]
 

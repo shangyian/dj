@@ -81,7 +81,6 @@ async def read_metrics_sql(
         check_database_online=check_database_online,
     )
     return TranslatedSQL(
-        database_id=optimal_database.id,
         sql=str(query_ast),
     )
 

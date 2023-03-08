@@ -153,45 +153,7 @@ async def get_cheapest_online_database(
     it's offline, it will try to wait until the second fastest, and so on. After waiting
     for ``settings.do_ping_timeout`` it will return the fastest database that is online.
     """
-    # sort by cheapest
-    sorted_databases = sorted(databases, key=operator.attrgetter("cost"))
-    if not check_database_online and sorted_databases:
-        return sorted_databases[0]
-
-    # create tasks to ping all of the databases in parallel
-    pings = [asyncio.create_task(database.do_ping()) for database in sorted_databases]
-    pending = set(pings)
-
-    loop = asyncio.get_running_loop()
-    start = loop.time()
-    while True:
-        # as soon as a ping returns, check if it's the fastest database and if it's online
-        timeout = settings.do_ping_timeout.total_seconds() - (loop.time() - start)
-        done, pending = await asyncio.wait(
-            pending,
-            timeout=timeout,
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-
-        # if no tasks were done it means we timed out
-        timed_out = not done
-
-        for ping, database in zip(pings, sorted_databases):
-            if not ping.done():
-                if timed_out:
-                    # if we did timeout, continue to the next database, trying to find one
-                    # that's online
-                    continue
-
-                # if we didn't timeout, break and wait until the next ping returns
-                break
-
-            if ping.result():
-                # database is online!
-                return database
-
-        else:
-            raise DJException(message="No active database was found")
+    return {0}
 
 
 def get_referenced_columns_from_sql(

@@ -108,7 +108,6 @@ async def read_metrics_sql(  # pylint: disable=R0913
 
     return TranslatedSQL.from_pydantic(  # type: ignore
         TranslatedSQL_(
-            database_id=create_query.database_id,
             sql=create_query.submitted_query,
         ),
     )

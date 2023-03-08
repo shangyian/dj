@@ -18,7 +18,6 @@ from dj.api import (
     catalogs,
     cubes,
     data,
-    databases,
     engines,
     health,
     metrics,
@@ -53,7 +52,6 @@ app = FastAPI(
     dependencies=[Depends(default_attribute_types)],
 )
 app.include_router(catalogs.router)
-app.include_router(databases.router)
 app.include_router(engines.router)
 app.include_router(metrics.router)
 app.include_router(query.router)

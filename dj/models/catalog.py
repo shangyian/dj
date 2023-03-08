@@ -17,6 +17,7 @@ from dj.utils import UTCDatetime
 
 if TYPE_CHECKING:
     from dj.models import Table
+    from dj.models import NodeRevision
 
 
 class CatalogEngines(BaseSQLModel, table=True):  # type: ignore
@@ -51,10 +52,7 @@ class Catalog(BaseSQLModel, table=True):  # type: ignore
             "secondaryjoin": "Engine.id==CatalogEngines.engine_id",
         },
     )
-    tables: List["Table"] = Relationship(
-        back_populates="catalog",
-        sa_relationship_kwargs={"cascade": "all, delete"},
-    )
+    node_revisions: List["NodeRevision"] = Relationship(back_populates="catalog")
     created_at: UTCDatetime = Field(
         sa_column=SqlaColumn(DateTime(timezone=True)),
         default_factory=partial(datetime.now, timezone.utc),

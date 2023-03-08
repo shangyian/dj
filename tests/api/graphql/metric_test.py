@@ -218,7 +218,6 @@ def test_read_metrics_sql(
     query = """
     {
         readMetricsSql(nodeName: "a-metric"){
-            databaseId
             sql
         }
     }
@@ -227,7 +226,7 @@ def test_read_metrics_sql(
     response = client.post("/graphql", json={"query": query})
     assert response.json() == {
         "data": {
-            "readMetricsSql": {"databaseId": 1, "sql": "SELECT COUNT(*) FROM my_table"},
+            "readMetricsSql": {"sql": "SELECT COUNT(*) FROM my_table"},
         },
     }
 
