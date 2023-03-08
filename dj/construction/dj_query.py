@@ -2,12 +2,11 @@
 Functions for making queries directly against DJ
 """
 
-from functools import reduce
 from typing import List, Optional, Set, Tuple, cast
 
 from sqlmodel import Session
 
-from dj.construction.build import build_ast_for_database
+from dj.construction.build import build_ast
 from dj.construction.utils import amenable_name, get_dj_node, make_name
 from dj.errors import DJException
 from dj.models.database import Database
@@ -146,14 +145,7 @@ def _hoist_metric_source_tables(
                 ast.Join(
                     ast.JoinKind.LeftOuter,
                     table.alias_or_self().copy(),
-                    on=reduce(
-                        lambda left, right: ast.BinaryOp(
-                            ast.BinaryOpKind.And,
-                            left,
-                            right,
-                        ),
-                        ons,
-                    ),
+                    on=ast.BinaryOp.And(*ons),
                 ),
             )
     return joins
@@ -182,8 +174,7 @@ def _source_column_join_on_expression(
     """
     ons = []
     ons.append(
-        ast.BinaryOp(
-            ast.BinaryOpKind.Eq,
+        ast.BinaryOp.Eq(
             ast.Column(
                 ast.Name(src_col.name.name),
                 _table=metric_table_expression,
@@ -203,12 +194,11 @@ def _label_dimension_nodes(session, col):
         col.set_api_column(True)
 
 
-async def build_dj_metric_query(  # pylint: disable=R0914,R0912
+def build_dj_metric_query(  # pylint: disable=R0914,R0912
     session: Session,
     query: str,
     dialect: Optional[str] = None,
-    database_id: Optional[int] = None,
-) -> Tuple[ast.Query, Database]:
+) -> ast.Query:
     """
     Build a dj query in SQL that may include dj metrics
     """
@@ -223,9 +213,8 @@ async def build_dj_metric_query(  # pylint: disable=R0914,R0912
     for col in select.find_all(ast.Column):
         _label_dimension_nodes(session, col)
 
-    return await build_ast_for_database(
+    return build_ast(
         session,
         query=ast.Query(select),
-        dialect=dialect,
-        database_id=database_id,
+        build_criteria=None,
     )

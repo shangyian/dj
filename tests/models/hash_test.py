@@ -24,12 +24,6 @@ def test_hash() -> None:
 
     table = Table(id=1, database=database, table="table")
     assert table in {table}
-    assert table.to_yaml() == {
-        "catalog": None,
-        "schema": None,
-        "table": "table",
-        "cost": 1.0,
-    }
 
     column = Column(id=1, name="test", type=ColumnType.INT, table=table)
     assert column in {column}

@@ -9,8 +9,7 @@ from sqlmodel import Session
 from dj.construction.compile import CompoundBuildException, make_name
 from dj.errors import DJException
 from dj.models.node import NodeRevision, NodeType
-from dj.sql.parsing import ast
-from dj.sql.parsing.backends.sqloxide import parse
+from dj.sql.parsing import ast, parse
 
 
 def extract_dependencies_from_query_ast(
@@ -18,11 +17,28 @@ def extract_dependencies_from_query_ast(
     query: ast.Query,
     raise_: bool = True,
 ) -> Tuple[ast.Query, Dict[NodeRevision, List[ast.Table]], Dict[str, List[ast.Table]]]:
-    """Find all dependencies in a compiled query"""
+    """Find all dependencies in a query"""
     CompoundBuildException().reset()
     CompoundBuildException().set_raise(False)
 
     query.compile(session)
+
+    CompoundBuildException().reset()
+
+    extractions = extract_dependencies_from_compiled_query_ast(query)
+
+    if CompoundBuildException().errors and raise_:
+        raise DJException(
+            message=f"Cannot extract dependencies from query `{query}`",
+            errors=CompoundBuildException().errors,
+        )
+    return extractions
+
+
+def extract_dependencies_from_compiled_query_ast(
+    query: ast.Query,
+) -> Tuple[ast.Query, Dict[NodeRevision, List[ast.Table]], Dict[str, List[ast.Table]]]:
+    """Find all dependencies in a compiled query"""
     deps: Dict[NodeRevision, List[ast.Table]] = {}
     danglers: Dict[str, List[ast.Table]] = {}
     for table in query.find_all(ast.Table):
@@ -40,13 +56,6 @@ def extract_dependencies_from_query_ast(
                 if node.type == NodeType.DIMENSION:
                     deps[node] = deps.get(node, [])
                     deps[node].append(col.table)
-
-    if CompoundBuildException().errors and raise_:
-        raise DJException(
-            message=f"Cannot extract dependencies from query `{query}`",
-            errors=CompoundBuildException().errors,
-        )
-    CompoundBuildException().reset()
 
     return query, deps, danglers
 

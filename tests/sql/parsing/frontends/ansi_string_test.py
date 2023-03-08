@@ -15,7 +15,7 @@ from dj.sql.parsing.ast import (
     Select,
     Table,
 )
-from dj.sql.parsing.backends.sqloxide import parse
+from dj.sql.parsing import parse
 from dj.sql.parsing.frontends.string import sql
 from tests.sql.utils import TPCDS_QUERY_SET, compare_query_strings, read_query
 

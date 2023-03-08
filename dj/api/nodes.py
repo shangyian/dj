@@ -16,7 +16,6 @@ from dj.api.helpers import (
     get_attribute_type,
     get_catalog,
     get_column,
-    get_database_by_name,
     get_downstream_nodes,
     get_engine,
     get_node_by_name,
@@ -25,7 +24,7 @@ from dj.api.helpers import (
     validate_node_data,
 )
 from dj.api.tags import get_tag_by_name
-from dj.errors import DJDoesNotExistException, DJException
+from dj.errors import DJDoesNotExistException, DJInvalidInputException, DJException
 from dj.models import ColumnAttribute, Table
 from dj.models.attribute import UniquenessScope
 from dj.models.base import generate_display_name
@@ -53,7 +52,7 @@ from dj.models.node import (
 )
 from dj.models.table import CreateTable
 from dj.service_clients import QueryServiceClient
-from dj.sql.parsing.backends.sqloxide import parse
+from dj.sql.parsing import parse
 from dj.utils import Version, VersionUpgrade, get_query_service_client, get_session
 
 _logger = logging.getLogger(__name__)
@@ -320,13 +319,12 @@ def list_node_revisions(
 
 
 def create_node_revision(
-    data: Union[CreateNode],
+    data: CreateNode,
     session: Session,
 ) -> NodeRevision:
     """
     Create a non-source node revision.
     """
-
     node_revision = NodeRevision.parse_obj(data)
     (
         validated_node,
@@ -343,9 +341,9 @@ def create_node_revision(
     ]
     new_parents = [node.name for node in dependencies_map]
     catalog_ids = [node.catalog_id for node in dependencies_map]
-    if not len(set(catalog_ids)) == 1:
+    if node_revision.mode == NodeMode.PUBLISHED and not len(set(catalog_ids)) == 1:
         raise DJException(f"Cannot create nodes with multi-catalog dependencies: {set(catalog_ids)}")
-    catalog_id = catalog_ids[0]  # find the catalog
+    catalog_id = next(iter(catalog_ids), "draft")
     parent_refs = session.exec(
         select(Node).where(
             # pylint: disable=no-member
@@ -369,7 +367,7 @@ def create_node_revision(
 
 def create_cube_node_revision(
     session: Session,
-    data: Union[CreateCubeNode],
+    data: CreateCubeNode,
 ) -> NodeRevision:
     """
     Create a cube node revision.
@@ -409,7 +407,9 @@ def create_cube_node_revision(
         )
     if len(set(catalogs)) != 1:
         raise DJException(
-            message=(f"Cannot create cube using nodes from multiple catalogs: {catalogs}")
+            message=(
+                f"Cannot create cube using nodes from multiple catalogs: {catalogs}"
+            ),
         )
     return NodeRevision(
         name=data.name,
@@ -439,13 +439,12 @@ def create_node(
     raise_on_query_not_allowed(data)
 
     if data.type == NodeType.SOURCE:
-        try:
-            catalog = get_catalog(session=session, name=data.catalog)
-        except AttributeError as exc:
-            raise DJException(
+        if not data.schema_ or not data.table or not data.catalog:
+            raise DJInvalidInputException(
                 f"Nodes of type `{NodeType.SOURCE}` must have `catalog`, "
-                "`schema_`, and `table` set"
-            ) from exc
+                "`schema_`, and `table` set",
+            )
+        catalog = get_catalog(session=session, name=data.catalog)
         node_revision = NodeRevision(
             name=data.name,
             display_name=data.display_name
@@ -455,7 +454,7 @@ def create_node(
             type=data.type,
             status=NodeStatus.VALID,
             catalog_id=catalog.id,
-            schema_=data.schema,
+            schema_=data.schema_,
             table=data.table,
             columns=[
                 Column(
@@ -488,7 +487,7 @@ def create_node(
         session=session,
         node_revision=node,
     )
-    propagate_valid_status(session=session, valid_nodes=newly_valid_nodes)
+    propagate_valid_status(session=session, valid_nodes=newly_valid_nodes, catalog_id=node.current.catalog_id)
     session.refresh(node.current)
     return node  # type: ignore
 
@@ -518,7 +517,7 @@ def add_dimension_to_node(
             message=(
                 "Cannot add dimension to column, dimensions do not match: "
                 f"{node.current.catalog.name}, {dimension_node.current.catalog.name}"
-            )
+            ),
         )
     if dimension_column:  # Check that the column exists before linking
         get_column(dimension_node.current, dimension_column)
@@ -634,7 +633,9 @@ def create_new_revision_from_existing(  # pylint: disable=too-many-locals
         ]
         if data and data.columns
         else old_revision.columns,
-        tables=old_revision.tables,
+        catalog=old_revision.catalog,
+        schema_=old_revision.schema_,
+        table=old_revision.table,
         parents=[],
         mode=data.mode if data and data.mode else old_revision.mode,
         materialization_configs=old_revision.materialization_configs,

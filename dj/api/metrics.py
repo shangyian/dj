@@ -57,7 +57,7 @@ def read_metric(name: str, *, session: Session = Depends(get_session)) -> Metric
 
 
 @router.get("/metrics/{name}/sql/", response_model=TranslatedSQL)
-async def read_metrics_sql(
+def read_metrics_sql(
     name: str,
     dimensions: List[str] = Query([]),
     filters: List[str] = Query([]),
@@ -72,7 +72,7 @@ async def read_metrics_sql(
     A database can be optionally specified. If no database is specified the optimal one
     will be used.
     """
-    query_ast, optimal_database = await get_query(
+    query_ast = get_query(
         session=session,
         metric=name,
         dimensions=dimensions,

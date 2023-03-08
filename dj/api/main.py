@@ -26,7 +26,6 @@ from dj.api import (
     tags,
 )
 from dj.api.attributes import default_attribute_types
-from dj.api.graphql.main import graphql_app
 from dj.errors import DJException
 from dj.models.catalog import Catalog
 from dj.models.column import Column
@@ -61,7 +60,6 @@ app.include_router(health.router)
 app.include_router(cubes.router)
 app.include_router(tags.router)
 app.include_router(attributes.router)
-app.include_router(graphql_app, prefix="/graphql")
 
 
 @app.exception_handler(DJException)

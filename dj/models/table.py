@@ -79,18 +79,6 @@ class Table(TableBase, table=True):  # type: ignore
 
     id: Optional[int] = Field(default=None, primary_key=True)
 
-    # node: "NodeRevision" = Relationship(
-    #     back_populates="tables",
-    #     link_model=TableNodeRevision,
-    #     sa_relationship_kwargs={
-    #         "primaryjoin": "Table.id==TableNodeRevision.table_id",
-    #         "secondaryjoin": "NodeRevision.id==TableNodeRevision.node_revision_id",
-    #     },
-    # )
-
-    # catalog_id: Optional[int] = Field(foreign_key="catalog.id")
-    # catalog: Optional["Catalog"] = Relationship(back_populates="tables")
-
     database_id: int = Field(foreign_key="database.id")
     database: "Database" = Relationship(back_populates="tables")
 
@@ -102,17 +90,6 @@ class Table(TableBase, table=True):  # type: ignore
             "cascade": "all, delete",
         },
     )
-
-    def to_yaml(self) -> TableYAML:
-        """
-        Serialize the table for YAML.
-        """
-        return {
-            "catalog": self.catalog,
-            "schema": self.schema_,
-            "table": self.table,
-            "cost": self.cost,
-        }
 
     def identifier(
         self,

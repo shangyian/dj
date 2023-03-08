@@ -17,7 +17,7 @@ from dj.errors import DJException
 from dj.models import Column, NodeRevision
 from dj.models.node import Node
 from dj.sql.parsing import ast
-from dj.sql.parsing.backends.sqloxide import parse
+from dj.sql.parsing import parse
 from dj.typing import ColumnType
 
 
@@ -77,15 +77,13 @@ def test_make_name(
     assert make_name(namespace, name) == expected_make_name
 
 
-def test_raise_on_dangling_refs_in_extract_dependencies(construction_session: Session):
+def test_missing_references(construction_session: Session):
     """
     Test getting dependencies from a query that has dangling references
     """
     query = parse("select a, b, c from does_not_exist")
-    with pytest.raises(DJException) as exc_info:
-        extract_dependencies_from_query_ast(session=construction_session, query=query)
-
-    assert "Cannot extract dependencies from query" in str(exc_info.value)
+    _, _, missing_references = extract_dependencies_from_query_ast(session=construction_session, query=query)
+    assert missing_references
 
 
 def test_catching_dangling_refs_in_extract_dependencies(construction_session: Session):

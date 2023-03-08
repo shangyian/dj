@@ -95,5 +95,5 @@ LEFT JOIN (SELECT  basic.comments.id,
  GROUP BY  age
     """
 
-    response = client.post("/query/validate", json={"sql": query})
+    response = client.get(f"/query/{query}")
     assert compare_query_strings(response.json()["sql"], expected)

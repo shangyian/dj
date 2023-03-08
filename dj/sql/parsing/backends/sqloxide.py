@@ -445,4 +445,6 @@ def parse(
                     func,
                     func.to_raw(lambda sub_sql, _: parse(sub_sql, dialect, False)),
                 )
+
+    query_ast.dialect = dialect
     return query_ast

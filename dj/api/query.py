@@ -14,18 +14,10 @@ from dj.utils import get_session
 router = APIRouter()
 
 
-class DJSQL(SQLModel):
-    """
-    Class for DJ SQL request.
-    """
 
-    database_name: Optional[str]
-    sql: str
-
-
-@router.post("/query/validate", response_model=TranslatedSQL)
-async def read_metrics_sql(
-    dj_sql: DJSQL,
+@router.get("/query/{sql}", response_model=TranslatedSQL)
+def read_metrics_sql(
+    sql: str,
     *,
     session: Session = Depends(get_session),
 ) -> TranslatedSQL:
@@ -35,14 +27,10 @@ async def read_metrics_sql(
     A database can be optionally specified. If no database is specified the optimal one
     will be used.
     """
-
-    query, database_name = dj_sql.sql, dj_sql.database_name
-    query_ast, optimal_database = await get_dj_query(
+    query_ast = get_dj_query(
         session=session,
-        query=query,
-        database_name=database_name,
+        query=sql,
     )
     return TranslatedSQL(
-        database_id=optimal_database.id,
         sql=str(query_ast),
     )

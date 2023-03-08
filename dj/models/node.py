@@ -3,10 +3,10 @@ Model for nodes.
 """
 # pylint: disable=too-many-instance-attributes
 import enum
-from collections import defaultdict
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import partial
-from typing import Dict, List, Optional, cast
+from typing import Dict, List, Optional
 
 from pydantic import BaseModel, Extra
 from pydantic import Field as PydanticField
@@ -22,6 +22,7 @@ from dj.models.catalog import Catalog
 from dj.models.column import Column, ColumnYAML
 from dj.models.database import Database
 from dj.models.engine import Engine, EngineInfo
+
 # from dj.models.table import Table, TableNodeRevision, TableYAML
 from dj.models.tag import Tag, TagNodeRelationship
 from dj.sql.parse import is_metric
@@ -30,6 +31,16 @@ from dj.utils import UTCDatetime, Version
 
 DEFAULT_DRAFT_VERSION = Version(major=0, minor=1)
 DEFAULT_PUBLISHED_VERSION = Version(major=1, minor=0)
+
+
+@dataclass(frozen=True)
+class BuildCriteria:
+    """
+    Criterion used for building
+        - used to deterimine whether to use an availability state
+    """
+
+    timestamp: Optional[UTCDatetime] = None
 
 
 class NodeRelationship(BaseSQLModel, table=True):  # type: ignore
@@ -243,6 +254,12 @@ class AvailabilityState(AvailabilityStateBase, table=True):  # type: ignore
         sa_column=SqlaColumn(DateTime(timezone=True)),
         default_factory=partial(datetime.now, timezone.utc),
     )
+
+    def is_available(self, criteria: Optional[BuildCriteria] = None) -> bool:
+        """
+        Determine whether an availability state is useable given criteria
+        """
+        return True
 
 
 class NodeAvailabilityState(BaseSQLModel, table=True):  # type: ignore
@@ -469,9 +486,9 @@ class SourceNodeFields(BaseSQLModel):
     Source node fields that can be changed.
     """
 
-    catalog: str
-    schema_: str
-    table: str
+    catalog: Optional[str] = ""
+    schema_: Optional[str] = ""
+    table: Optional[str] = ""
     columns: Dict[str, SourceNodeColumnType]
 
 

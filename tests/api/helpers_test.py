@@ -40,7 +40,7 @@ def test_propagate_valid_status(session: Session):
         staus=NodeStatus.INVALID,
     )
     with pytest.raises(DJException) as exc_info:
-        helpers.propagate_valid_status(session=session, valid_nodes=[invalid_node])
+        helpers.propagate_valid_status(session=session, valid_nodes=[invalid_node], catalog_id=1)
 
     assert "Cannot propagate valid status: Node `foo` is not valid" in str(
         exc_info.value,

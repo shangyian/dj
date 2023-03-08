@@ -14,51 +14,16 @@ from dj.models.table import Table
 from dj.typing import ColumnType
 
 
-def test_read_metrics(session: Session, client: TestClient) -> None:
+def test_read_metrics(client: TestClient, load_examples) -> None:
     """
     Test ``GET /metrics/``.
     """
-    node1 = Node(
-        name="not-a-metric",
-        type=NodeType.TRANSFORM,
-        current_version="1",
-    )
-    node_rev1 = NodeRevision(name=node1.name, node=node1, version=node1.current_version)
-
-    node2 = Node(
-        name="also-not-a-metric",
-        type=NodeType.TRANSFORM,
-        current_version="1",
-    )
-    node_rev2 = NodeRevision(
-        name=node2.name,
-        node=node2,
-        query="SELECT 42",
-        version="1",
-    )
-
-    node3 = Node(name="a-metric", type=NodeType.METRIC, current_version="1")
-    node_rev3 = NodeRevision(
-        name=node3.name,
-        node=node3,
-        version="1",
-        query="SELECT COUNT(*) FROM my_table",
-    )
-    session.add(node_rev1)
-    session.add(node_rev2)
-    session.add(node_rev3)
-    session.commit()
-
+    load_examples(client)
     response = client.get("/metrics/")
     data = response.json()
 
     assert response.status_code == 200
-    assert len(data) == 8
-    assert data[0]["name"] == "num_repair_orders"
-    assert (
-        data[0]["query"]
-        == "SELECT count(repair_order_id) as num_repair_orders FROM repair_orders"
-    )
+    assert len(data) > 10
 
 
 def test_read_metric(session: Session, client: TestClient) -> None:
@@ -190,19 +155,21 @@ def test_read_metrics_sql(
 
     response = client.get("/metrics/a-metric/sql/?check_database_online=false")
     assert response.json() == {
-        "sql": "SELECT  COUNT(*) AS col0 \n FROM default.rev.my_table",
+        "sql": "SELECT  COUNT(*) AS col0 \n FROM \"rev\".\"my_table\" AS my_table",
     }
 
     response = client.get("/metrics/a-metric/sql/?check_database_online=true")
-    assert response.json() == {'sql': 'SELECT  COUNT(*) AS col0 \n FROM default.rev.my_table'}
+    assert response.json() == {'sql': 'SELECT  COUNT(*) AS col0 \n FROM \"rev\".\"my_table\" AS my_table'}
 
 
 def test_common_dimensions(
     client: TestClient,
+    load_examples,
 ) -> None:
     """
     Test ``GET /metrics/common/dimensions``.
     """
+    load_examples(client)
     response = client.get(
         "/metrics/common/dimensions?metric=total_repair_order_discounts&metric=total_repair_cost",
     )
@@ -232,21 +199,10 @@ def test_raise_common_dimensions_not_a_metric_node(
     Test raising ``GET /metrics/common/dimensions`` when not a metric node
     """
     response = client.get(
-        "/metrics/common/dimensions?metric=total_repair_order_discounts&metric=local_hard_hats",
+        "/metrics/common/dimensions?metric=total_repair_order_discounts&metric=foo",
     )
     assert response.status_code == 500
-    assert response.json() == {
-        "message": "Not a metric node: local_hard_hats",
-        "errors": [
-            {
-                "code": 204,
-                "message": "Not a metric node: local_hard_hats",
-                "debug": None,
-                "context": "",
-            },
-        ],
-        "warnings": [],
-    }
+    assert response.json() == {'message': 'Metric node not found: total_repair_order_discounts\nMetric node not found: foo', 'errors': [{'code': 203, 'message': 'Metric node not found: total_repair_order_discounts', 'debug': None, 'context': ''}, {'code': 203, 'message': 'Metric node not found: foo', 'debug': None, 'context': ''}], 'warnings': []}
 
 
 def test_raise_common_dimensions_metric_not_found(

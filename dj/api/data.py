@@ -32,10 +32,11 @@ def add_availability(
     # Source nodes require that any availability states set are for one of the defined tables
     node_revision = node.current
     if data.catalog != node_revision.catalog.name:
-        raise DJException(f"Cannot set availability state in different catalog: {data.catalog}, {node_revision.catalog}")
+        raise DJException(
+            f"Cannot set availability state in different catalog: {data.catalog}, {node_revision.catalog}",
+        )
     if node.current.type == NodeType.SOURCE:
-        if ( node_revision.schema_ != data.schema_
-                or node_revision.table != data.table):
+        if node_revision.schema_ != data.schema_ or node_revision.table != data.table:
             raise DJException(
                 message=(
                     "Cannot set availability state, "
