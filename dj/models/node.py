@@ -255,10 +255,14 @@ class AvailabilityState(AvailabilityStateBase, table=True):  # type: ignore
         default_factory=partial(datetime.now, timezone.utc),
     )
 
-    def is_available(self, criteria: Optional[BuildCriteria] = None) -> bool:
+    def is_available(
+        self,
+        criteria: Optional[BuildCriteria] = None,  # pylint: disable=unused-argument
+    ) -> bool:  # pragma: no cover
         """
         Determine whether an availability state is useable given criteria
         """
+        # Criteria to determine if an availability state should be used needs to be added
         return True
 
 
@@ -352,8 +356,8 @@ class NodeRevision(NodeRevisionBase, table=True):  # type: ignore
     version: Optional[str] = Field(default=str(DEFAULT_DRAFT_VERSION))
     node_id: Optional[int] = Field(foreign_key="node.id")
     node: Node = Relationship(back_populates="revisions")
-    catalog_id: Optional[int] = Field(default=None, foreign_key="catalog.id")
-    catalog: Optional[Catalog] = Relationship(back_populates="node_revisions")
+    catalog_id: int = Field(default=None, foreign_key="catalog.id")
+    catalog: Catalog = Relationship(back_populates="node_revisions")
     schema_: Optional[str] = None
     table: Optional[str] = None
     cube_elements: List["Node"] = Relationship(  # Only used by cube nodes

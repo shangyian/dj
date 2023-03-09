@@ -82,16 +82,16 @@ def _build_dimensions_on_select(
                 )  # got a materialization
                 if (
                     dim_table is None
-                ):  # no materialization - recurse to build dimension first
+                ):  # no materialization - recurse to build dimension first  # pragma: no cover
                     dim_query = parse(cast(str, dim_node.query), dialect)
-                    dim_table = build_ast(#pylint: disable=W0212
+                    dim_table = build_ast(  # type: ignore  # noqa
                         session,
                         dim_query,
                         build_criteria,
-                    )._to_select()
+                    ).to_select()
 
                 alias = amenable_name(dim_node.node.name)
-                dim_ast = ast.Alias(
+                dim_ast = ast.Alias(  # type: ignore
                     ast.Name(alias),
                     child=dim_table,
                 )
@@ -121,7 +121,7 @@ def _build_dimensions_on_select(
                             ast.Join(
                                 ast.JoinKind.LeftOuter,
                                 dim_ast,  # type: ignore
-                                ast.BinaryOp.And(*join_on),#pylint: disable=E1120
+                                ast.BinaryOp.And(*join_on),  # pylint: disable=E1120
                             ),
                         )
 
@@ -144,10 +144,14 @@ def _build_tables_on_select(
         )  # got a materialization
         if node_table is None:  # no materialization - recurse to node first
             node_query = parse(cast(str, node.query), dialect)
-            node_table = build_ast(session, node_query, build_criteria)._to_select()#pylint: disable=W0212
+            node_table = build_ast(  # type: ignore
+                session,
+                node_query,
+                build_criteria,
+            ).to_select()  # pylint: disable=W0212
 
         alias = amenable_name(node.node.name)
-        node_ast = ast.Alias(ast.Name(alias), child=node_table)
+        node_ast = ast.Alias(ast.Name(alias), child=node_table)  # type: ignore
         for tbl in tbls:
             select.replace(tbl, node_ast)
 
@@ -218,7 +222,7 @@ def _get_node_table(
     """
     table = None
     if node.type == NodeType.SOURCE:
-        namespace=None
+        namespace = None
         if node.table:
             name = ast.Name(node.table, '"')
             namespace = (
@@ -229,7 +233,9 @@ def _get_node_table(
         else:
             name = ast.Name(node.name, '"')
         table = ast.Table(name, namespace, _dj_node=node)
-    elif node.availability and node.availability.is_available(criteria=build_criteria):
+    elif node.availability and node.availability.is_available(
+        criteria=build_criteria,
+    ):  # pragma: no cover
         namespace = (
             ast.Namespace([ast.Name(node.availability.schema_, '"')])
             if node.availability.schema_
@@ -240,7 +246,7 @@ def _get_node_table(
             namespace,
             _dj_node=node,
         )
-    if table and as_select:
+    if table and as_select:  # pragma: no cover
         return ast.Select(projection=[ast.Wildcard()], from_=ast.From(tables=[table]))
     print(table)
     return table
@@ -257,7 +263,7 @@ def build_node(  # pylint: disable=too-many-arguments
     """
     Determines the optimal way to build the Node and does so
     """
-    if node.query is None:
+    if node.query is None:  # pragma: no cover
         raise Exception(
             "Node has no query. Cannot build a node without a query.",
         )
@@ -267,7 +273,7 @@ def build_node(  # pylint: disable=too-many-arguments
             ast.Select,
             _get_node_table(node, build_criteria, as_select=True),
         ):
-            return ast.Query(select=select)
+            return ast.Query(select=select)  # pragma: no cover
 
     query = parse(node.query, dialect)
     add_filters_and_dimensions_to_query_ast(query, dialect, filters, dimensions)

@@ -14,17 +14,9 @@ def test_hash() -> None:
     """
     database = Database(id=1, name="test", URI="sqlite://")
     assert database in {database}
-    assert database.to_yaml() == {
-        "description": "",
-        "URI": "sqlite://",
-        "read-only": True,
-        "async_": False,
-        "cost": 1.0,
-    }
 
     table = Table(id=1, database=database, table="table")
     assert table in {table}
 
     column = Column(id=1, name="test", type=ColumnType.INT, table=table)
     assert column in {column}
-    assert column.to_yaml() == {"type": "INT"}

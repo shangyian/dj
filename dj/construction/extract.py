@@ -15,23 +15,13 @@ from dj.sql.parsing import ast, parse
 def extract_dependencies_from_query_ast(
     session: Session,
     query: ast.Query,
-    raise_: bool = True,
 ) -> Tuple[ast.Query, Dict[NodeRevision, List[ast.Table]], Dict[str, List[ast.Table]]]:
     """Find all dependencies in a query"""
     CompoundBuildException().reset()
     CompoundBuildException().set_raise(False)
-
     query.compile(session)
-
     CompoundBuildException().reset()
-
     extractions = extract_dependencies_from_compiled_query_ast(query)
-
-    if CompoundBuildException().errors and raise_:
-        raise DJException(
-            message=f"Cannot extract dependencies from query `{query}`",
-            errors=CompoundBuildException().errors,
-        )
     return extractions
 
 
@@ -64,19 +54,17 @@ def extract_dependencies_from_str_query(
     session: Session,
     query: str,
     dialect: Optional[str] = None,
-    raise_: bool = True,
 ) -> Tuple[ast.Query, Dict[NodeRevision, List[ast.Table]], Dict[str, List[ast.Table]]]:
     """Find all dependencies in the a string query"""
-    return extract_dependencies_from_query_ast(session, parse(query, dialect), raise_)
+    return extract_dependencies_from_query_ast(session, parse(query, dialect))
 
 
 def extract_dependencies_from_node(
     session: Session,
     node: NodeRevision,
     dialect: Optional[str] = None,
-    raise_: bool = True,
 ) -> Tuple[ast.Query, Dict[NodeRevision, List[ast.Table]], Dict[str, List[ast.Table]]]:
     """Find all immediate dependencies of a Node"""
     if node.query is None:
         raise DJException("Node has no query to extract from.")
-    return extract_dependencies_from_str_query(session, node.query, dialect, raise_)
+    return extract_dependencies_from_str_query(session, node.query, dialect)

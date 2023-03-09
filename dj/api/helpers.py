@@ -14,7 +14,7 @@ from dj.construction.dj_query import build_dj_metric_query
 from dj.construction.extract import extract_dependencies_from_node
 from dj.construction.inference import get_type_of_expression
 from dj.errors import DJError, DJException, ErrorCode
-from dj.models import AttributeType, Catalog, Column, Database, Engine
+from dj.models import AttributeType, Catalog, Column, Engine
 from dj.models.attribute import RESERVED_ATTRIBUTE_NAMESPACE
 from dj.models.node import (
     MissingParent,
@@ -61,20 +61,6 @@ def get_node_by_name(
                 http_status_code=404,
             )
     return node
-
-
-def get_database_by_name(session: Session, name: str) -> Database:
-    """
-    Get a database by name
-    """
-    statement = select(Database).where(Database.name == name)
-    database = session.exec(statement).one_or_none()
-    if not database:
-        raise DJException(
-            message=f"Database with name `{name}` does not exist.",
-            http_status_code=404,
-        )
-    return database
 
 
 def get_column(node: NodeRevision, column_name: str) -> Column:
@@ -130,8 +116,6 @@ def get_query(  # pylint: disable=too-many-arguments
     metric: str,
     dimensions: List[str],
     filters: List[str],
-    database_name: Optional[str] = None,
-    check_database_online: bool = True,
 ) -> ast.Query:
     """
     Get a query for a metric, dimensions, and filters
@@ -257,7 +241,6 @@ def validate_node_data(
         ) = extract_dependencies_from_node(
             session=session,
             node=validated_node,
-            raise_=False,
         )
     except ValueError as exc:
         raise DJException(message=str(exc)) from exc
@@ -345,7 +328,11 @@ def resolve_downstream_references(
     return newly_valid_nodes
 
 
-def propagate_valid_status(session: Session, valid_nodes: List[NodeRevision], catalog_id: int) -> None:
+def propagate_valid_status(
+    session: Session,
+    valid_nodes: List[NodeRevision],
+    catalog_id: int,
+) -> None:
     """
     Propagate a valid status by revalidating all downstream nodes
     """

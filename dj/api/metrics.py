@@ -3,7 +3,7 @@ Metric related APIs.
 """
 
 from http import HTTPStatus
-from typing import List, Optional
+from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.exc import NoResultFound
@@ -61,8 +61,6 @@ def read_metrics_sql(
     name: str,
     dimensions: List[str] = Query([]),
     filters: List[str] = Query([]),
-    database_name: Optional[str] = None,
-    check_database_online: bool = True,
     *,
     session: Session = Depends(get_session),
 ) -> TranslatedSQL:
@@ -77,8 +75,6 @@ def read_metrics_sql(
         metric=name,
         dimensions=dimensions,
         filters=filters,
-        database_name=database_name,
-        check_database_online=check_database_online,
     )
     return TranslatedSQL(
         sql=str(query_ast),

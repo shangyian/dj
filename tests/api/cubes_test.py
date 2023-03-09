@@ -132,3 +132,27 @@ def test_read_cube(client: TestClient, load_examples) -> None:
         "errors": [],
         "warnings": [],
     }
+
+
+def test_raise_on_cube_with_multiple_catalogs(
+    client: TestClient,
+    load_examples,
+) -> None:
+    """
+    Test raising when creating a cube with multiple catalogs
+    """
+    load_examples(client)
+    # Create a cube
+    response = client.post(
+        "/nodes/",
+        json={
+            "cube_elements": ["account_type", "basic.num_comments"],
+            "description": "multicatalog cube's raise an error",
+            "mode": "published",
+            "name": "multicatalog",
+            "type": "cube",
+        },
+    )
+    assert not response.ok
+    data = response.json()
+    assert "Cannot create cube using nodes from multiple catalogs" in data["message"]

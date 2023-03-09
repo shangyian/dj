@@ -6,9 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlmodel import Session, select
 
-from dj.models import Catalog, Table
-from dj.models.column import Column, ColumnType
-from dj.models.node import Node, NodeRevision, NodeType
+from dj.models.node import Node
 
 
 class TestAvailabilityState:  # pylint: disable=too-many-public-methods
@@ -63,6 +61,31 @@ class TestAvailabilityState:  # pylint: disable=too-many-public-methods
             "schema_": "accounting",
             "id": 1,
         }
+
+    def test_raising_if_availability_catalog_mismatch(
+        self,
+        client: TestClient,
+    ) -> None:
+        """
+        Test raising when the catalog does not match
+        """
+        response = client.post(
+            "/data/availability/large_revenue_payments_and_business_only/",
+            json={
+                "catalog": "public",
+                "schema_": "accounting",
+                "table": "pmts",
+                "valid_through_ts": 20230125,
+                "max_partition": ["2023", "01", "25"],
+                "min_partition": ["2022", "01", "01"],
+            },
+        )
+        data = response.json()
+
+        assert response.status_code == 500
+        assert data["message"] == (
+            "Cannot set availability state in different " "catalog: public, default"
+        )
 
     def test_setting_availability_state_multiple_times(
         self,
@@ -454,11 +477,11 @@ class TestAvailabilityState:  # pylint: disable=too-many-public-methods
 
         assert response.status_code == 500
         assert data == {
-            'message': (
+            "message": (
                 "Cannot set availability state, source nodes require availability states "
                 "match the set table: default.accounting.large_pmts does not match "
                 "default.accounting.revenue "
             ),
-            'errors': [],
-            'warnings': []
+            "errors": [],
+            "warnings": [],
         }

@@ -6,7 +6,6 @@ Tests for the metrics API.
 from fastapi.testclient import TestClient
 from sqlmodel import Session
 
-from dj.models import Catalog
 from dj.models.column import Column
 from dj.models.node import Node, NodeRevision, NodeType
 from dj.models.query import Database
@@ -123,13 +122,6 @@ def test_read_metrics_sql(
     database = Database(name="test", URI="blah://", tables=[])
 
     source_node = Node(name="my_table", type=NodeType.SOURCE, current_version="1")
-    table = Table(
-        table="my_table",
-        catalog=Catalog(name="basic"),
-        schema="rev",
-        database=database,
-        columns=[Column(name="one", type=ColumnType["STR"])],
-    )
     source_node_rev = NodeRevision(
         name=source_node.name,
         node=source_node,
@@ -153,13 +145,10 @@ def test_read_metrics_sql(
     session.add(source_node_rev)
     session.commit()
 
-    response = client.get("/metrics/a-metric/sql/?check_database_online=false")
+    response = client.get("/metrics/a-metric/sql/")
     assert response.json() == {
-        "sql": "SELECT  COUNT(*) AS col0 \n FROM \"rev\".\"my_table\" AS my_table",
+        "sql": 'SELECT  COUNT(*) AS col0 \n FROM "rev"."my_table" AS my_table',
     }
-
-    response = client.get("/metrics/a-metric/sql/?check_database_online=true")
-    assert response.json() == {'sql': 'SELECT  COUNT(*) AS col0 \n FROM \"rev\".\"my_table\" AS my_table'}
 
 
 def test_common_dimensions(
@@ -194,15 +183,17 @@ def test_common_dimensions(
 
 def test_raise_common_dimensions_not_a_metric_node(
     client: TestClient,
+    load_examples,
 ) -> None:
     """
     Test raising ``GET /metrics/common/dimensions`` when not a metric node
     """
+    load_examples(client)
     response = client.get(
-        "/metrics/common/dimensions?metric=total_repair_order_discounts&metric=foo",
+        "/metrics/common/dimensions?metric=total_repair_order_discounts&metric=payment_type",
     )
     assert response.status_code == 500
-    assert response.json() == {'message': 'Metric node not found: total_repair_order_discounts\nMetric node not found: foo', 'errors': [{'code': 203, 'message': 'Metric node not found: total_repair_order_discounts', 'debug': None, 'context': ''}, {'code': 203, 'message': 'Metric node not found: foo', 'debug': None, 'context': ''}], 'warnings': []}
+    assert response.json()["message"] == "Not a metric node: payment_type"
 
 
 def test_raise_common_dimensions_metric_not_found(

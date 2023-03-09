@@ -11,7 +11,6 @@ from yarl import URL
 
 from dj.config import Settings
 from dj.errors import DJException
-from dj.typing import ColumnType
 from dj.utils import (
     Version,
     get_engine,

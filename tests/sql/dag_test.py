@@ -2,12 +2,6 @@
 Tests for ``dj.sql.dag``.
 """
 
-from collections import defaultdict
-from typing import Dict, Set
-
-import pytest
-from pytest_mock import MockerFixture
-
 from dj.models.column import Column
 from dj.models.database import Database
 from dj.models.node import Node, NodeRevision, NodeType

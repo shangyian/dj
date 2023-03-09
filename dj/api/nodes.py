@@ -24,8 +24,8 @@ from dj.api.helpers import (
     validate_node_data,
 )
 from dj.api.tags import get_tag_by_name
-from dj.errors import DJDoesNotExistException, DJInvalidInputException, DJException
-from dj.models import ColumnAttribute, Table
+from dj.errors import DJDoesNotExistException, DJException, DJInvalidInputException
+from dj.models import ColumnAttribute
 from dj.models.attribute import UniquenessScope
 from dj.models.base import generate_display_name
 from dj.models.column import Column, ColumnAttributeInput, ColumnType
@@ -50,10 +50,8 @@ from dj.models.node import (
     UpdateNode,
     UpsertMaterializationConfig,
 )
-from dj.models.table import CreateTable
-from dj.service_clients import QueryServiceClient
 from dj.sql.parsing import parse
-from dj.utils import Version, VersionUpgrade, get_query_service_client, get_session
+from dj.utils import Version, VersionUpgrade, get_session
 
 _logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -342,7 +340,9 @@ def create_node_revision(
     new_parents = [node.name for node in dependencies_map]
     catalog_ids = [node.catalog_id for node in dependencies_map]
     if node_revision.mode == NodeMode.PUBLISHED and not len(set(catalog_ids)) == 1:
-        raise DJException(f"Cannot create nodes with multi-catalog dependencies: {set(catalog_ids)}")
+        raise DJException(
+            f"Cannot create nodes with multi-catalog dependencies: {set(catalog_ids)}",
+        )
     catalog_id = next(iter(catalog_ids), "draft")
     parent_refs = session.exec(
         select(Node).where(
@@ -487,7 +487,11 @@ def create_node(
         session=session,
         node_revision=node,
     )
-    propagate_valid_status(session=session, valid_nodes=newly_valid_nodes, catalog_id=node.current.catalog_id)
+    propagate_valid_status(
+        session=session,
+        valid_nodes=newly_valid_nodes,
+        catalog_id=node.current.catalog_id,  # pylint: disable=no-member
+    )
     session.refresh(node.current)
     return node  # type: ignore
 
@@ -515,7 +519,7 @@ def add_dimension_to_node(
     if node.current.catalog.name != dimension_node.current.catalog.name:
         raise DJException(
             message=(
-                "Cannot add dimension to column, dimensions do not match: "
+                "Cannot add dimension to column, catalogs do not match: "
                 f"{node.current.catalog.name}, {dimension_node.current.catalog.name}"
             ),
         )

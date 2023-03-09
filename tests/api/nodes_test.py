@@ -6,15 +6,11 @@ from typing import Any, Dict
 
 import pytest
 from fastapi.testclient import TestClient
-from pytest_mock import MockerFixture
 from sqlmodel import Session
 
-from dj.api.main import app
-from dj.models import Catalog, Database, Table
+from dj.models import Database, Table
 from dj.models.column import Column, ColumnType
 from dj.models.node import Node, NodeRevision, NodeType
-from dj.service_clients import QueryServiceClient
-from dj.utils import get_query_service_client
 
 
 def test_read_node(client: TestClient, load_examples) -> None:
@@ -226,26 +222,26 @@ class TestCreateOrUpdateNodes:
     def test_create_update_source_node(
         self,
         client: TestClient,
-        load_examples: Dict[str, Any],
+        load_examples,
     ) -> None:
         """
         Test creating and updating a source node
         """
         load_examples(client)
         basic_source_comments = {
-                    "name": "basic.source.comments",
-                    "description": "A fact table with comments",
-                    "type": "source",
-                    "columns": {
-                        "id": {"type": "INT"},
-                        "user_id": {"type": "INT", "dimension": "basic.dimension.users"},
-                        "timestamp": {"type": "TIMESTAMP"},
-                        "text": {"type": "STR"},
-                    },
-                    "mode": "published",
-                    "catalog": "public",
-                    "schema_": "basic",
-                    "table": "comments",
+            "name": "basic.source.comments",
+            "description": "A fact table with comments",
+            "type": "source",
+            "columns": {
+                "id": {"type": "INT"},
+                "user_id": {"type": "INT", "dimension": "basic.dimension.users"},
+                "timestamp": {"type": "TIMESTAMP"},
+                "text": {"type": "STR"},
+            },
+            "mode": "published",
+            "catalog": "public",
+            "schema_": "basic",
+            "table": "comments",
         }
 
         # Trying to create it again should fail
@@ -254,7 +250,10 @@ class TestCreateOrUpdateNodes:
             json=basic_source_comments,
         )
         data = response.json()
-        assert data["message"] == "A node with name `basic.source.comments` already exists."
+        assert (
+            data["message"]
+            == "A node with name `basic.source.comments` already exists."
+        )
         assert response.status_code == 409
 
         # Update node with a new description should create a new revision
@@ -317,6 +316,34 @@ class TestCreateOrUpdateNodes:
         data = response.json()
         assert response.status_code == 404
         assert data["message"] == "A node with name `something` does not exist."
+
+    def test_raise_on_source_node_with_no_catalog(
+        self,
+        client: TestClient,
+    ) -> None:
+        """
+        Test raise on source node with no catalog
+        """
+        response = client.post(
+            "/nodes/",
+            json={
+                "name": "basic.source.comments",
+                "description": "A fact table with comments",
+                "type": "source",
+                "columns": {
+                    "id": {"type": "INT"},
+                    "user_id": {"type": "INT", "dimension": "basic.dimension.users"},
+                    "timestamp": {"type": "TIMESTAMP"},
+                    "text": {"type": "STR"},
+                },
+                "mode": "published",
+            },
+        )
+        assert not response.ok
+        assert (
+            "Nodes of type `source` must have `catalog`, `schema_`, and `table` set"
+            in response.json()["message"]
+        )
 
     def test_create_invalid_transform_node(
         self,
@@ -498,6 +525,29 @@ class TestCreateOrUpdateNodes:
             {"name": "country", "type": "STR", "attributes": []},
         ]
 
+    def test_raise_on_multi_catalog_node(self, client: TestClient, load_examples):
+        """
+        Test raising when trying to select from multiple catalogs
+        """
+        load_examples(client)
+        response = client.post(
+            "/nodes/",
+            json={
+                "query": (
+                    "SELECT payment_id, payment_amount, customer_id, account_type "
+                    "FROM revenue r LEFT JOIN basic.source.comments b on r.id = b.id"
+                ),
+                "description": "Multicatalog",
+                "mode": "published",
+                "name": "multicatalog",
+                "type": "transform",
+            },
+        )
+        assert (
+            "Cannot create nodes with multi-catalog dependencies"
+            in response.json()["message"]
+        )
+
     def test_updating_node_to_invalid_draft(
         self,
         database: Database,  # pylint: disable=unused-argument
@@ -553,7 +603,7 @@ class TestCreateOrUpdateNodes:
     def test_upsert_materialization_config(  # pylint: disable=too-many-arguments
         self,
         client: TestClient,
-        load_examples
+        load_examples,
     ) -> None:
         """
         Test creating & updating materialization config for a node.
@@ -712,19 +762,14 @@ class TestNodeColumnsAttributes:
     def test_set_columns_attributes(
         self,
         client: TestClient,
-        database: Database,  # pylint: disable=unused-argument
-        create_source_node_payload: Dict[str, Any],
-        source_node: Node,  # pylint: disable=unused-argument
+        load_examples,
     ):
         """
         Validate that setting column attributes on the node works.
         """
-        client.post(
-            "/nodes/",
-            json=create_source_node_payload,
-        )
+        load_examples(client)
         response = client.post(
-            "/nodes/comments/attributes/",
+            "/nodes/basic.source.comments/attributes/",
             json=[
                 {
                     "attribute_type_namespace": "system",
@@ -744,21 +789,9 @@ class TestNodeColumnsAttributes:
             },
         ]
 
-        # Create dimension node
-        client.post(
-            "/nodes/",
-            json={
-                "name": "basic.dim.users",
-                "mode": "published",
-                "description": "",
-                "query": "select id, created_at, full_name, age, "
-                "country, gender from basic.source.users",
-                "type": "dimension",
-            },
-        )
         # Set columns attributes
         response = client.post(
-            "/nodes/basic.dim.users/attributes/",
+            "/nodes/basic.dimension.users/attributes/",
             json=[
                 {
                     "attribute_type_namespace": "system",
@@ -794,21 +827,13 @@ class TestNodeColumnsAttributes:
             },
         ]
 
-    def test_set_columns_attributes_failed(
-        self,
-        client: TestClient,
-        database: Database,  # pylint: disable=unused-argument
-        create_source_node_payload: Dict[str, Any],
-    ):
+    def test_set_columns_attributes_failed(self, client: TestClient, load_examples):
         """
         Test setting column attributes with different failure modes.
         """
-        client.post(
-            "/nodes/",
-            json=create_source_node_payload,
-        )
+        load_examples(client)
         response = client.post(
-            "/nodes/comments/attributes/",
+            "/nodes/basic.source.comments/attributes/",
             json=[
                 {
                     "attribute_type_name": "effective_time",
@@ -824,11 +849,11 @@ class TestNodeColumnsAttributes:
         )
 
         response = client.get(
-            "/nodes/comments/",
+            "/nodes/basic.source.comments/",
         )
 
         response = client.post(
-            "/nodes/comments/attributes/",
+            "/nodes/basic.source.comments/attributes/",
             json=[
                 {
                     "attribute_type_name": "primary_key",
@@ -839,13 +864,13 @@ class TestNodeColumnsAttributes:
         assert response.status_code == 404
         data = response.json()
         assert data == {
-            "message": "Column `nonexistent_col` does not exist on node `comments`!",
+            "message": "Column `nonexistent_col` does not exist on node `basic.source.comments`!",
             "errors": [],
             "warnings": [],
         }
 
         response = client.post(
-            "/nodes/comments/attributes/",
+            "/nodes/basic.source.comments/attributes/",
             json=[
                 {
                     "attribute_type_name": "nonexistent_attribute",
@@ -862,7 +887,7 @@ class TestNodeColumnsAttributes:
         }
 
         response = client.post(
-            "/nodes/comments/attributes/",
+            "/nodes/basic.source.comments/attributes/",
             json=[
                 {
                     "attribute_type_name": "primary_key",
@@ -883,7 +908,7 @@ class TestNodeColumnsAttributes:
         ]
 
         response = client.post(
-            "/nodes/comments/attributes/",
+            "/nodes/basic.source.comments/attributes/",
             json=[
                 {
                     "attribute_type_name": "event_time",
@@ -904,24 +929,26 @@ class TestNodeColumnsAttributes:
             "warnings": [],
         }
 
-        response = client.get("/nodes/comments/")
+        response = client.get("/nodes/basic.source.comments/")
         data = response.json()
         assert data["columns"] == [
-            {"attributes": [], "name": "id", "type": "INT"},
+            {"name": "id", "type": "INT", "attributes": []},
             {
-                "attributes": [
-                    {"attribute_type": {"name": "primary_key", "namespace": "system"}},
-                ],
                 "name": "user_id",
                 "type": "INT",
+                "attributes": [
+                    {"attribute_type": {"namespace": "system", "name": "primary_key"}},
+                ],
             },
-            {"attributes": [], "name": "event_timestamp", "type": "TIMESTAMP"},
+            {"name": "timestamp", "type": "TIMESTAMP", "attributes": []},
+            {"name": "text", "type": "STR", "attributes": []},
+            {"name": "event_timestamp", "type": "TIMESTAMP", "attributes": []},
+            {"name": "created_at", "type": "TIMESTAMP", "attributes": []},
             {
-                "attributes": [],
                 "name": "post_processing_timestamp",
                 "type": "TIMESTAMP",
+                "attributes": [],
             },
-            {"attributes": [], "name": "text", "type": "STR"},
         ]
 
 
@@ -984,8 +1011,10 @@ class TestValidateNodes:  # pylint: disable=too-many-public-methods
             },
         )
         data = response.json()
-        assert data["message"] == "Node definition contains references to nodes that do not exist"
-
+        assert (
+            data["message"]
+            == "Node definition contains references to nodes that do not exist"
+        )
 
     def test_validating_invalid_sql(self, client: TestClient) -> None:
         """
@@ -1152,6 +1181,14 @@ class TestValidateNodes:  # pylint: disable=too-many-public-methods
             "linked to column payment_type on node revenue"
         )
 
+        response = client.post(
+            "/nodes/revenue/columns/payment_type/?dimension=basic.dimension.users",
+        )
+        data = response.json()
+        assert data["message"] == (
+            "Cannot add dimension to column, catalogs do not match: default, public"
+        )
+
         # Check that not including the dimension defaults it to the column name
         response = client.post("/nodes/revenue/columns/payment_type/")
         assert response.status_code == 201
@@ -1291,10 +1328,7 @@ def test_node_similarity(session: Session, client: TestClient):
     }
 
 
-def test_resolving_downstream_status(
-    client: TestClient,
-    load_examples
-) -> None:
+def test_resolving_downstream_status(client: TestClient, load_examples) -> None:
     """
     Test creating and updating a source node
     """
@@ -1404,7 +1438,7 @@ def test_resolving_downstream_status(
         "mode": "published",
         "catalog": "public",
         "schema_": "basic",
-        "table": "comments"
+        "table": "comments",
     }
 
     response = client.post(

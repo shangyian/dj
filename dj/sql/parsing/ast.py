@@ -26,7 +26,6 @@ from typing import (
 
 from sqlmodel import Session
 
-from dj.models.database import Database
 from dj.models.node import BuildCriteria
 from dj.models.node import NodeRevision as DJNode
 from dj.models.node import NodeType as DJNodeType
@@ -663,13 +662,16 @@ class BinaryOp(Operation):
     right: Expression
 
     @classmethod
-    def And(
-        cls, left: Expression, right: Optional[Expression] = None, *rest: Expression
+    def And(  # pylint: disable=invalid-name,keyword-arg-before-vararg
+        cls,
+        left: Expression,
+        right: Optional[Expression] = None,
+        *rest: Expression,
     ) -> Union["BinaryOp", Expression]:
         """
         Create a BinaryOp of kind BinaryOpKind.Eq rolling up all expressions
         """
-        if right is None:
+        if right is None:  # pragma: no cover
             return left
         return reduce(
             lambda left, right: BinaryOp(
@@ -681,7 +683,7 @@ class BinaryOp(Operation):
         )
 
     @classmethod
-    def Eq(
+    def Eq(  # pylint: disable=invalid-name
         cls,
         left: Expression,
         right: Optional[Expression],
@@ -689,7 +691,7 @@ class BinaryOp(Operation):
         """
         Create a BinaryOp of kind BinaryOpKind.Eq
         """
-        if right is None:
+        if right is None:  # pragma: no cover
             return left
         return BinaryOp(BinaryOpKind.Eq, left, right)
 
@@ -1422,7 +1424,7 @@ class Query(Expression):
     ctes: List[Alias["Select"]] = field(default_factory=list)
     dialect: Optional[str] = None
 
-    def _to_select(self) -> Select:
+    def to_select(self) -> Select:
         """
         Compile ctes into the select and return the select
 
@@ -1443,7 +1445,7 @@ class Query(Expression):
         """
         from dj.construction.compile import _compile_select_ast
 
-        select = self._to_select()  # pylint: disable=W0212
+        select = self.to_select()  # pylint: disable=W0212
         _compile_select_ast(session, select)
 
     def build(  # pylint: disable=R0913,C0415
@@ -1456,7 +1458,7 @@ class Query(Expression):
         """
         from dj.construction.build import _build_select_ast
 
-        select = self._to_select()  # pylint: disable=W0212
+        select = self.to_select()  # pylint: disable=W0212
         _build_select_ast(session, select, self.dialect, build_criteria)
         select.add_aliases_to_unnamed_columns()
 

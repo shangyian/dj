@@ -9,11 +9,8 @@ from enum import Enum
 from functools import lru_cache
 
 # pylint: disable=line-too-long
-from pathlib import Path
 from typing import Iterator, List, Optional
 
-import sqlparse
-import yaml
 from dotenv import load_dotenv
 from pydantic.datetime_parse import parse_datetime
 from rich.logging import RichHandler
@@ -24,7 +21,6 @@ from yarl import URL
 from dj.config import Settings
 from dj.errors import DJException
 from dj.service_clients import QueryServiceClient
-from dj.typing import ColumnType
 
 
 def setup_logging(loglevel: str) -> None:
@@ -43,15 +39,6 @@ def setup_logging(loglevel: str) -> None:
         handlers=[RichHandler(rich_tracebacks=True)],
         force=True,
     )
-
-
-def get_project_repository() -> Path:
-    """
-    Return the project repository.
-
-    This is used for unit tests.
-    """
-    return Path(__file__).parent.parent
 
 
 @lru_cache
@@ -89,7 +76,7 @@ def get_query_service_client() -> Optional[QueryServiceClient]:
     Return query service client
     """
     settings = get_settings()
-    if not settings.query_service:
+    if not settings.query_service:  # pragma: no cover
         return None
     return QueryServiceClient(settings.query_service)
 

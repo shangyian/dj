@@ -11,8 +11,7 @@ from dj.construction.exceptions import CompoundBuildException
 from dj.construction.utils import get_dj_node, make_name
 from dj.errors import DJError, DJException, ErrorCode
 from dj.models.node import NodeRevision, NodeType
-from dj.sql.parsing import ast
-from dj.sql.parsing import parse
+from dj.sql.parsing import ast, parse
 
 
 def _check_col(
@@ -397,7 +396,7 @@ def _compile_select_ast(
         ),
     )
     for subquery in subqueries:
-        _compile_select_ast(session, subquery)#, namespaces)
+        _compile_select_ast(session, subquery)  # , namespaces)
 
 
 def compile_node(

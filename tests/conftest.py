@@ -1,9 +1,8 @@
 """
 Fixtures for testing.
 """
-# pylint: disable=redefined-outer-name, invalid-name, W0611
+# pylint: disable=redefined-outer-name, invalid-name, W0611, too-many-lines
 
-from pathlib import Path
 from typing import Iterator
 
 import pytest
@@ -16,7 +15,7 @@ from sqlmodel.pool import StaticPool
 
 from dj.api.main import app
 from dj.config import Settings
-from dj.utils import get_project_repository, get_session, get_settings
+from dj.utils import get_session, get_settings
 
 from .construction.fixtures import build_expectation, construction_session
 from .sql.parsing.queries import (
@@ -49,24 +48,7 @@ def settings(mocker: MockerFixture) -> Iterator[Settings]:
         return_value=settings,
     )
 
-
     yield settings
-
-
-@pytest.fixture
-def repository(fs: FakeFilesystem) -> Iterator[Path]:
-    """
-    Create the main repository.
-    """
-    # add the examples repository to the fake filesystem
-    repository = get_project_repository()
-    fs.add_real_directory(
-        repository / "tests/configs",
-        target_path="/path/to/repository",
-    )
-
-    path = Path("/path/to/repository")
-    yield path
 
 
 @pytest.fixture
@@ -109,15 +91,25 @@ def client(  # pylint: disable=too-many-statements
     app.dependency_overrides.clear()
 
 
-def post_and_raise_if_error(client: TestClient, endpoint: str, json: dict = {}):
+def post_and_raise_if_error(client: TestClient, endpoint: str, json: dict):
+    """
+    Post the payload to the client and raise if there's an error
+    """
     response = client.post(endpoint, json=json)
-    if response.status_code >= 400:
+    if not response.ok:
         raise Exception(response.text)
 
 
 @pytest.fixture
 def load_examples():
+    """
+    Fixture function for loading all node examples to a client
+    """
+
     def load_examples_fn(client: TestClient):
+        """
+        Load all node examples to a client
+        """
         for endpoint, json in (
             (
                 "/catalogs/",
@@ -538,7 +530,10 @@ def load_examples():
                 "/nodes/",
                 {
                     "description": "Number of repair orders",
-                    "query": "SELECT count(repair_order_id) as num_repair_orders FROM repair_orders",
+                    "query": (
+                        "SELECT count(repair_order_id) as num_repair_orders "
+                        "FROM repair_orders"
+                    ),
                     "mode": "published",
                     "name": "num_repair_orders",
                     "type": "metric",
@@ -568,7 +563,10 @@ def load_examples():
                 "/nodes/",
                 {
                     "description": "Average length of employment",
-                    "query": "SELECT avg(NOW() - hire_date) as avg_length_of_employment FROM hard_hats",
+                    "query": (
+                        "SELECT avg(NOW() - hire_date) as avg_length_of_employment "
+                        "FROM hard_hats"
+                    ),
                     "mode": "published",
                     "name": "avg_length_of_employment",
                     "type": "metric",
@@ -578,7 +576,10 @@ def load_examples():
                 "/nodes/",
                 {
                     "description": "Total repair order discounts",
-                    "query": "SELECT sum(price * discount) as total_discount FROM repair_order_details",
+                    "query": (
+                        "SELECT sum(price * discount) as total_discount "
+                        "FROM repair_order_details"
+                    ),
                     "mode": "published",
                     "name": "total_repair_order_discounts",
                     "type": "metric",
@@ -779,15 +780,21 @@ def load_examples():
                     "type": "source",
                     "columns": {
                         "id": {"type": "INT"},
-                        "user_id": {"type": "INT", "dimension": "basic.dimension.users"},
+                        "user_id": {
+                            "type": "INT",
+                            "dimension": "basic.dimension.users",
+                        },
                         "timestamp": {"type": "TIMESTAMP"},
                         "text": {"type": "STR"},
+                        "event_timestamp": {"type": "TIMESTAMP"},
+                        "created_at": {"type": "TIMESTAMP"},
+                        "post_processing_timestamp": {"type": "TIMESTAMP"},
                     },
                     "mode": "published",
                     "catalog": "public",
                     "schema_": "basic",
                     "table": "comments",
-                }
+                },
             ),
             (
                 "/nodes/",
@@ -803,12 +810,14 @@ def load_examples():
                         "gender": {"type": "STR"},
                         "preferred_language": {"type": "STR"},
                         "secret_number": {"type": "FLOAT"},
+                        "created_at": {"type": "TIMESTAMP"},
+                        "post_processing_timestamp": {"type": "TIMESTAMP"},
                     },
                     "mode": "published",
                     "catalog": "public",
                     "schema_": "basic",
                     "table": "dim_users",
-                }
+                },
             ),
             (
                 "/nodes/",
@@ -819,7 +828,7 @@ def load_examples():
                     "FROM basic.source.users GROUP BY country",
                     "mode": "published",
                     "name": "basic.dimension.countries",
-                }
+                },
             ),
             (
                 "/nodes/",
@@ -828,11 +837,12 @@ def load_examples():
                     "type": "dimension",
                     "query": (
                         "SELECT id, full_name, age, country, gender, preferred_language, "
-                        "secret_number FROM basic.source.users"
+                        "secret_number, created_at, post_processing_timestamp "
+                        "FROM basic.source.users"
                     ),
                     "mode": "published",
                     "name": "basic.dimension.users",
-                }
+                },
             ),
             (
                 "/nodes/",
@@ -845,20 +855,17 @@ def load_examples():
                     ),
                     "mode": "published",
                     "name": "basic.transform.country_agg",
-                }
+                },
             ),
             (
                 "/nodes/",
                 {
                     "description": "Number of comments",
                     "type": "metric",
-                    "query": (
-                        "SELECT COUNT(1) AS cnt "
-                        "FROM basic.source.comments"
-                    ),
+                    "query": ("SELECT COUNT(1) AS cnt " "FROM basic.source.comments"),
                     "mode": "published",
                     "name": "basic.num_comments",
-                }
+                },
             ),
             (
                 "/nodes/",
@@ -866,12 +873,11 @@ def load_examples():
                     "description": "Number of users.",
                     "type": "metric",
                     "query": (
-                        "SELECT SUM(num_users) "
-                        "FROM basic.transform.country_agg"
+                        "SELECT SUM(num_users) " "FROM basic.transform.country_agg"
                     ),
                     "mode": "published",
                     "name": "basic.num_users",
-                }
+                },
             ),
             (  # Event examples
                 "/nodes/",
@@ -968,7 +974,10 @@ def load_examples():
                 {
                     "columns": {
                         "id": {"type": "INT"},
-                        "user_id": {"type": "INT", "dimension": "dbt.dimension.customers"},
+                        "user_id": {
+                            "type": "INT",
+                            "dimension": "dbt.dimension.customers",
+                        },
                         "order_date": {"type": "DATE"},
                         "status": {"type": "STR"},
                         "_etl_loaded_at": {"type": "TIMESTAMP"},
@@ -1010,9 +1019,9 @@ def load_examples():
                         'SELECT "dbt.source.jaffle_shop.customers".id, '
                         '        "dbt.source.jaffle_shop.customers".first_name, '
                         '        "dbt.source.jaffle_shop.customers".last_name, '
-                        '        COUNT(1) AS order_cnt '
-                        'FROM dbt.source.jaffle_shop.orders o '
-                        'JOIN dbt.source.jaffle_shop.customers c ON o.user_id = c.id '
+                        "        COUNT(1) AS order_cnt "
+                        "FROM dbt.source.jaffle_shop.orders o "
+                        "JOIN dbt.source.jaffle_shop.customers c ON o.user_id = c.id "
                         'GROUP BY "dbt.source.jaffle_shop.customers".id, '
                         '        "dbt.source.jaffle_shop.customers".first_name, '
                         '        "dbt.source.jaffle_shop.customers".last_name '
@@ -1024,7 +1033,7 @@ def load_examples():
                 },
             ),
         ):
-            post_and_raise_if_error(client=client, endpoint=endpoint, json=json)
+            post_and_raise_if_error(client=client, endpoint=endpoint, json=json)  # type: ignore
 
     return load_examples_fn
 

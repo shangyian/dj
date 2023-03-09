@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
 from sqlmodel import Session
 
-from dj.api.helpers import get_catalog, get_node_by_name
+from dj.api.helpers import get_node_by_name
 from dj.errors import DJException
 from dj.models.node import AvailabilityState, AvailabilityStateBase, NodeType
 from dj.utils import get_session
@@ -33,7 +33,8 @@ def add_availability(
     node_revision = node.current
     if data.catalog != node_revision.catalog.name:
         raise DJException(
-            f"Cannot set availability state in different catalog: {data.catalog}, {node_revision.catalog}",
+            "Cannot set availability state in different catalog: "
+            f"{data.catalog}, {node_revision.catalog}",
         )
     if node.current.type == NodeType.SOURCE:
         if node_revision.schema_ != data.schema_ or node_revision.table != data.table:
