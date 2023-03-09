@@ -932,8 +932,97 @@ def load_examples():
                     "query": "SELECT COUNT(DISTINCT country) " "FROM long_events",
                     "mode": "published",
                 },
-            )
-            
+            ),
+            (  # DBT examples
+                "/nodes/",
+                {
+                    "columns": {
+                        "id": {"type": "INT"},
+                        "first_name": {"type": "STR"},
+                        "last_name": {"type": "STR"},
+                    },
+                    "description": "Customer table",
+                    "mode": "published",
+                    "name": "dbt.source.jaffle_shop.customers",
+                    "type": "source",
+                    "catalog": "public",
+                    "schema_": "jaffle_shop",
+                    "table": "customers",
+                },
+            ),
+            (
+                "/nodes/",
+                {
+                    "description": "User dimension",
+                    "query": (
+                        "SELECT id, first_name, last_name "
+                        "FROM dbt.source.jaffle_shop.customers"
+                    ),
+                    "mode": "published",
+                    "name": "dbt.dimension.customers",
+                    "type": "dimension",
+                },
+            ),
+            (
+                "/nodes/",
+                {
+                    "columns": {
+                        "id": {"type": "INT"},
+                        "user_id": {"type": "INT", "dimension": "dbt.dimension.customers"},
+                        "order_date": {"type": "DATE"},
+                        "status": {"type": "STR"},
+                        "_etl_loaded_at": {"type": "TIMESTAMP"},
+                    },
+                    "description": "Orders fact table",
+                    "mode": "published",
+                    "name": "dbt.source.jaffle_shop.orders",
+                    "type": "source",
+                    "catalog": "public",
+                    "schema_": "jaffle_shop",
+                    "table": "orders",
+                },
+            ),
+            (
+                "/nodes/",
+                {
+                    "columns": {
+                        "id": {"type": "INT"},
+                        "orderid": {"type": "INT"},
+                        "paymentmethod": {"type": "STR"},
+                        "status": {"type": "STR"},
+                        "amount": {"type": "INT"},
+                        "created": {"type": "DATE"},
+                        "_batched_at": {"type": "TIMESTAMP"},
+                    },
+                    "description": "Payments fact table.",
+                    "mode": "published",
+                    "name": "dbt.source.stripe.payments",
+                    "type": "source",
+                    "catalog": "public",
+                    "schema_": "stripe",
+                    "table": "payments",
+                },
+            ),
+            (
+                "/nodes/",
+                {
+                    "query": (
+                        'SELECT "dbt.source.jaffle_shop.customers".id, '
+                        '        "dbt.source.jaffle_shop.customers".first_name, '
+                        '        "dbt.source.jaffle_shop.customers".last_name, '
+                        '        COUNT(1) AS order_cnt '
+                        'FROM dbt.source.jaffle_shop.orders o '
+                        'JOIN dbt.source.jaffle_shop.customers c ON o.user_id = c.id '
+                        'GROUP BY "dbt.source.jaffle_shop.customers".id, '
+                        '        "dbt.source.jaffle_shop.customers".first_name, '
+                        '        "dbt.source.jaffle_shop.customers".last_name '
+                    ),
+                    "description": "Country level agg table",
+                    "mode": "published",
+                    "name": "dbt.transform.customer_agg",
+                    "type": "transform",
+                },
+            ),
         ):
             post_and_raise_if_error(client=client, endpoint=endpoint, json=json)
 
