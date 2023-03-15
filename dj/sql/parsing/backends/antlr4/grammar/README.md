@@ -1,9 +1,8 @@
 ## Building
 
-Install antlr generator tool and antlr python runtime
+Install antlr generator tool
 ```
 pip install antlr4-tools
-pip install antlr4-python3-runtime
 ```
 
 from `./grammar` you can run 
