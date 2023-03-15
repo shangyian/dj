@@ -1,0 +1,1313 @@
+import re
+
+# pylint: disable=R0401,C0302
+from abc import ABC, abstractmethod
+from copy import deepcopy
+from dataclasses import dataclass, field, fields
+from enum import Enum
+from itertools import chain, zip_longest
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Generic,
+    Iterator,
+    List,
+    Optional,
+    Set,
+    Tuple,
+    Type,
+    TypeVar,
+    Union,
+)
+
+from sqlmodel import Session
+
+from dj.models.database import Database
+from dj.models.node import NodeRevision as DJNode
+from dj.models.node import NodeType as DJNodeType
+from dj.sql.functions import function_registry
+from dj.sql.parsing.backends.exceptions import DJParseException
+from dj.typing import ColumnType, ColumnTypeError
+from datetime import timedelta
+
+if TYPE_CHECKING:
+    from dj.construction.build_planning import BuildPlan  # type:ignore
+
+PRIMITIVES = {int, float, str, bool, type(None)}
+
+
+def flatten(maybe_iterables: Any) -> Iterator:
+    """
+    Flattens `maybe_iterables` by descending into items that are Iterable
+    """
+
+    if not isinstance(maybe_iterables, (list, tuple, set, Iterator)):
+        return iter([maybe_iterables])
+    return chain.from_iterable(
+        (flatten(maybe_iterable) for maybe_iterable in maybe_iterables)
+    )
+
+
+def _raw_clean_hash(obj) -> str:
+    """
+    Used to generate clean and unique replacement
+     hash strings for Raw
+
+    >>> _raw_clean_hash(-2)
+    'N2'
+
+    >>> _raw_clean_hash(1)
+    '1'
+    """
+    dirty = hash(obj)
+    if dirty < 0:
+        return f"N{abs(dirty)}"
+    return str(dirty)
+
+
+class Replacer:  # pylint: disable=too-few-public-methods
+    """
+    Replacer class keeps track of seen nodes
+    and does the compare and replace calls
+    while recursively calling `Node.replace`
+    """
+
+    def __init__(self, compare: Optional[Callable[[Any, Any], bool]] = None):
+        self._compare: Callable[[Any, Any], bool] = compare or (
+            lambda a, b: a.compare(b) if isinstance(a, Node) else a == b
+        )
+
+        self.seen: Set[
+            int
+        ] = (
+            set()
+        )  # to avoid infinite recursion from cycles ex. column->table->column...
+
+    def __call__(  # pylint: disable=too-many-branches,invalid-name
+        self,
+        self_node: "Node",
+        from_: Any,
+        to: Any,
+    ):
+        if id(self_node) in self.seen:
+            return
+        self.seen.add(id(self_node))
+        for name, child in self_node.fields(
+            flat=False,
+            nodes_only=False,
+            obfuscated=True,
+            nones=False,
+            named=True,
+        ):
+            iterable = False
+            for iterable_type in (list, tuple, set):
+                if isinstance(child, iterable_type):
+                    iterable = True
+                    new = []
+                    for element in child:
+                        if not self._compare(
+                            element,
+                            from_,
+                        ):  # if the node is not a match, keep the old
+                            new.append(element)
+                        else:
+                            new.append(to)
+                        # recurse to other nodes in the iterable
+                        if isinstance(element, Node):  # pragma: no cover
+                            element.replace(from_, to, _replace=self)
+                    new = iterable_type(new)  # type: ignore
+                    setattr(self_node, name, new)
+            if not iterable:
+                if isinstance(child, Node):
+                    if self._compare(child, from_):
+                        setattr(self_node, name, to)
+                else:
+                    if self._compare(child, from_):
+                        setattr(self_node, name, to)
+            if isinstance(child, Node):
+                child.replace(from_, to, _replace=self)
+
+
+class DJEnum(Enum):
+    """
+    A DJ AST enum
+    """
+
+    def __repr__(self) -> str:
+        return str(self)
+
+
+# typevar used for node methods that return self
+# so the typesystem can correlate the self type with the return type
+TNode = TypeVar("TNode", bound="Node")  # pylint: disable=C0103
+
+
+class Node(ABC):
+    """Base class for all DJ AST nodes.
+
+    DJ nodes are python dataclasses with the following patterns:
+        - Attributes are either
+            - PRIMITIVES (int, float, str, bool, None)
+            - iterable from (list, tuple, set)
+            - Enum
+            - descendant of `Node`
+        - Attributes starting with '_' are "obfuscated" and are not included in `children`
+
+    """
+
+    parent: Optional["Node"] = None
+    parent_key: Optional[str] = None
+    validate_strict: Optional[bool] = True  # how to validate; `None` is no validation
+    __instantiated = False
+
+    def __post_init__(self):
+        self.add_self_as_parent()
+        self.__instantiated = True
+
+    def validate(self):
+        """
+        Validate a Node
+        """
+
+    def clear_parent(self: TNode) -> TNode:
+        """
+        Remove parent from the node
+        """
+        self.parent = None
+        return self
+
+    def set_parent(self: TNode, parent: "Node", parent_key: str) -> TNode:
+        """
+        Add parent to the node
+        """
+        self.parent = parent
+        self.parent_key = parent_key
+        return self
+
+    def add_self_as_parent(self: TNode) -> TNode:
+        """
+        Adds self as a parent to all children
+        """
+        for name, child in self.fields(
+            flat=True,
+            nodes_only=True,
+            obfuscated=False,
+            nones=False,
+            named=True,
+        ):
+            child.set_parent(self, name)
+        return self
+
+    def __setattr__(self, key: str, value: Any):
+        """
+        Facilitates setting children using `.` syntax ensuring parent is attributed
+        """
+        if key == "parent":
+            object.__setattr__(self, key, value)
+            return
+
+        object.__setattr__(self, key, value)
+        for child in flatten(value):
+            if isinstance(child, Node) and not key.startswith("_"):
+                child.set_parent(self, key)
+        # if node is not being instantiated for the first time let's validate
+        if self.__instantiated:
+            self.validate()
+
+    def copy(self: TNode) -> TNode:
+        """
+        Create a deep copy of the `self`
+        """
+        return deepcopy(self)
+
+    def get_nearest_parent_of_type(
+        self: "Node",
+        node_type: Type[TNode],
+    ) -> Optional[TNode]:
+        """
+        Traverse up the tree until you find a node of `node_type` or hit the root
+        """
+        if isinstance(self.parent, node_type):
+            return self.parent
+        if self.parent is None:
+            return None
+        return self.parent.get_nearest_parent_of_type(node_type)
+
+    def flatten(self) -> Iterator["Node"]:
+        """
+        Flatten the sub-ast of the node as an iterator
+        """
+        return self.filter(lambda _: True)
+
+    # pylint: disable=R0913
+    def fields(
+        self,
+        flat: bool = True,
+        nodes_only: bool = True,
+        obfuscated: bool = False,
+        nones: bool = False,
+        named: bool = False,
+    ) -> Iterator:
+        """
+        Returns an iterator over fields of a node with particular filters
+
+        Args:
+            flat: return a flattened iterator (if children are iterable)
+            nodes_only: do not yield children that are not Nodes (trumped by `obfuscated`)
+            obfuscated: yield fields that have leading underscores
+                (typically accessed via a property)
+            nones: yield values that are None
+                (optional fields without a value); trumped by `nodes_only`
+            named: yield pairs `(field name: str, field value)`
+        Returns:
+            Iterator: returns all children of a node given filters
+                and optional flattening (by default Iterator[Node])
+        """
+
+        def make_child_generator():
+            """
+            Makes a generator enclosing self to return
+            not obfuscated fields (fields without starting `_`)
+            """
+            for self_field in fields(self):
+                if (
+                    not self_field.name.startswith("_") if not obfuscated else True
+                ) and (self_field.name in self.__dict__):
+                    value = self.__dict__[self_field.name]
+                    values = [value]
+                    if flat:
+                        values = flatten(value)
+                    for value in values:
+                        if named:
+                            yield (self_field.name, value)
+                        else:
+                            yield value
+
+        # `iter`s used to satisfy mypy (`child_generator` type changes between generator, filter)
+        child_generator = iter(make_child_generator())
+
+        if nodes_only:
+            child_generator = iter(
+                filter(
+                    lambda child: isinstance(child, Node)
+                    if not named
+                    else isinstance(child[1], Node),
+                    child_generator,
+                ),
+            )
+
+        if not nones:
+            child_generator = iter(
+                filter(
+                    lambda child: (child is not None)
+                    if not named
+                    else (child[1] is not None),
+                    child_generator,
+                ),
+            )  # pylint: disable=C0301
+
+        return child_generator
+
+    @property
+    def children(self) -> Iterator["Node"]:
+        """
+        Returns an iterator of all nodes that are one
+        step from the current node down including through iterables
+        """
+        return self.fields(
+            flat=True,
+            nodes_only=True,
+            obfuscated=False,
+            nones=False,
+            named=False,
+        )
+
+    def replace(  # pylint: disable=invalid-name
+        self: TNode,
+        from_: Any,
+        to: Any,
+        compare: Optional[Callable[[Any, Any], bool]] = None,
+        _replace: Optional[Callable[["Node", Any, Any], "Node"]] = None,
+    ) -> TNode:
+        """
+        Replace a node `from_` with a node `to` in the subtree
+        ensures that parents and children are appropriately resolved
+        accounts for possible cycles
+        """
+        if _replace is None:
+            _replace = Replacer(compare)
+        _replace(self, from_, to)
+        return self
+
+    def filter(self, func: Callable[["Node"], bool]) -> Iterator["Node"]:
+        """
+        Find all nodes that `func` returns `True` for
+        """
+        if func(self):
+            yield self
+
+        for node in chain(*[child.filter(func) for child in self.children]):
+            yield node
+
+    def find_all(self, node_type: Type[TNode]) -> Iterator[TNode]:
+        """
+        Find all nodes of a particular type in the node's sub-ast
+        """
+        return self.filter(lambda n: isinstance(n, node_type))  # type: ignore
+
+    def apply(self, func: Callable[["Node"], None]):
+        """
+        Traverse ast and apply func to each Node
+        """
+        func(self)
+        for child in self.children:
+            child.apply(func)
+
+    def compare(
+        self,
+        other: "Node",
+    ) -> bool:
+        """
+        Compare two ASTs for deep equality
+        """
+        if type(self) != type(other):  # pylint: disable=unidiomatic-typecheck
+            return False
+        if id(self) == id(other):
+            return True
+        return hash(self) == hash(other)
+
+    def diff(self, other: "Node") -> List[Tuple["Node", "Node"]]:
+        """
+        Compare two ASTs for differences and return the pairs of differences
+        """
+
+        def _diff(self, other: "Node"):
+            if self != other:
+                diffs.append((self, other))
+            else:
+                for child, other_child in zip_longest(self.children, other.children):
+                    _diff(child, other_child)
+
+        diffs: List[Tuple["Node", "Node"]] = []
+        _diff(self, other)
+        return diffs
+
+    def similarity_score(self, other: "Node") -> float:
+        """
+        Determine how similar two nodes are with a float score
+        """
+        self_nodes = list(self.flatten())
+        other_nodes = list(other.flatten())
+        intersection = [
+            self_node for self_node in self_nodes if self_node in other_nodes
+        ]
+        union = (
+            [self_node for self_node in self_nodes if self_node not in intersection]
+            + [
+                other_node
+                for other_node in other_nodes
+                if other_node not in intersection
+            ]
+            + intersection
+        )
+        return len(intersection) / len(union)
+
+    def __eq__(self, other) -> bool:
+        """
+        Compares two nodes for "top level" equality.
+
+        Checks for type equality and primitive field types for full equality.
+        Compares all others for type equality only. No recursing.
+        Note: Does not check (sub)AST. See `Node.compare` for comparing (sub)ASTs.
+        """
+        return type(self) == type(other) and all(  # pylint: disable=C0123
+            s == o
+            if type(s) in PRIMITIVES  # pylint: disable=C0123
+            else type(s) == type(o)  # pylint: disable=C0123
+            for s, o in zip(
+                (self.fields(False, False, False, True)),
+                (other.fields(False, False, False, True)),
+            )
+        )
+
+    def __hash__(self) -> int:
+        """
+        Hash a node
+        """
+        return hash(
+            tuple(
+                chain(
+                    (type(self),),
+                    self.fields(
+                        flat=True,
+                        nodes_only=False,
+                        obfuscated=False,
+                        nones=True,
+                        named=False,
+                    ),
+                ),
+            ),
+        )
+
+    @abstractmethod
+    def __str__(self) -> str:
+        """
+        Get the string of a node
+        """
+
+TExpression = TypeVar("TExpression", bound="Expression")  # pylint: disable=C0103
+
+
+class Expression(Node):
+    """
+    An expression type simply for type checking
+    """
+
+    @property
+    def type(self) -> ColumnType:
+        """
+        Return the type of the expression
+        """
+        from dj.construction.inference import (  # pylint: disable=C0415
+            get_type_of_expression,
+        )
+
+        return get_type_of_expression(self)
+
+    def is_aggregation(self) -> bool:
+        """
+        Determines whether an Expression is an aggregation or not
+        """
+        return all(
+            [
+                child.is_aggregation()
+                for child in self.children
+                if isinstance(child, Expression)
+            ]
+            or [False],
+        )
+
+
+@dataclass(eq=False)
+class Name(Node):
+    """
+    The string name specified in sql with quote style
+    """
+
+    name: str
+    quote_style: str = ""
+    namespace: Optional["Name"] = None
+    
+    def __str__(self) -> str:
+        namespace = str(self.namespace)+"." if self.namespace else ""
+        return (
+            f"{namespace}{self.quote_style}{self.name}{self.quote_style}"  # pylint: disable=C0301
+        )
+
+
+TNamed = TypeVar("TNamed", bound="Named")  # pylint: disable=C0103
+
+
+@dataclass(eq=False)  # type: ignore
+class Named(Expression):
+    """
+    An Expression that has a name
+    """
+
+    name: Name
+    
+    @property
+    def namespace(self):
+        namespace = []
+        name = self.name
+        while name.namespace:
+            namespace.append(name.namespace)
+            name = name.namespace
+        return namespace[::-1]
+
+    def identifier(self, quotes: bool = True) -> str:
+        if quotes:
+            return str(self.name)
+        
+        return ".".join(
+            (
+                *(name.name for name in self.namespace),
+                self.name.name,
+            )
+        )
+
+@dataclass(eq=False)
+class Column(Named):
+    """
+    Column used in statements
+    """
+
+    _table: Optional["TExpression"] = field(repr=False, default=None)
+    _type: Optional["ColumnType"] = field(repr=False, default=None)
+    _expression: Optional[Expression] = field(repr=False, default=None)
+    _api_column: bool = False
+
+    def add_type(self, type_: ColumnType) -> "Column":
+        """
+        Add a referenced type
+        """
+        self._type = type_
+        return self
+
+    @property
+    def expression(self) -> Optional[Expression]:
+        """
+        Return the dj_node referenced by this table
+        """
+        return self._expression
+
+    def add_expression(self, expression: "Expression") -> "Column":
+        """
+        Add a referenced expression
+        """
+        self._expression = expression
+        return self
+
+    @property
+    def is_api_column(self) -> bool:
+        """
+        Is the column added from the api?
+        """
+        return self._api_column
+
+    def set_api_column(self, api_column: bool = False) -> "Column":
+        """
+        Set the api column flag
+        """
+        self._api_column = api_column
+        return self
+
+    @property
+    def table(self) -> Optional["TExpression"]:
+        """
+        Return the table the column was referenced from
+        """
+        return self._table
+
+    def add_table(self, table: "TExpression") -> "Column":
+        """
+        Add a referenced table
+        """
+        self._table = table.alias_or_self()  # type: ignore
+        # add column to table if it's a Table or Alias[Table]
+        if isinstance(self._table, Alias):
+            table_ = self._table.child  # type: ignore
+        else:
+            table_ = self._table  # type: ignore
+        if isinstance(table_, Table):
+            table_.add_columns(self)
+        return self
+
+    def __str__(self) -> str:
+        prefix = ""
+        if self.table is not None:
+            return f'{self.table}.{self.name.quote_style}{self.name}{self.name.quote_style}' 
+        return str(self.name)  
+
+@dataclass(eq=False)
+class Wildcard(Named):
+    """
+    Wildcard or '*' expression
+    """
+    
+    name:Name = field(init=False, repr=False, default=Name("*"))
+    _table: Optional["Table"] = field(repr=False, default=None)
+
+    @property
+    def table(self) -> Optional["Table"]:
+        """
+        Return the table the column was referenced from if there's one
+        """
+        return self._table
+
+    def add_table(self, table: "Table") -> "Wildcard":
+        """
+        Add a referenced table
+        """
+        if self._table is None:
+            self._table = table
+        return self
+
+    def __str__(self) -> str:
+        return "*"
+
+@dataclass(eq=False)
+class Table(Named):
+    """
+    A type for tables
+    """
+
+    _columns: Set[Column] = field(repr=False, default_factory=set)
+    _dj_node: Optional[DJNode] = field(repr=False, default=None)
+
+    @property
+    def dj_node(self) -> Optional[DJNode]:
+        """
+        Return the dj_node referenced by this table
+        """
+        return self._dj_node
+
+    def add_dj_node(self, dj_node: DJNode) -> "Table":
+        """
+        Add dj_node referenced by this table
+        """
+        if dj_node.type not in (
+            DJNodeType.TRANSFORM,
+            DJNodeType.SOURCE,
+            DJNodeType.DIMENSION,
+        ):
+            raise DJParseException(
+                f"Expected dj node of TRANSFORM, SOURCE, or DIMENSION "
+                f"but got {dj_node.type}.",
+            )
+        self._dj_node = dj_node
+        return self
+
+    @property
+    def columns(self) -> Set[Column]:
+        """
+        Return the columns referenced from this table
+        """
+        return self._columns
+
+    def add_columns(self, *columns: Column) -> "Table":
+        """
+        Add columns referenced from this table
+        """
+        for column in columns:
+            if column not in self._columns:
+                self._columns.add(column)
+                column.add_table(self)
+        return self
+
+    def __str__(self) -> str:
+        prefix = str(self.namespace) if self.namespace else ""
+        if prefix:
+            prefix += "."
+
+        return prefix + str(self.name)
+
+
+    
+@dataclass(eq=False)  # type: ignore
+class Aliasable(Expression):
+    """
+    A mixin for Nodes that are aliasable
+    """
+
+    alias: Optional[Name] = None
+
+    @property
+    def name(self):
+        if self.alias is None and isinstance(self, Named):
+            return self.name
+        return self.alias
+
+
+class Operation(Expression):
+    """
+    A type to overarch types that operate on other expressions
+    """
+
+
+@dataclass(eq=False)
+class UnaryOp(Operation):
+    """
+    An operation that operates on a single expression
+    """
+
+    op: str
+    expr: Expression
+
+    def __str__(self) -> str:
+        return f"{self.op} {(self.expr)}"
+
+
+@dataclass(eq=False)
+class BinaryOp(Operation):
+    """
+    Represents an operation that operates on two expressions
+    """
+
+    op: str
+    left: Expression
+    right: Expression
+
+    def __str__(self) -> str:
+        return f"{self.left} {self.op} {self.right}"
+
+
+@dataclass(eq=False)
+class Case(Expression):
+    """
+    A case statement of branches
+    """
+
+    conditions: List[Expression] = field(default_factory=list)
+    else_result: Optional[Expression] = None
+    operand: Optional[Expression] = None
+    results: List[Expression] = field(default_factory=list)
+
+    def __str__(self) -> str:
+        branches = "\n\tWHEN ".join(
+            f"{(cond)} THEN {(result)}"
+            for cond, result in zip(self.conditions, self.results)
+        )
+        return f"""(CASE
+        WHEN {branches}
+        ELSE {(self.else_result)}
+    END)"""
+
+    def is_aggregation(self) -> bool:
+        return all(result.is_aggregation() for result in self.results) and (
+            self.else_result.is_aggregation() if self.else_result else True
+        )
+
+
+@dataclass(eq=False)
+class Over(Expression):
+    """
+    Represents a function used in a statement
+    """
+
+    partition_by: List[Expression] = field(default_factory=list)
+    order_by: List["Order"] = field(default_factory=list)
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.validate()
+
+    def validate(self):
+        if not (self.partition_by or self.order_by):
+            raise DJParseException(
+                "An OVER requires at least a PARTITION BY or ORDER BY",
+            )
+
+    def __str__(self) -> str:
+        partition_by = (  # pragma: no cover
+            " PARTITION BY " + ", ".join(str(exp) for exp in self.partition_by)
+            if self.partition_by
+            else ""
+        )
+        order_by = (
+            " ORDER BY " + ", ".join(str(exp) for exp in self.order_by)
+            if self.order_by
+            else ""
+        )
+        consolidated_by = "\n".join(
+            po_by for po_by in (partition_by, order_by) if po_by
+        )
+        return f"OVER ({consolidated_by})"
+
+
+@dataclass(eq=False)
+class Function(Named, Operation):
+    """
+    Represents a function used in a statement
+    """
+
+    args: List[Expression] = field(default_factory=list)
+    quantifier: str = ""
+    over: Optional[Over] = None
+
+    def __str__(self) -> str:
+        over = f" {self.over}" if self.over else ""
+        return f"{self.name}({self.quantifier}{', '.join(str(arg) for arg in self.args)}){over}"
+
+    def is_aggregation(self) -> bool:
+        return function_registry[self.name.name.upper()].is_aggregation
+
+
+@dataclass(eq=False)  # type: ignore
+class Value(Expression):
+    """
+    Base class for all values number, string, boolean
+    """
+
+    value: Union[str, bool, float, int, None]
+
+    def __str__(self) -> str:
+        if isinstance(self, String):
+            return f"'{self.value}'"
+        return str(self.value)
+
+
+@dataclass(eq=False)
+class Null(Value):
+    """
+    Null value
+    """
+
+    value = None
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.validate()
+
+    def validate(self):
+        if self.value is not None:
+            raise DJParseException("NULL does not take a value.")
+
+
+@dataclass(eq=False)
+class Number(Value):
+    """
+    Number value
+    """
+
+    value: Union[float, int]
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.validate()
+
+    def validate(self):
+        if type(self.value) not in (float, int):
+            try:
+                self.value = int(self.value)
+            except ValueError:
+                self.value = float(self.value)
+
+
+class String(Value):
+    """
+    String value
+    """
+
+    value: str
+
+
+class Boolean(Value):
+    """
+    Boolean True/False value
+    """
+
+    value: bool
+
+
+@dataclass(eq=False)
+class Interval(Value):
+    """
+    Interval value
+    """
+
+    value: timedelta
+
+
+@dataclass(eq=False)
+class Predicate(Operation):
+    """
+    Represents a predicate
+    """
+
+    negated: bool = False
+
+
+@dataclass(eq=False)
+class Between(Predicate):
+    """
+    A between statement
+    """
+
+    expr: Expression = field(default_factory=Expression)
+    low: Expression = field(default_factory=Expression)
+    high: Expression = field(default_factory=Expression)
+
+    def __str__(self) -> str:
+        not_ = "NOT " if self.negated else ""
+        return f"{not_}{self.expr} BETWEEN {self.low} AND {self.high}"
+
+
+@dataclass(eq=False)
+class In(Predicate):
+    """
+    An in expression
+    """
+
+    expr: Expression = field(default_factory=Expression)
+    source: Union[List[Expression], "Select"] = field(default_factory=Expression)
+
+    def __str__(self) -> str:
+        not_ = "NOT " if self.negated else ""
+        source = (
+            str(self.source)
+            if isinstance(self.source, Select)
+            else "(" + ", ".join(str(exp) for exp in self.source) + ")"
+        )
+        return f"{self.expr} {not_}IN {source}"
+
+
+@dataclass(eq=False)
+class Rlike(Predicate):
+    """
+    A regular expression match statement
+    """
+
+    expr: Expression = field(default_factory=Expression)
+    pattern: Expression = field(default_factory=Expression)
+
+    def __str__(self) -> str:
+        not_ = "NOT " if self.negated else ""
+        return f"{not_}{self.expr} RLIKE {self.pattern}"
+
+
+@dataclass(eq=False)
+class Like(Predicate):
+    """
+    A string pattern matching statement
+    """
+
+    expr: Expression = field(default_factory=Expression)
+    quantifier: str = ""
+    patterns: List[Expression] = field(default_factory=list)
+    escape_char: Optional[str] = None
+
+    def __str__(self) -> str:
+        not_ = "NOT " if self.negated else ""
+        patterns = ", ".join(str(p) for p in self.patterns)
+        escape_char = f" ESCAPE '{self.escape_char}'" if self.escape_char else ""
+        return f"{not_}{self.expr} LIKE {self.quantifier} ({patterns}){escape_char}"
+
+
+@dataclass(eq=False)
+class IsNull(Predicate):
+    """
+    A null check statement
+    """
+
+    expr: Expression = field(default_factory=Expression)
+
+    def __str__(self) -> str:
+        not_ = "NOT " if self.negated else ""
+        return f"{self.expr} IS {not_}NULL"
+
+
+@dataclass(eq=False)
+class IsBoolean(Predicate):
+    """
+    A boolean check statement
+    """
+
+    expr: Expression = field(default_factory=Expression)
+    value: str = "UNKNOWN"
+
+    def __str__(self) -> str:
+        not_ = "NOT " if self.negated else ""
+        return f"{self.expr} IS {not_}{self.value}"
+
+
+@dataclass(eq=False)
+class IsDistinctFrom(Predicate):
+    """
+    A distinct from check statement
+    """
+
+    expr: Expression = field(default_factory=Expression)
+    right: Expression = field(default_factory=Expression)
+
+    def __str__(self) -> str:
+        not_ = "NOT " if self.negated else ""
+        return f"{self.expr} IS {not_}DISTINCT FROM {self.right}"
+
+
+@dataclass(eq=False)
+class Case(Expression):
+    """
+    A case statement of branches
+    """
+
+    conditions: List[Expression] = field(default_factory=list)
+    else_result: Optional[Expression] = None
+    operand: Optional[Expression] = None
+    results: List[Expression] = field(default_factory=list)
+
+    def __str__(self) -> str:
+        branches = "\n\tWHEN ".join(
+            f"{(cond)} THEN {(result)}"
+            for cond, result in zip(self.conditions, self.results)
+        )
+        return f"""(CASE
+        WHEN {branches}
+        ELSE {(self.else_result)}
+    END)"""
+
+    def is_aggregation(self) -> bool:
+        return all(result.is_aggregation() for result in self.results) and (
+            self.else_result.is_aggregation() if self.else_result else True
+        )
+
+
+@dataclass(eq=False)
+class Subscript(Expression):
+    """
+    Represents a subscript expression
+    """
+
+    expr: Expression
+    index: Expression
+
+    def __str__(self) -> str:
+        return f"{self.expr}[{self.index}]"
+
+
+@dataclass(eq=False)
+class Lambda(Expression):
+    """
+    Represents a lambda expression
+    """
+
+    identifiers: List[Named]
+    expr: Expression
+
+    def __str__(self) -> str:
+        id_str = ", ".join(str(iden) for iden in self.identifiers)
+        return f"({id_str}) -> {self.expr}"
+    
+@dataclass(eq=False)
+class JoinCriteria(Node):
+    """
+    Represents the criteria for a join relation in a FROM clause
+    """
+
+    on: Optional[Expression] = None
+    using: Optional[List[Named]] = None
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.validate()
+
+    def validate(self):
+        if self.on is None and self.using is None:
+            raise DJParseException(f"Expected either an ON or USING clause at {self}.")
+        if self.on is not None and self.using is not None:
+            raise DJParseException(
+                f"Expected either an ON or USING clause, not both, at {self}."
+            )
+        if self.on is not None:
+            self.on.validate()
+
+    def __str__(self) -> str:
+        if self.on:
+            return f"ON {self.on}"
+        else:
+            id_list = ", ".join(str(iden) for iden in self.using)
+            return f"USING ({id_list})"
+        
+@dataclass(eq=False)
+class Join(Node):
+    """
+    Represents a join relation in a FROM clause
+    """
+
+    join_type: str
+    table: Expression
+    criteria: Optional[JoinCriteria] = None
+
+    def __str__(self) -> str:
+        parts = []
+        if self.join_type:
+            parts.append(f"{self.join_type} ")
+        parts.append("JOIN ")
+        parts.append(str(self.table))
+        if self.criteria:
+            parts.append(f" {self.criteria}")
+        return "".join(parts)
+
+Lateral=None
+    
+@dataclass(eq=False)
+class From(Node):
+    """
+    Represents the FROM clause of a SELECT statement
+    """
+
+    tables: List[Expression]
+    joins: List[Join] = field(default_factory=list)
+    laterals: List[Lateral] = field(default_factory=list)
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.validate()
+
+    def validate(self):
+        if not self.tables:
+            raise DJParseException(
+                f"Expected at least one table in from clause at {self}."
+            )
+        for table in self.tables:
+            table.validate()
+        for join in self.joins:
+            join.validate()
+
+    def __str__(self) -> str:
+        parts = ["FROM "]
+        parts.append(str(self.tables[0]))
+        for i in range(1, len(self.tables)):
+            parts.append(", ")
+            parts.append(str(self.tables[i]))
+        for join in self.joins:
+            parts.append(f"\n{join}")
+        return "".join(parts)
+
+
+@dataclass(eq=False)
+class FunctionTable(Aliasable, Operation):
+    """
+    Represents a function used in a statement
+    """
+
+    args: List[Expression] = field(default_factory=list)
+
+    def __str__(self) -> str:
+        return f"{self.name}({', '.join(str(arg) for arg in self.args)})"
+
+    
+@dataclass(eq=False)
+class SetOp(Node):
+    """
+    A column wrapper for ordering
+    """
+    
+    kind: str #Union, intersect, ...
+    select: Union["Select", "SetOp"]
+    
+
+    def __str__(self) -> str:
+        return f"{self.kind}\n{self.right}"    
+
+@dataclass(eq=False)
+class Select(Aliasable):
+    """
+    A single select statement type
+    """
+
+    quantifier: str = ""  # Distinct, All
+    projection: List[Expression] = field(default_factory=list)
+    from_: Optional[From] = None
+    group_by: List[Expression] = field(default_factory=list)
+    having: Optional[Expression] = None
+    where: Optional[Expression] = None
+    set_op: Optional[SetOp] = None
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.validate()
+
+    def validate(self):
+        super().validate()
+        if not self.projection:
+            raise DJParseException(
+                f"Expected at least a single item in projection at {self}."
+            )
+
+    def add_aliases_to_unnamed_columns(self) -> None:
+        """
+        Add an alias to any unnamed columns in the projection (`col{n}`)
+        """
+        for i, expression in enumerate(self.projection):
+            if not isinstance(expression, (Column, Alias)):
+                name = f"col{i}"
+                aliased = Alias(Name(name), child=expression)
+                # only replace those that are identical in memory
+                self.replace(expression, aliased, lambda a, b: id(a) == id(b))
+
+    def __str__(self) -> str:
+        subselect = not (
+            isinstance(self.parent, Query)
+            or self.parent is None
+            or self.alias is not None
+        )
+        parts = ["SELECT "]
+        if self.quantifier:
+            parts.append(f"{self.quantifier} ")
+        parts.append(",\n\t".join(str(exp) for exp in self.projection))
+        if self.from_ is not None:
+            parts.extend(("\n", str(self.from_), "\n"))
+        if self.where is not None:
+            parts.extend(("WHERE ", str(self.where), "\n"))
+        if self.group_by:
+            parts.extend(("GROUP BY ", ", ".join(str(exp) for exp in self.group_by)))
+        if self.having is not None:
+            parts.extend(("HAVING ", str(self.having), "\n"))
+        if self.set_op is not None:
+            parts.extend((str(self.set_op), "\n"))
+
+        select = " ".join(parts).strip()
+        if subselect:
+            return "(" + select + ")"
+        return select
+
+
+@dataclass(eq=False)
+class SortItem(Node):
+    """
+    Defines a sort item of an expression
+    """
+    expr: Expression
+    asc: str
+    nulls: str
+        
+    def __str__(self) -> str:
+        return f"{self.expr} {self.asc} {self.nulls}".strip()
+        
+        
+@dataclass(eq=False)
+class Organization(Node):
+    """
+    A column wrapper for ordering
+    """
+
+    order: List[SortItem]
+    sort: List[SortItem]    
+
+    def __str__(self) -> str:
+        order = f"ORDER BY {', '.join(self.order)}"
+        sort = f"SORT BY {', '.join(self.order)}"
+        return order+"\n"+sort
+    
+
+
+@dataclass(eq=False)
+class Query(Expression):
+    """
+    Overarching query type
+    """
+
+    select: Select
+    ctes: List[Select] = field(default_factory=list)
+    limit: Optional[Expression] = None
+    quantifier: str = ""
+    ordering: Organization = field(default_factory=list)
+    sets: List[SetOp] = field(default_factory=list)
+        
+    def _to_select(self) -> Select:
+        """
+        Compile ctes into the select and return the select
+
+        Note: This destroys the structure of the query which cannot be undone
+        you may want to deepcopy it first
+        """
+        for cte in self.ctes:
+            table = Table(cte.name, cte.namespace)
+            self.select.replace(table, cte)
+        return self.select
+
+    def __str__(self) -> str:
+        subquery = bool(self.parent)
+        ctes = ",\n".join(f"{cte.name} AS ({cte.child})" for cte in self.ctes)
+        with_ = "WITH" if ctes else ""
+        select = f"({(self.select)})" if subquery else (self.select)
+        parts = [f"{with_}\n{ctes}\n{select}\n"]
+        if self.ordering:
+            order_by = ", ".join(str(item) for item in self.ordering)
+            parts.append(f"ORDER BY {order_by}\n")
+        if self.limit is not None:
+            limit = f"LIMIT {'ALL ' if self.quantifier == 'ALL' else ''}{self.limit}"
+            parts.append(limit)
+        return "".join(parts)
