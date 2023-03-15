@@ -1,9 +1,9 @@
-from dj.sql.parsing.backends.antlr4.grammar.generated.SqlBaseLexer import SqlBaseLexer
-from dj.sql.parsing.backends.antlr4.grammar.generated.SqlBaseParser import SqlBaseParser
+# from dj.sql.parsing.backends.antlr4.grammar.generated.SqlBaseLexer import SqlBaseLexer
+# from dj.sql.parsing.backends.antlr4.grammar.generated.SqlBaseParser import SqlBaseParser
 
 # Uncomment the following two lines and comment the two lines above to use the lexer and parser generated from the OSS Spark g4 file
-# from dj.sql.parsing.backends.antlr4.grammar.oss_spark_grammar.generated.SqlBaseLexer import SqlBaseLexer
-# from dj.sql.parsing.backends.antlr4.grammar.oss_spark_grammar.generated.SqlBaseParser import SqlBaseParser
+from dj.sql.parsing.backends.antlr4.grammar.oss_spark_grammar.generated.SqlBaseLexer import SqlBaseLexer
+from dj.sql.parsing.backends.antlr4.grammar.oss_spark_grammar.generated.SqlBaseParser import SqlBaseParser
 
 import antlr4
 from antlr4 import InputStream
