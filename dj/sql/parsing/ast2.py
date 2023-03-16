@@ -1223,11 +1223,15 @@ class Select(Aliasable):
         """
         Add an alias to any unnamed columns in the projection (`col{n}`)
         """
+        projection = []
         for i, expression in enumerate(self.projection):
             if not isinstance(expression, Aliasable):
                 name = f"col{i}"
                 # only replace those that are identical in memory
-                self.replace(expression, expression.set_alias(Name(name)), lambda a, b: id(a) == id(b))
+                projection.append(expression.set_alias(Name(name)))
+            else:
+                projection.append(expression)
+        self.projection = projection
 
     def __str__(self) -> str:
         subselect = not (
