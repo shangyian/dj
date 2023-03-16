@@ -1,9 +1,9 @@
-import re
 
 # pylint: disable=R0401,C0302
 from abc import ABC, abstractmethod
 from copy import deepcopy
 from dataclasses import dataclass, field, fields
+from datetime import timedelta
 from enum import Enum
 from itertools import chain, zip_longest
 from typing import (
@@ -29,7 +29,6 @@ from dj.models.node import NodeType as DJNodeType
 from dj.sql.functions import function_registry
 from dj.sql.parsing.backends.exceptions import DJParseException
 from dj.typing import ColumnType, ColumnTypeError
-from datetime import timedelta
 
 if TYPE_CHECKING:
     from dj.construction.build_planning import BuildPlan  # type:ignore
@@ -214,6 +213,28 @@ class Node(ABC):
         # if node is not being instantiated for the first time let's validate
         if self.__instantiated:
             self.validate()
+
+    def swap(self: TNode, other: "Node") -> TNode:
+        if not (self.parent and self.parent_key):
+            return self
+        parent_attr = getattr(self.parent, self.parent_key)
+        if parent_attr is self:
+            setattr(self.parent, self.parent_key, other)
+            return self.clear_parent()
+
+        new = []
+        for iterable_type in (list, tuple, set):
+            if isinstance(parent_attr, iterable_type):
+                for element in parent_attr:
+                    if self is element:
+                        new.append(other)
+                    else:
+                        new.append(element)
+                new = iterable_type(new)
+                break
+
+        setattr(self.parent, self.parent_key, new)
+        return self.clear_parent()
 
     def copy(self: TNode) -> TNode:
         """
@@ -456,8 +477,9 @@ class Node(ABC):
         Get the string of a node
         """
 
-    def set_alias(self, alias: "Name")-> "Alias":
+    def set_alias(self, alias: "Name") -> "Alias":
         return Alias(self).set_alias(alias)
+
 
 TExpression = TypeVar("TExpression", bound="Expression")  # pylint: disable=C0103
 
@@ -501,12 +523,10 @@ class Name(Node):
     name: str
     quote_style: str = ""
     namespace: Optional["Name"] = None
-    
+
     def __str__(self) -> str:
-        namespace = str(self.namespace)+"." if self.namespace else ""
-        return (
-            f"{namespace}{self.quote_style}{self.name}{self.quote_style}"  # pylint: disable=C0301
-        )
+        namespace = str(self.namespace) + "." if self.namespace else ""
+        return f"{namespace}{self.quote_style}{self.name}{self.quote_style}"  # pylint: disable=C0301
 
 
 TNamed = TypeVar("TNamed", bound="Named")  # pylint: disable=C0103
@@ -519,7 +539,7 @@ class Named(Node):
     """
 
     name: Name
-    
+
     @property
     def namespace(self):
         namespace = []
@@ -532,32 +552,39 @@ class Named(Node):
     def identifier(self, quotes: bool = True) -> str:
         if quotes:
             return str(self.name)
-        
+
         return ".".join(
             (
                 *(name.name for name in self.namespace),
                 self.name.name,
-            )
+            ),
         )
 
-@dataclass(eq=False)  # type: ignore
+
 class Aliasable(Node):
     """
     A mixin for Nodes that are aliasable
     """
 
-    alias: Optional[Name] = field(init=False, default=None)
+    alias_: Optional[Name] = None
 
-    def set_alias(self: TNode, alias: Name)->TNode:
-        self.alias = alias
+    @property
+    def alias(self)->Optional[Name]:
+        return self.alias_
+
+    def set_alias(self: TNode, alias: Name) -> TNode:
+        self.alias_ = alias
         return self
+
     @property
     def alias_or_name(self):
         if self.alias is None and isinstance(self, Named):
             return self.name
         return self.alias
 
+
 AliasedType = TypeVar("AliasedType", bound=Node)  # pylint: disable=C0103
+
 
 @dataclass(eq=False)
 class Alias(Aliasable, Generic[AliasedType]):
@@ -566,11 +593,13 @@ class Alias(Aliasable, Generic[AliasedType]):
     """
 
     child: AliasedType = field(default_factory=Node)  # type: ignore
+
     def __str__(self) -> str:
         return f"{self.child} AS {self.alias}"
 
     def is_aggregation(self) -> bool:
         return isinstance(self.child, Expression) and self.child.is_aggregation()
+
 
 @dataclass(eq=False)
 class Column(Aliasable, Named, Expression):
@@ -643,16 +672,20 @@ class Column(Aliasable, Named, Expression):
         alias = "" if not self.alias else f" AS {self.alias}"
         prefix = ""
         if self.table is not None:
-            return f'{self.table}.{self.name.quote_style}{self.name}{self.name.quote_style}' +alias
-        return str(self.name)+alias
+            return (
+                f"{self.table}.{self.name.quote_style}{self.name}{self.name.quote_style}"
+                + alias
+            )
+        return str(self.name) + alias
+
 
 @dataclass(eq=False)
 class Wildcard(Named, Expression):
     """
     Wildcard or '*' expression
     """
-    
-    name:Name = field(init=False, repr=False, default=Name("*"))
+
+    name: Name = field(init=False, repr=False, default=Name("*"))
     _table: Optional["Table"] = field(repr=False, default=None)
 
     @property
@@ -673,14 +706,14 @@ class Wildcard(Named, Expression):
     def __str__(self) -> str:
         return "*"
 
+
 @dataclass(eq=False)
-class Table(Aliasable, Named, Expression):
+class TableExpression(Aliasable, Expression):
     """
-    A type for tables
+    A type for table expressions
     """
 
-    _columns: Set[Column] = field(repr=False, default_factory=set)
-    _dj_node: Optional[DJNode] = field(repr=False, default=None)
+    _columns: Set[Column] = field(init=False, repr=False, default_factory=set)
 
     @property
     def dj_node(self) -> Optional[DJNode]:
@@ -722,6 +755,38 @@ class Table(Aliasable, Named, Expression):
                 column.add_table(self)
         return self
 
+
+@dataclass(eq=False)
+class Table(Named, TableExpression):
+    """
+    A type for tables
+    """
+
+    _dj_node: Optional[DJNode] = field(repr=False, default=None)
+
+    @property
+    def dj_node(self) -> Optional[DJNode]:
+        """
+        Return the dj_node referenced by this table
+        """
+        return self._dj_node
+
+    def add_dj_node(self, dj_node: DJNode) -> "Table":
+        """
+        Add dj_node referenced by this table
+        """
+        if dj_node.type not in (
+            DJNodeType.TRANSFORM,
+            DJNodeType.SOURCE,
+            DJNodeType.DIMENSION,
+        ):
+            raise DJParseException(
+                f"Expected dj node of TRANSFORM, SOURCE, or DIMENSION "
+                f"but got {dj_node.type}.",
+            )
+        self._dj_node = dj_node
+        return self
+
     def __str__(self) -> str:
         return str(self.alias_or_name)
 
@@ -757,33 +822,6 @@ class BinaryOp(Operation):
 
     def __str__(self) -> str:
         return f"{self.left} {self.op} {self.right}"
-
-
-@dataclass(eq=False)
-class Case(Expression):
-    """
-    A case statement of branches
-    """
-
-    conditions: List[Expression] = field(default_factory=list)
-    else_result: Optional[Expression] = None
-    operand: Optional[Expression] = None
-    results: List[Expression] = field(default_factory=list)
-
-    def __str__(self) -> str:
-        branches = "\n\tWHEN ".join(
-            f"{(cond)} THEN {(result)}"
-            for cond, result in zip(self.conditions, self.results)
-        )
-        return f"""(CASE
-        WHEN {branches}
-        ELSE {(self.else_result)}
-    END)"""
-
-    def is_aggregation(self) -> bool:
-        return all(result.is_aggregation() for result in self.results) and (
-            self.else_result.is_aggregation() if self.else_result else True
-        )
 
 
 @dataclass(eq=False)
@@ -1084,7 +1122,8 @@ class Lambda(Expression):
     def __str__(self) -> str:
         id_str = ", ".join(str(iden) for iden in self.identifiers)
         return f"({id_str}) -> {self.expr}"
-    
+
+
 @dataclass(eq=False)
 class JoinCriteria(Node):
     """
@@ -1103,7 +1142,7 @@ class JoinCriteria(Node):
             raise DJParseException(f"Expected either an ON or USING clause at {self}.")
         if self.on is not None and self.using is not None:
             raise DJParseException(
-                f"Expected either an ON or USING clause, not both, at {self}."
+                f"Expected either an ON or USING clause, not both, at {self}.",
             )
         if self.on is not None:
             self.on.validate()
@@ -1114,7 +1153,8 @@ class JoinCriteria(Node):
         else:
             id_list = ", ".join(str(iden) for iden in self.using)
             return f"USING ({id_list})"
-        
+
+
 @dataclass(eq=False)
 class Join(Node):
     """
@@ -1135,8 +1175,29 @@ class Join(Node):
             parts.append(f" {self.criteria}")
         return "".join(parts)
 
-Lateral=None
-    
+
+@dataclass(eq=False)
+class LateralView(Expression):
+    """
+    Represents a lateral view expression
+    """
+
+    outer: bool = False
+    func: "FunctionTable" = field(default_factory=Node)  # type: ignore
+    table: TableExpression = field(default_factory=Node)  # type: ignore
+    columns: List[Column] = field(default_factory=list)
+
+    def __str__(self) -> str:
+        parts = ["LATERAL VIEW"]
+        if self.outer:
+            parts.append(" OUTER")
+        parts.append(f" {self.func}")
+        parts.append(f" {self.table}")
+        if self.columns:
+            parts.append(f" AS {' '.join(str(col) for col in self.columns)}")
+        return "".join(parts)
+
+
 @dataclass(eq=False)
 class From(Node):
     """
@@ -1145,7 +1206,7 @@ class From(Node):
 
     tables: List[Expression]
     joins: List[Join] = field(default_factory=list)
-    laterals: List[Lateral] = field(default_factory=list)
+    lateral_views: List[LateralView] = field(default_factory=list)
 
     def __post_init__(self):
         super().__post_init__()
@@ -1154,7 +1215,7 @@ class From(Node):
     def validate(self):
         if not self.tables:
             raise DJParseException(
-                f"Expected at least one table in from clause at {self}."
+                f"Expected at least one table in from clause at {self}.",
             )
         for table in self.tables:
             table.validate()
@@ -1163,16 +1224,19 @@ class From(Node):
 
     def __str__(self) -> str:
         parts = ["FROM "]
-        parts.append(", ".join(str(tbl) for tbl in self.tables))
+        tables_and_views = self.tables + [view.table for view in self.lateral_views]
+        parts.append(",\n".join(str(tbl) for tbl in tables_and_views))
         for join in self.joins:
             parts.append(f"\n{join}")
+        for view in self.lateral_views:
+            parts.append(f"\n{view}")
         return "".join(parts)
 
 
 @dataclass(eq=False)
-class FunctionTable(Aliasable, Operation):
+class FunctionTable(Named, TableExpression, Operation):
     """
-    Represents a function used in a statement
+    Represents a table-valued function used in a statement
     """
 
     args: List[Expression] = field(default_factory=list)
@@ -1180,22 +1244,22 @@ class FunctionTable(Aliasable, Operation):
     def __str__(self) -> str:
         return f"{self.name}({', '.join(str(arg) for arg in self.args)})"
 
-    
+
 @dataclass(eq=False)
 class SetOp(Node):
     """
     A column wrapper for ordering
     """
-    
-    kind: str #Union, intersect, ...
-    select: Union["Select", "SetOp"]
-    
+
+    kind: str  # Union, intersect, ...
+    table: Union[TableExpression, "SetOp"]
 
     def __str__(self) -> str:
-        return f"{self.kind}\n{self.right}"    
+        return f"{self.kind}\n{self.table}"
+
 
 @dataclass(eq=False)
-class Select(Aliasable):
+class Select(TableExpression):
     """
     A single select statement type
     """
@@ -1216,7 +1280,7 @@ class Select(Aliasable):
         super().validate()
         if not self.projection:
             raise DJParseException(
-                f"Expected at least a single item in projection at {self}."
+                f"Expected at least a single item in projection at {self}.",
             )
 
     def add_aliases_to_unnamed_columns(self) -> None:
@@ -1265,14 +1329,15 @@ class SortItem(Node):
     """
     Defines a sort item of an expression
     """
+
     expr: Expression
     asc: str
     nulls: str
-        
+
     def __str__(self) -> str:
         return f"{self.expr} {self.asc} {self.nulls}".strip()
-        
-        
+
+
 @dataclass(eq=False)
 class Organization(Node):
     """
@@ -1280,15 +1345,15 @@ class Organization(Node):
     """
 
     order: List[SortItem]
-    sort: List[SortItem]    
+    sort: List[SortItem]
 
     def __str__(self) -> str:
         ret = ""
-        ret+= f"ORDER BY {', '.join(str(i) for i in self.order)}" if self.order else ""
-        if ret: ret+="\n"
-        ret+= f"SORT BY {', '.join(str(i) for i in self.sort)}" if self.sort else ""
+        ret += f"ORDER BY {', '.join(str(i) for i in self.order)}" if self.order else ""
+        if ret:
+            ret += "\n"
+        ret += f"SORT BY {', '.join(str(i) for i in self.sort)}" if self.sort else ""
         return ret
-    
 
 
 @dataclass(eq=False)
@@ -1302,7 +1367,7 @@ class Query(Expression):
     limit: Optional[Expression] = None
     organization: Organization = field(default_factory=list)
     sets: List[SetOp] = field(default_factory=list)
-        
+
     def _to_select(self) -> Select:
         """
         Compile ctes into the select and return the select

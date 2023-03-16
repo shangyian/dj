@@ -1,21 +1,20 @@
+import inspect
 import logging
 
 import antlr4
-from antlr4 import InputStream
-from antlr4 import RecognitionException
+from antlr4 import InputStream, RecognitionException
 from antlr4.error.ErrorListener import ErrorListener
-from antlr4.error.ErrorStrategy import BailErrorStrategy
 from antlr4.error.Errors import ParseCancellationException
+from antlr4.error.ErrorStrategy import BailErrorStrategy
 
-
-from dj.sql.parsing.backends.grammar.generated.SqlBaseLexer import SqlBaseLexer
-from dj.sql.parsing.backends.grammar.generated.SqlBaseParser import SqlBaseParser, SqlBaseParser as sbp
 from dj.sql.parsing import ast2 as ast
 from dj.sql.parsing.backends.exceptions import DJParseException
-
-import inspect
+from dj.sql.parsing.backends.grammar.generated.SqlBaseLexer import SqlBaseLexer
+from dj.sql.parsing.backends.grammar.generated.SqlBaseParser import SqlBaseParser
+from dj.sql.parsing.backends.grammar.generated.SqlBaseParser import SqlBaseParser as sbp
 
 logger = logging.getLogger(__name__)
+
 
 class RemoveIdentifierBackticks(antlr4.ParseTreeListener):
     @staticmethod
@@ -35,11 +34,9 @@ class RemoveIdentifierBackticks(antlr4.ParseTreeListener):
 
 class ParseErrorListener(ErrorListener):
     def syntaxError(
-            self, recognizer, offendingSymbol, line, column, msg, e
+        self, recognizer, offendingSymbol, line, column, msg, e,
     ):  # pylint: disable=invalid-name,no-self-use,too-many-arguments
-        raise SqlSyntaxError(f"Parse error {line}:{column}:"
-                             f""
-                             , msg)
+        raise SqlSyntaxError(f"Parse error {line}:{column}:" f"", msg)
 
 
 class UpperCaseCharStream:
@@ -71,6 +68,7 @@ class ExplicitBailErrorStrategy(BailErrorStrategy):
     Bail Error Strategy throws a ParseCancellationException,
     This strategy simply throw a more explicit exception
     """
+
     def recover(self, recognizer, e: RecognitionException):
         try:
             super(ExplicitBailErrorStrategy, self).recover(recognizer, e)
@@ -134,7 +132,7 @@ def parse_sql(string, rule, converter, debug=False):
 
 
 def parse_statement(string, converter=None, debug=False):
-    return parse_sql(string, 'singleStatement', converter, debug)
+    return parse_sql(string, "singleStatement", converter, debug)
 
 
 def print_tree(tree, printer=print):
@@ -146,12 +144,10 @@ def tree_to_strings(tree, indent=0):
     symbol = ("[" + tree.symbol.text + "]") if hasattr(tree, "symbol") else ""
     node_as_string = type(tree).__name__ + symbol
     result = ["|" + "-" * indent + node_as_string]
-    if hasattr(tree, 'children') and tree.children:
+    if hasattr(tree, "children") and tree.children:
         for child in tree.children:
             result += tree_to_strings(child, indent + 1)
     return result
-
-
 
 
 class Visitor:
@@ -162,16 +158,20 @@ class Visitor:
         params = inspect.signature(func).parameters
         type_ = params[list(params.keys())[0]].annotation
         if type_ == inspect.Parameter.empty:
-            raise ValueError("No type annotation found for the first parameter of the visitor.")
+            raise ValueError(
+                "No type annotation found for the first parameter of the visitor.",
+            )
         if type_ in self.registry:
-            raise ValueError(f"A visitor is already registered for type {type_.__name__}.")
+            raise ValueError(
+                f"A visitor is already registered for type {type_.__name__}.",
+            )
         self.registry[type_] = func
         return func
 
     def __call__(self, ctx):
         # if ctx.getText()[-1]=='k':
         #     import pdb; pdb.set_trace()
-        if type(ctx)==antlr4.tree.Tree.TerminalNodeImpl:
+        if type(ctx) == antlr4.tree.Tree.TerminalNodeImpl:
             return None
         func = self.registry.get(type(ctx), None)
         if func is None:
@@ -180,12 +180,19 @@ class Visitor:
         if result is None:
             raise DJParseException(f"Could not parse {ctx.getText()}")
         return result
-            
+
 
 visit = Visitor()
 
-def visit_children(ctx, nones=False):
-    return list(filter(lambda child: child is not None if nones==False else True, map(visit, ctx.children)))
+
+@visit.register
+def _(ctx: list, nones=False):
+    return list(
+        filter(
+            lambda child: child is not None if nones == False else True, map(visit, ctx),
+        ),
+    )
+
 
 @visit.register
 def _(ctx: sbp.SingleStatementContext):
@@ -206,39 +213,37 @@ def _(ctx: sbp.QueryContext):
 
     select = visit(ctx.queryTerm())
 
-    return ast.Query(
-        ctes=ctes,
-        select=select,
-        limit= limit,
-        organization = organization
-    )
+    return ast.Query(ctes=ctes, select=select, limit=limit, organization=organization)
 
 
 @visit.register
 def _(ctx: sbp.QueryOrganizationContext):
-    
-    order=list(map(visit, ctx.order))
-    sort=list(map(visit, ctx.sort))
+
+    order = visit((ctx.order))
+    sort = visit((ctx.sort))
     org = ast.Organization(order, sort)
     limit = None
     if ctx.limit:
         limit = visit(ctx.limit)
     return limit, org
 
+
 @visit.register
 def _(ctx: sbp.SortItemContext):
     expr = visit(ctx.expression())
-    order=""
-    if ordering:=ctx.ordering:
-        order=ordering.text.upper()
-    null_order=""
-    if null_order:=ctx.nullOrder:
-        nulls="NULLS "+null_order.text
+    order = ""
+    if ordering := ctx.ordering:
+        order = ordering.text.upper()
+    null_order = ""
+    if null_order := ctx.nullOrder:
+        nulls = "NULLS " + null_order.text
     return ast.SortItem(expr, order, nulls)
+
 
 @visit.register
 def _(ctx: sbp.ExpressionContext):
     return visit(ctx.booleanExpression())
+
 
 @visit.register
 def _(ctx: sbp.PredicatedContext):
@@ -248,37 +253,40 @@ def _(ctx: sbp.PredicatedContext):
 
 @visit.register
 def _(ctx: sbp.ValueExpressionContext):
-    if primary:=ctx.primaryExpression():     
+    if primary := ctx.primaryExpression():
         return visit(primary)
 
-  
+
 @visit.register
 def _(ctx: sbp.ValueExpressionDefaultContext):
     return visit(ctx.primaryExpression())
-    
-    
+
 
 @visit.register
 def _(ctx: sbp.ArithmeticBinaryContext):
     return ast.BinaryOp(ctx.operator.text, visit(ctx.left), visit(ctx.right))
 
-                                                                                                            
+
 @visit.register
 def _(ctx: sbp.ColumnReferenceContext):
     return ast.Column(visit(ctx.identifier()))
+
 
 @visit.register
 def _(ctx: sbp.QueryTermDefaultContext):
     return visit(ctx.queryPrimary())
 
+
 @visit.register
 def _(ctx: sbp.QueryPrimaryDefaultContext):
     return visit(ctx.querySpecification())
 
+
 @visit.register
 def _(ctx: sbp.QueryTermContext):
-    if primary_query:=ctx.queryPrimary():
+    if primary_query := ctx.queryPrimary():
         return visit(primary_query)
+
 
 @visit.register
 def _(ctx: sbp.QueryPrimaryContext):
@@ -291,7 +299,7 @@ def _(ctx: sbp.RegularQuerySpecificationContext):
     from_ = visit(ctx.fromClause())
 
     return ast.Select(
-        quantifier = quantifier,
+        quantifier=quantifier,
         projection=projection,
         from_=from_,
     )
@@ -299,8 +307,8 @@ def _(ctx: sbp.RegularQuerySpecificationContext):
 
 @visit.register
 def _(ctx: sbp.SelectClauseContext):
-    quantifier =""
-    if quant:=ctx.setQuantifier():
+    quantifier = ""
+    if quant := ctx.setQuantifier():
         quantifier = visit(quant)
     projection = visit(ctx.namedExpressionSeq())
     return quantifier, projection
@@ -317,13 +325,13 @@ def _(ctx: sbp.SetQuantifierContext):
 
 @visit.register
 def _(ctx: sbp.NamedExpressionSeqContext):
-    return visit_children(ctx)
+    return visit(ctx.children)
 
-   
+
 @visit.register
 def _(ctx: sbp.NamedExpressionContext):
     expr = visit(ctx.expression())
-    if alias:= ctx.name:
+    if alias := ctx.name:
         expr.set_alias(visit(alias))
     return expr
 
@@ -331,9 +339,9 @@ def _(ctx: sbp.NamedExpressionContext):
 @visit.register
 def _(ctx: sbp.ErrorCapturingIdentifierContext):
     name = visit(ctx.identifier())
-    if extra:=visit(ctx.errorCapturingIdentifierExtra()):
-        name.name+=extra
-        name.quote_style='"'
+    if extra := visit(ctx.errorCapturingIdentifierExtra()):
+        name.name += extra
+        name.quote_style = '"'
     return name
 
 
@@ -346,18 +354,21 @@ def _(ctx: sbp.ErrorIdentContext):
 def _(ctx: sbp.RealIdentContext):
     return ""
 
- 
+
 @visit.register
 def _(ctx: sbp.IdentifierContext):
     return visit(ctx.strictIdentifier())
-   
+
+
 @visit.register
 def _(ctx: sbp.UnquotedIdentifierContext):
     return ast.Name(ctx.getText())
 
+
 @visit.register
 def _(ctx: sbp.ConstantDefaultContext):
     return visit(ctx.constant())
+
 
 @visit.register
 def _(ctx: sbp.NumericLiteralContext):
@@ -368,7 +379,7 @@ def _(ctx: sbp.NumericLiteralContext):
 def _(ctx: sbp.DereferenceContext):
     base = visit(ctx.base)
     field = visit(ctx.fieldName)
-    field.namespace=base.name
+    field.namespace = base.name
     base.name = field
     return base
 
@@ -376,42 +387,46 @@ def _(ctx: sbp.DereferenceContext):
 @visit.register
 def _(ctx: sbp.FunctionCallContext):
     name = visit(ctx.functionName())
-    quantifier = ''
-    if quant_ctx:=ctx.setQuantifier():
-        quantifier=visit(quant_ctx)
-    args = list(map(visit, ctx.argument))
-    
+    quantifier = ""
+    if quant_ctx := ctx.setQuantifier():
+        quantifier = visit(quant_ctx)
+    args = visit((ctx.argument))
+
     return ast.Function(name, args, quantifier=quantifier)
+
 
 @visit.register
 def _(ctx: sbp.FunctionNameContext):
-    if qual_name:=ctx.qualifiedName():
+    if qual_name := ctx.qualifiedName():
         return visit(qual_name)
     return ast.Name(ctx.getText())
 
+
 @visit.register
 def _(ctx: sbp.QualifiedNameContext):
-    names = visit_children(ctx)
-    for i in range(len(names)-1, 0, -1):
-        names[i].namespace=names[i-1]
+    names = visit(ctx.children)
+    for i in range(len(names) - 1, 0, -1):
+        names[i].namespace = names[i - 1]
     return names[-1]
+
 
 @visit.register
 def _(ctx: sbp.StarContext):
 
     namespace = None
-    if qual_name:=ctx.qualifiedName():
-        namespace= visit(qual_name)
+    if qual_name := ctx.qualifiedName():
+        namespace = visit(qual_name)
     star = ast.Wildcard()
-    star.name.namespace=namespace
+    star.name.namespace = namespace
     return star
+
 
 @visit.register
 def _(ctx: sbp.FromClauseContext):
-    relations = list(map(visit, ctx.relation()))
-    laterals = list(map(visit, ctx.lateralView()))
-    tables=[rel for rel in relations if isinstance(rel, ast.Table)]
-    joins=[rel for rel in relations if isinstance(rel, ast.Join)]
+    relations = visit((ctx.relation()))
+    laterals = visit((ctx.lateralView()))
+    tables = [rel for rel in relations if isinstance(rel, ast.Table)]
+    joins = [rel for rel in relations if isinstance(rel, ast.Join)]
     return ast.From(tables, joins, laterals)
 
 
@@ -434,15 +449,16 @@ def _(ctx: sbp.TableNameContext):
 
 @visit.register
 def _(ctx: sbp.MultipartIdentifierContext):
-    names = visit_children(ctx)
-    for i in range(len(names)-1, 0, -1):
-        names[i].namespace=names[i-1]
+    names = visit(ctx.children)
+    for i in range(len(names) - 1, 0, -1):
+        names[i].namespace = names[i - 1]
     return names[-1]
+
 
 @visit.register
 def _(ctx: sbp.TableAliasContext):
     name = ""
-    if ident:=ctx.strictIdentifier():
+    if ident := ctx.strictIdentifier():
         name = visit(ident)
     if ctx.identifierList():
         return
@@ -453,16 +469,24 @@ def _(ctx: sbp.TableAliasContext):
 def _(ctx: sbp.QuotedIdentifierAlternativeContext):
     return visit(ctx.quotedIdentifier())
 
+
 @visit.register
 def _(ctx: sbp.QuotedIdentifierContext):
-    if ident:=ctx.BACKQUOTED_IDENTIFIER():
+    if ident := ctx.BACKQUOTED_IDENTIFIER():
         return ast.Name(ident.getText()[1:-1], quote_style="`")
     return ast.Name(ctx.DOUBLEQUOTED_STRING().getText()[1:-1], quote_style='"')
 
+@visit.register
+def _(ctx: sbp.LateralViewContext):
+    outer = bool(ctx.OUTER())
+    func_name = visit(ctx.qualifiedName())
+    func_args = visit(ctx.expression())
+    func = ast.FunctionTable(func_name, func_args)
+    table = ast.Table(visit(ctx.tblName))
+    columns = [ast.Column(name) for name in visit(ctx.colName)]
+    return ast.LateralView(outer, func, table, columns)
 
-def parse(
-    sql: str
-) -> ast.Query:
+def parse(sql: str) -> ast.Query:
     """
     Parse a string into a DJ ast using the ANTLR4 backend.
     """
