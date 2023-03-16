@@ -9,9 +9,11 @@ from antlr4.error.Errors import ParseCancellationException
 
 
 from dj.sql.parsing.backends.grammar.generated.SqlBaseLexer import SqlBaseLexer
-from dj.sql.parsing.backends.grammar.generated.SqlBaseParser import SqlBaseParser
-from dj.sql.parsing.ast2 import BinaryOp, Query, Organization, SortItem, Select, Name, Number, Function, Wildcard, Table, Join, From
-import dj.sql.parsing.ast2 as ast
+from dj.sql.parsing.backends.grammar.generated.SqlBaseParser import SqlBaseParser, SqlBaseParser as sbp
+from dj.sql.parsing import ast2 as ast
+from dj.sql.parsing.backends.exceptions import DJParseException
+
+import inspect
 
 logger = logging.getLogger(__name__)
 
@@ -150,15 +152,7 @@ def tree_to_strings(tree, indent=0):
     return result
 
 
-from dj.sql.parsing.backends.antlr4 import parse_statement, print_tree, SqlBaseParser as sbp
 
-from dj.sql.parsing import ast
-from dj.sql.parsing.backends.exceptions import DJParseException
-import antlr4
-from functools import singledispatch
-from typing import Tuple
-
-import inspect
 
 class Visitor:
     def __init__(self):
@@ -175,6 +169,8 @@ class Visitor:
         return func
 
     def __call__(self, ctx):
+        # if ctx.getText()[-1]=='k':
+        #     import pdb; pdb.set_trace()
         if type(ctx)==antlr4.tree.Tree.TerminalNodeImpl:
             return None
         func = self.registry.get(type(ctx), None)
@@ -187,7 +183,6 @@ class Visitor:
             
 
 visit = Visitor()
-
 
 def visit_children(ctx, nones=False):
     return list(filter(lambda child: child is not None if nones==False else True, map(visit, ctx.children)))
@@ -211,7 +206,7 @@ def _(ctx: sbp.QueryContext):
 
     select = visit(ctx.queryTerm())
 
-    return Query(
+    return ast.Query(
         ctes=ctes,
         select=select,
         limit= limit,
@@ -224,8 +219,11 @@ def _(ctx: sbp.QueryOrganizationContext):
     
     order=list(map(visit, ctx.order))
     sort=list(map(visit, ctx.sort))
-    org = Organization(order, sort)
-    return visit(ctx.limit), org
+    org = ast.Organization(order, sort)
+    limit = None
+    if ctx.limit:
+        limit = visit(ctx.limit)
+    return limit, org
 
 @visit.register
 def _(ctx: sbp.SortItemContext):
@@ -236,7 +234,7 @@ def _(ctx: sbp.SortItemContext):
     null_order=""
     if null_order:=ctx.nullOrder:
         nulls="NULLS "+null_order.text
-    return SortItem(expr, order, nulls)
+    return ast.SortItem(expr, order, nulls)
 
 @visit.register
 def _(ctx: sbp.ExpressionContext):
@@ -262,12 +260,12 @@ def _(ctx: sbp.ValueExpressionDefaultContext):
 
 @visit.register
 def _(ctx: sbp.ArithmeticBinaryContext):
-    return BinaryOp(ctx.operator.text, visit(ctx.left), visit(ctx.right))
+    return ast.BinaryOp(ctx.operator.text, visit(ctx.left), visit(ctx.right))
 
                                                                                                             
 @visit.register
 def _(ctx: sbp.ColumnReferenceContext):
-    return Column(visit(ctx.identifier()))
+    return ast.Column(visit(ctx.identifier()))
 
 @visit.register
 def _(ctx: sbp.QueryTermDefaultContext):
@@ -279,9 +277,8 @@ def _(ctx: sbp.QueryPrimaryDefaultContext):
 
 @visit.register
 def _(ctx: sbp.QueryTermContext):
-    #TODO: other branches
-    return visit(ctx.queryPrimary())
-
+    if primary_query:=ctx.queryPrimary():
+        return visit(primary_query)
 
 @visit.register
 def _(ctx: sbp.QueryPrimaryContext):
@@ -293,7 +290,7 @@ def _(ctx: sbp.RegularQuerySpecificationContext):
     quantifier, projection = visit(ctx.selectClause())
     from_ = visit(ctx.fromClause())
 
-    return Select(
+    return ast.Select(
         quantifier = quantifier,
         projection=projection,
         from_=from_,
@@ -325,6 +322,7 @@ def _(ctx: sbp.NamedExpressionSeqContext):
    
 @visit.register
 def _(ctx: sbp.NamedExpressionContext):
+    import pdb; pdb.set_trace()
     expr = visit(ctx.expression())
     if alias:= ctx.name:
         expr.set_alias(visit(alias))
@@ -356,7 +354,7 @@ def _(ctx: sbp.IdentifierContext):
    
 @visit.register
 def _(ctx: sbp.UnquotedIdentifierContext):
-    return Name(ctx.getText())
+    return ast.Name(ctx.getText())
 
 @visit.register
 def _(ctx: sbp.ConstantDefaultContext):
@@ -364,7 +362,7 @@ def _(ctx: sbp.ConstantDefaultContext):
 
 @visit.register
 def _(ctx: sbp.NumericLiteralContext):
-    return Number(ctx.number().getText())
+    return ast.Number(ctx.number().getText())
 
 
 @visit.register
@@ -384,13 +382,13 @@ def _(ctx: sbp.FunctionCallContext):
         quantifier=visit(quant_ctx)
     args = list(map(visit, ctx.argument))
     
-    return Function(name, args, quantifier=quantifier)
+    return ast.Function(name, args, quantifier=quantifier)
 
 @visit.register
 def _(ctx: sbp.FunctionNameContext):
     if qual_name:=ctx.qualifiedName():
         return visit(qual_name)
-    return Name(ctx.getText())
+    return ast.Name(ctx.getText())
 
 @visit.register
 def _(ctx: sbp.QualifiedNameContext):
@@ -405,7 +403,7 @@ def _(ctx: sbp.StarContext):
     namespace = None
     if qual_name:=ctx.qualifiedName():
         namespace= visit(qual_name)
-    star = Wildcard()
+    star = ast.Wildcard()
     star.name.namespace=namespace
     return star
 
@@ -413,9 +411,9 @@ def _(ctx: sbp.StarContext):
 def _(ctx: sbp.FromClauseContext):
     relations = list(map(visit, ctx.relation()))
     laterals = list(map(visit, ctx.lateralView()))
-    tables=[rel for rel in relations if isinstance(rel, Table)]
-    joins=[rel for rel in relations if isinstance(rel, Join)]
-    return From(tables, joins, laterals)
+    tables=[rel for rel in relations if isinstance(rel, ast.Table)]
+    joins=[rel for rel in relations if isinstance(rel, ast.Join)]
+    return ast.From(tables, joins, laterals)
 
 
 @visit.register
@@ -427,11 +425,11 @@ def _(ctx: sbp.RelationContext):
 def _(ctx: sbp.TableNameContext):
     if ctx.temporalClause():
         return
-        
     name = visit(ctx.multipartIdentifier())
     alias = visit(ctx.tableAlias())
-    table = Table(name)
-    table.set_alias(alias)
+    table = ast.Table(name)
+    if alias:
+        table.set_alias(ast.Name(alias))
     return table
 
 
@@ -456,12 +454,12 @@ def _(ctx: sbp.TableAliasContext):
 def _(ctx: sbp.QuotedIdentifierAlternativeContext):
     return visit(ctx.quotedIdentifier())
 
-
 @visit.register
 def _(ctx: sbp.QuotedIdentifierContext):
     if ident:=ctx.BACKQUOTED_IDENTIFIER():
-        return Name(ident.getText()[1:-1], quote_style="`")
-    return Name(ctx.DOUBLEQUOTED_STRING().getText()[1:-1], quote_style='"')
+        return ast.Name(ident.getText()[1:-1], quote_style="`")
+    return ast.Name(ctx.DOUBLEQUOTED_STRING().getText()[1:-1], quote_style='"')
+
 
 def parse(
     sql: str

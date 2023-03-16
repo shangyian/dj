@@ -456,6 +456,9 @@ class Node(ABC):
         Get the string of a node
         """
 
+    def set_alias(self, alias: "Name")-> "Alias":
+        return Alias(self).set_alias(alias)
+
 TExpression = TypeVar("TExpression", bound="Expression")  # pylint: disable=C0103
 
 
@@ -545,14 +548,29 @@ class Aliasable(Node):
 
     alias: Optional[Name] = field(init=False, default=None)
 
-    def set_alias(self, alias: Name):
+    def set_alias(self: TNode, alias: Name)->TNode:
         self.alias = alias
-        
+        return self
     @property
     def alias_or_name(self):
         if self.alias is None and isinstance(self, Named):
             return self.name
         return self.alias
+
+AliasedType = TypeVar("AliasedType", bound=Node)  # pylint: disable=C0103
+
+@dataclass(eq=False)
+class Alias(Aliasable, Generic[AliasedType]):
+    """
+    Wraps node types with an alias
+    """
+
+    child: AliasedType = field(default_factory=Node)  # type: ignore
+    def __str__(self) -> str:
+        return f"{self.child} AS {self.alias}"
+
+    def is_aggregation(self) -> bool:
+        return isinstance(self.child, Expression) and self.child.is_aggregation()
 
 @dataclass(eq=False)
 class Column(Aliasable, Named, Expression):
@@ -1205,6 +1223,8 @@ class Select(Aliasable):
         Add an alias to any unnamed columns in the projection (`col{n}`)
         """
         for i, expression in enumerate(self.projection):
+            if not expression.alias:
+                
             if not isinstance(expression, (Column, Alias)):
                 name = f"col{i}"
                 aliased = Alias(Name(name), child=expression)
