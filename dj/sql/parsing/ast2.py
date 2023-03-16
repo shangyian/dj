@@ -510,7 +510,7 @@ TNamed = TypeVar("TNamed", bound="Named")  # pylint: disable=C0103
 
 
 @dataclass(eq=False)  # type: ignore
-class Named(Expression):
+class Named(Node):
     """
     An Expression that has a name
     """
@@ -537,13 +537,30 @@ class Named(Expression):
             )
         )
 
+@dataclass(eq=False)  # type: ignore
+class Aliasable(Node):
+    """
+    A mixin for Nodes that are aliasable
+    """
+
+    alias: Optional[Name] = field(init=False, default=None)
+
+    def set_alias(self, alias: Name):
+        self.alias = alias
+        
+    @property
+    def alias_or_name(self):
+        if self.alias is None and isinstance(self, Named):
+            return self.name
+        return self.alias
+
 @dataclass(eq=False)
-class Column(Named):
+class Column(Aliasable, Named, Expression):
     """
     Column used in statements
     """
 
-    _table: Optional["TExpression"] = field(repr=False, default=None)
+    _table: Optional["TableExpression"] = field(repr=False, default=None)
     _type: Optional["ColumnType"] = field(repr=False, default=None)
     _expression: Optional[Expression] = field(repr=False, default=None)
     _api_column: bool = False
@@ -584,13 +601,13 @@ class Column(Named):
         return self
 
     @property
-    def table(self) -> Optional["TExpression"]:
+    def table(self) -> Optional["TableExpression"]:
         """
         Return the table the column was referenced from
         """
         return self._table
 
-    def add_table(self, table: "TExpression") -> "Column":
+    def add_table(self, table: "TableExpression") -> "Column":
         """
         Add a referenced table
         """
@@ -611,7 +628,7 @@ class Column(Named):
         return str(self.name)  
 
 @dataclass(eq=False)
-class Wildcard(Named):
+class Wildcard(Named, Expression):
     """
     Wildcard or '*' expression
     """
@@ -638,7 +655,7 @@ class Wildcard(Named):
         return "*"
 
 @dataclass(eq=False)
-class Table(Named):
+class Table(Aliasable, Named, Expression):
     """
     A type for tables
     """
@@ -687,27 +704,7 @@ class Table(Named):
         return self
 
     def __str__(self) -> str:
-        prefix = str(self.namespace) if self.namespace else ""
-        if prefix:
-            prefix += "."
-
-        return prefix + str(self.name)
-
-
-    
-@dataclass(eq=False)  # type: ignore
-class Aliasable(Expression):
-    """
-    A mixin for Nodes that are aliasable
-    """
-
-    alias: Optional[Name] = None
-
-    @property
-    def name(self):
-        if self.alias is None and isinstance(self, Named):
-            return self.name
-        return self.alias
+        return str(self.alias_or_name)
 
 
 class Operation(Expression):
@@ -1147,10 +1144,7 @@ class From(Node):
 
     def __str__(self) -> str:
         parts = ["FROM "]
-        parts.append(str(self.tables[0]))
-        for i in range(1, len(self.tables)):
-            parts.append(", ")
-            parts.append(str(self.tables[i]))
+        parts.append(", ".join(str(tbl) for tbl in self.tables))
         for join in self.joins:
             parts.append(f"\n{join}")
         return "".join(parts)
@@ -1225,7 +1219,7 @@ class Select(Aliasable):
         )
         parts = ["SELECT "]
         if self.quantifier:
-            parts.append(f"{self.quantifier} ")
+            parts.append(f"{self.quantifier}\n")
         parts.append(",\n\t".join(str(exp) for exp in self.projection))
         if self.from_ is not None:
             parts.extend(("\n", str(self.from_), "\n"))
@@ -1267,9 +1261,11 @@ class Organization(Node):
     sort: List[SortItem]    
 
     def __str__(self) -> str:
-        order = f"ORDER BY {', '.join(self.order)}"
-        sort = f"SORT BY {', '.join(self.order)}"
-        return order+"\n"+sort
+        ret = ""
+        ret+= f"ORDER BY {', '.join(str(i) for i in self.order)}" if self.order else ""
+        if ret: ret+="\n"
+        ret+= f"SORT BY {', '.join(str(i) for i in self.sort)}" if self.sort else ""
+        return ret
     
 
 
@@ -1282,8 +1278,7 @@ class Query(Expression):
     select: Select
     ctes: List[Select] = field(default_factory=list)
     limit: Optional[Expression] = None
-    quantifier: str = ""
-    ordering: Organization = field(default_factory=list)
+    organization: Organization = field(default_factory=list)
     sets: List[SetOp] = field(default_factory=list)
         
     def _to_select(self) -> Select:
@@ -1304,10 +1299,9 @@ class Query(Expression):
         with_ = "WITH" if ctes else ""
         select = f"({(self.select)})" if subquery else (self.select)
         parts = [f"{with_}\n{ctes}\n{select}\n"]
-        if self.ordering:
-            order_by = ", ".join(str(item) for item in self.ordering)
-            parts.append(f"ORDER BY {order_by}\n")
+        if self.organization:
+            parts.append(str(self.organization))
         if self.limit is not None:
-            limit = f"LIMIT {'ALL ' if self.quantifier == 'ALL' else ''}{self.limit}"
+            limit = f"LIMIT {self.limit}"
             parts.append(limit)
         return "".join(parts)

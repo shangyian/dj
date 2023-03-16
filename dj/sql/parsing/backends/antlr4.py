@@ -11,6 +11,7 @@ from antlr4.error.Errors import ParseCancellationException
 from dj.sql.parsing.backends.grammar.generated.SqlBaseLexer import SqlBaseLexer
 from dj.sql.parsing.backends.grammar.generated.SqlBaseParser import SqlBaseParser
 from dj.sql.parsing.ast2 import BinaryOp, Query, Organization, SortItem, Select, Name, Number, Function, Wildcard, Table, Join, From
+import dj.sql.parsing.ast2 as ast
 
 logger = logging.getLogger(__name__)
 
@@ -157,16 +158,39 @@ import antlr4
 from functools import singledispatch
 from typing import Tuple
 
-@singledispatch
-def visit(ctx):
-    import pdb; pdb.set_trace()
-    
+import inspect
+
+class Visitor:
+    def __init__(self):
+        self.registry = {}
+
+    def register(self, func):
+        params = inspect.signature(func).parameters
+        type_ = params[list(params.keys())[0]].annotation
+        if type_ == inspect.Parameter.empty:
+            raise ValueError("No type annotation found for the first parameter of the visitor.")
+        if type_ in self.registry:
+            raise ValueError(f"A visitor is already registered for type {type_.__name__}.")
+        self.registry[type_] = func
+        return func
+
+    def __call__(self, ctx):
+        if type(ctx)==antlr4.tree.Tree.TerminalNodeImpl:
+            return None
+        func = self.registry.get(type(ctx), None)
+        if func is None:
+            raise TypeError(f"No visitor registered for type {type(ctx).__name__}")
+        result = func(ctx)
+        if result is None:
+            raise DJParseException(f"Could not parse {ctx.getText()}")
+        return result
+            
+
+visit = Visitor()
+
+
 def visit_children(ctx, nones=False):
     return list(filter(lambda child: child is not None if nones==False else True, map(visit, ctx.children)))
-
-@visit.register
-def _(ctx: antlr4.tree.Tree.TerminalNodeImpl):
-    return None
 
 @visit.register
 def _(ctx: sbp.SingleStatementContext):
@@ -183,14 +207,15 @@ def _(ctx: sbp.QueryContext):
     ctes = []
     if ctes_ctx := ctx.ctes():
         ctes = visit(ctes_ctx)
-
-    limit, order = visit(ctx.queryOrganization())
+    limit, organization = visit(ctx.queryOrganization())
 
     select = visit(ctx.queryTerm())
 
     return Query(
         ctes=ctes,
         select=select,
+        limit= limit,
+        organization = organization
     )
 
 
@@ -221,41 +246,59 @@ def _(ctx: sbp.ExpressionContext):
 def _(ctx: sbp.PredicatedContext):
     if value_expr := ctx.valueExpression():
         return visit(value_expr)
-    import pdb; pdb.set_trace()
+
 
 @visit.register
 def _(ctx: sbp.ValueExpressionContext):
     if primary:=ctx.primaryExpression():     
         return visit(primary)
 
+  
+@visit.register
+def _(ctx: sbp.ValueExpressionDefaultContext):
+    return visit(ctx.primaryExpression())
+    
+    
+
 @visit.register
 def _(ctx: sbp.ArithmeticBinaryContext):
     return BinaryOp(ctx.operator.text, visit(ctx.left), visit(ctx.right))
 
-    
-
+                                                                                                            
 @visit.register
 def _(ctx: sbp.ColumnReferenceContext):
-    return visit(ctx.identifier())
+    return Column(visit(ctx.identifier()))
+
+@visit.register
+def _(ctx: sbp.QueryTermDefaultContext):
+    return visit(ctx.queryPrimary())
+
+@visit.register
+def _(ctx: sbp.QueryPrimaryDefaultContext):
+    return visit(ctx.querySpecification())
 
 @visit.register
 def _(ctx: sbp.QueryTermContext):
     #TODO: other branches
     return visit(ctx.queryPrimary())
 
+
 @visit.register
 def _(ctx: sbp.QueryPrimaryContext):
     return visit(ctx.querySpecification())
 
+
 @visit.register
-def _(ctx: sbp.QuerySpecificationContext):
+def _(ctx: sbp.RegularQuerySpecificationContext):
     quantifier, projection = visit(ctx.selectClause())
     from_ = visit(ctx.fromClause())
 
     return Select(
+        quantifier = quantifier,
         projection=projection,
         from_=from_,
     )
+
 
 @visit.register
 def _(ctx: sbp.SelectClauseContext):
@@ -265,6 +308,7 @@ def _(ctx: sbp.SelectClauseContext):
     projection = visit(ctx.namedExpressionSeq())
     return quantifier, projection
 
+
 @visit.register
 def _(ctx: sbp.SetQuantifierContext):
     if ctx.DISTINCT():
@@ -273,17 +317,19 @@ def _(ctx: sbp.SetQuantifierContext):
         return "ALL"
     return ""
 
+
 @visit.register
 def _(ctx: sbp.NamedExpressionSeqContext):
-    return list(map(visit, ctx.children))
-    
+    return visit_children(ctx)
+
+   
 @visit.register
 def _(ctx: sbp.NamedExpressionContext):
-    
     expr = visit(ctx.expression())
     if alias:= ctx.name:
-        expr.alias=visit(alias)
+        expr.set_alias(visit(alias))
     return expr
+
 
 @visit.register
 def _(ctx: sbp.ErrorCapturingIdentifierContext):
@@ -292,20 +338,22 @@ def _(ctx: sbp.ErrorCapturingIdentifierContext):
         name.name+=extra
         name.quote_style='"'
     return name
-   
+
+
 @visit.register
 def _(ctx: sbp.ErrorIdentContext):
-    names = list(map(visit, ctx.identifier()))
-    return "-".join(name.name for name in names)
+    return ctx.getText()
+
 
 @visit.register
 def _(ctx: sbp.RealIdentContext):
     return ""
-    
+
+ 
 @visit.register
 def _(ctx: sbp.IdentifierContext):
     return visit(ctx.strictIdentifier())
-    
+   
 @visit.register
 def _(ctx: sbp.UnquotedIdentifierContext):
     return Name(ctx.getText())
@@ -318,18 +366,14 @@ def _(ctx: sbp.ConstantDefaultContext):
 def _(ctx: sbp.NumericLiteralContext):
     return Number(ctx.number().getText())
 
+
 @visit.register
 def _(ctx: sbp.DereferenceContext):
     base = visit(ctx.base)
     field = visit(ctx.fieldName)
-    if isinstance(base, Name):
-        field.namespace=base
-        return field
-    import pdb; pdb.set_trace()
-    
-@visit.register
-def _(ctx: sbp.ColumnReferenceContext):
-    return visit(ctx.identifier())
+    field.namespace=base.name
+    base.name = field
+    return base
 
 
 @visit.register
@@ -340,7 +384,7 @@ def _(ctx: sbp.FunctionCallContext):
         quantifier=visit(quant_ctx)
     args = list(map(visit, ctx.argument))
     
-    return Function(args, quantifier=quantifier)
+    return Function(name, args, quantifier=quantifier)
 
 @visit.register
 def _(ctx: sbp.FunctionNameContext):
@@ -357,6 +401,7 @@ def _(ctx: sbp.QualifiedNameContext):
 
 @visit.register
 def _(ctx: sbp.StarContext):
+
     namespace = None
     if qual_name:=ctx.qualifiedName():
         namespace= visit(qual_name)
@@ -372,20 +417,23 @@ def _(ctx: sbp.FromClauseContext):
     joins=[rel for rel in relations if isinstance(rel, Join)]
     return From(tables, joins, laterals)
 
+
 @visit.register
 def _(ctx: sbp.RelationContext):
     return visit(ctx.relationPrimary())
 
+
 @visit.register
 def _(ctx: sbp.TableNameContext):
     if ctx.temporalClause():
-        import pdb; pdb.set_trace()
+        return
         
     name = visit(ctx.multipartIdentifier())
     alias = visit(ctx.tableAlias())
     table = Table(name)
-    table.alias = alias
+    table.set_alias(alias)
     return table
+
 
 @visit.register
 def _(ctx: sbp.MultipartIdentifierContext):
@@ -396,16 +444,18 @@ def _(ctx: sbp.MultipartIdentifierContext):
 
 @visit.register
 def _(ctx: sbp.TableAliasContext):
-    name = None
+    name = ""
     if ident:=ctx.strictIdentifier():
         name = visit(ident)
     if ctx.identifierList():
-        import pdb;pdb.set_trace()
+        return
     return name
+
 
 @visit.register
 def _(ctx: sbp.QuotedIdentifierAlternativeContext):
     return visit(ctx.quotedIdentifier())
+
 
 @visit.register
 def _(ctx: sbp.QuotedIdentifierContext):
