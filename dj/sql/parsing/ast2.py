@@ -640,10 +640,11 @@ class Column(Aliasable, Named, Expression):
         return self
 
     def __str__(self) -> str:
+        alias = "" if not self.alias else f" AS {self.alias}"
         prefix = ""
         if self.table is not None:
-            return f'{self.table}.{self.name.quote_style}{self.name}{self.name.quote_style}' 
-        return str(self.name)  
+            return f'{self.table}.{self.name.quote_style}{self.name}{self.name.quote_style}' +alias
+        return str(self.name)+alias
 
 @dataclass(eq=False)
 class Wildcard(Named, Expression):
@@ -1223,13 +1224,10 @@ class Select(Aliasable):
         Add an alias to any unnamed columns in the projection (`col{n}`)
         """
         for i, expression in enumerate(self.projection):
-            if not expression.alias:
-                
-            if not isinstance(expression, (Column, Alias)):
+            if not isinstance(expression, Aliasable):
                 name = f"col{i}"
-                aliased = Alias(Name(name), child=expression)
                 # only replace those that are identical in memory
-                self.replace(expression, aliased, lambda a, b: id(a) == id(b))
+                self.replace(expression, expression.set_alias(Name(name)), lambda a, b: id(a) == id(b))
 
     def __str__(self) -> str:
         subselect = not (

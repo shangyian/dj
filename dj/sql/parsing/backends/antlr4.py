@@ -322,7 +322,6 @@ def _(ctx: sbp.NamedExpressionSeqContext):
    
 @visit.register
 def _(ctx: sbp.NamedExpressionContext):
-    import pdb; pdb.set_trace()
     expr = visit(ctx.expression())
     if alias:= ctx.name:
         expr.set_alias(visit(alias))
