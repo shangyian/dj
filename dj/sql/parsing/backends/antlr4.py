@@ -299,11 +299,14 @@ def _(ctx: sbp.QueryPrimaryContext):
 def _(ctx: sbp.RegularQuerySpecificationContext):
     quantifier, projection = visit(ctx.selectClause())
     from_ = visit(ctx.fromClause())
-
+    where = None
+    if where_clause:=ctx.whereClause():
+        where = visit(where_clause)
     return ast.Select(
         quantifier=quantifier,
         projection=projection,
         from_=from_,
+        where=where
     )
 
 
