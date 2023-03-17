@@ -1096,12 +1096,14 @@ errorCapturingIdentifierExtra
 
 identifier
     : strictIdentifier
+    | strictNonReserved
     ;
 
 strictIdentifier
     : IDENTIFIER              #unquotedIdentifier
     | quotedIdentifier        #quotedIdentifierAlternative
-    | ansiNonReserved #unquotedIdentifier
+    | ansiNonReserved         #unquotedIdentifier
+    | nonReserved             #unquotedIdentifier
     ;
 
 quotedIdentifier
@@ -1116,6 +1118,7 @@ backQuotedIdentifier
 number
     : MINUS? EXPONENT_VALUE #exponentLiteral
     | MINUS? DECIMAL_VALUE  #decimalLiteral
+    | MINUS? (EXPONENT_VALUE | DECIMAL_VALUE) #legacyDecimalLiteral
     | MINUS? INTEGER_VALUE            #integerLiteral
     | MINUS? BIGINT_LITERAL           #bigIntLiteral
     | MINUS? SMALLINT_LITERAL         #smallIntLiteral
