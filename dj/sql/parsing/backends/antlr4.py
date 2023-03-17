@@ -298,7 +298,7 @@ def _(ctx: sbp.QueryPrimaryContext):
 @visit.register
 def _(ctx: sbp.RegularQuerySpecificationContext):
     quantifier, projection = visit(ctx.selectClause())
-    from_ = visit(ctx.fromClause())
+    from_ = visit(ctx.fromClause()) if ctx.fromClause() else None
     where = None
     if where_clause:=ctx.whereClause():
         where = visit(where_clause)
