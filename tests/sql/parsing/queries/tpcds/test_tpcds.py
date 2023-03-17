@@ -4,9 +4,9 @@ test parsing tpcds queries into DJ ASTs
 
 import pytest
 
-from dj.sql.parsing.backends.sqloxide import parse
 from dj.sql.parsing.backends.antlr4 import parse as parse_antlr4_to_ast
 from dj.sql.parsing.backends.antlr4 import parse_statement as parse_antlr4
+from dj.sql.parsing.backends.sqloxide import parse
 
 
 @pytest.mark.skipif("not config.getoption('tpcds')")
@@ -235,7 +235,6 @@ def test_parsing_sparksql_tpcds_queries_w_sqloxide(query_file, request, monkeypa
     monkeypatch.chdir(request.fspath.dirname)
     with open(query_file, encoding="UTF-8") as file:
         parse(file.read(), dialect="hive")
-
 
 
 @pytest.mark.skipif("not config.getoption('tpcds')")
@@ -810,7 +809,8 @@ def test_parsing_trino_tpcds_queries_w_antlr4(query_file, request, monkeypatch):
     monkeypatch.chdir(request.fspath.dirname)
     with open(query_file, encoding="UTF-8") as file:
         parse_antlr4(file.read())
-        
+
+
 @pytest.mark.skipif("not config.getoption('tpcds-antlr-to-ast')")
 @pytest.mark.parametrize(
     "query_file",
@@ -1030,7 +1030,11 @@ def test_parsing_ansi_tpcds_queries_w_antlr4_to_ast(query_file, request, monkeyp
         ("./sparksql/query99.sql"),
     ],
 )
-def test_parsing_sparksql_tpcds_queries_w_antlr4_to_ast(query_file, request, monkeypatch):
+def test_parsing_sparksql_tpcds_queries_w_antlr4_to_ast(
+    query_file,
+    request,
+    monkeypatch,
+):
     """
     Test parsing Spark-SQL TPCDS queries into DJ ASTs
     """
@@ -1155,3 +1159,62 @@ def test_parsing_trino_tpcds_queries_w_antlr4_to_ast(query_file, request, monkey
     monkeypatch.chdir(request.fspath.dirname)
     with open(query_file, encoding="UTF-8") as file:
         parse_antlr4_to_ast(file.read())
+
+
+@pytest.mark.skipif("not config.getoption('tpcds-antlr-to-ast')")
+@pytest.mark.parametrize(
+    "query_string",
+    [
+        """SELECT suit, key, value
+    FROM suites_and_ranks_arrays
+    LATERAL VIEW EXPLODE(rankmap) AS key, value
+    ORDER BY suit;""",
+        """SELECT suit, exploded_rank
+    FROM suites_and_ranks_arrays
+    LATERAL VIEW EXPLODE(rank) exploded_rank
+    ORDER BY suit;""",
+        """SELECT suit, exploded_rank, key, value
+    FROM suites_and_ranks_arrays
+    LATERAL VIEW EXPLODE(rank) AS exploded_rank
+    LATERAL VIEW EXPLODE(rankmap) AS key, value
+    ORDER BY suit;""",
+    ],
+)
+def test_lateral_view_explode(query_string):
+    """
+    Test LATERAL VIEW EXPLODE queries
+    """
+    parse_antlr4_to_ast(query_string)
+
+
+@pytest.mark.skipif("not config.getoption('tpcds-antlr-to-ast')")
+@pytest.mark.parametrize(
+    "query_string",
+    [
+        """Select suit, exploded_rank, exploded_rank2
+    from suites_and_ranks_arrays
+    CROSS JOIN UNNEST(rank) as t(exploded_rank)
+    ORDER BY suit;""",
+        """Select suit, exploded_rank, exploded_rank2
+    from suites_and_ranks_arrays
+    CROSS JOIN UNNEST(rank, rank) as t(exploded_rank, exploded_rank2)
+    ORDER BY suit;""",
+        """Select suit, exploded_rank, exploded_rank2
+    from suites_and_ranks_arrays
+    CROSS JOIN UNNEST(rank) as t(exploded_rank)
+    CROSS JOIN UNNEST(rank) as t(exploded_rank2)""",
+        """Select suit, key, value
+    from suites_and_ranks_arrays
+    CROSS JOIN UNNEST(rankmap) as t(key, value)
+    ORDER BY suit;""",
+        """Select suit, exploded_rank, k, value
+    from suites_and_ranks_arrays
+    CROSS JOIN UNNEST(rank, rankmap) as t(exploded_rank, key, value)
+    ORDER BY suit;""",
+    ],
+)
+def test_cross_join_unnest(query_string):
+    """
+    Test CROSS JOIN UNNEST queries
+    """
+    parse_antlr4_to_ast(query_string)
