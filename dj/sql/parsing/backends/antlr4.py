@@ -529,10 +529,18 @@ def _(ctx: sbp.FromClauseContext):
 @visit.register
 def _(ctx: sbp.JoinCriteriaContext):
     if expr:=ctx.booleanExpression():
-        return ast.Join(on=visit(expr))
-    return ast.Join(using(visit(ctx.identifierList())))
+        return ast.JoinCriteria(on=visit(expr))
+    return ast.JoinCriteria(using=(visit(ctx.identifierList())))
     
-
+@visit.register
+def _(ctx: sbp.ComparisonContext):
+    left, right = visit(ctx.left), visit(ctx.right)
+    op = visit(ctx.comparisonOperator())
+    return ast.BinaryOp(op, left, right)
+    
+@visit.register
+def _(ctx: sbp.ComparisonOperatorContext):
+    return ctx.getText()
 
 def parse(sql: str) -> ast.Query:
     """
