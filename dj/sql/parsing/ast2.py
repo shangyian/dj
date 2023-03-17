@@ -789,7 +789,11 @@ class Table(TableExpression, Named):
         return self
 
     def __str__(self) -> str:
-        return str(self.alias_or_name)
+        if self.alias_or_name.name == "AS":
+            alias_or_name = ""
+        else:
+            alias_or_name = str(self.alias_or_name)
+        return alias_or_name
 
 
 class Operation(Expression):
@@ -1200,7 +1204,7 @@ class LateralView(Expression):
         parts.append(f" {self.func}")
         parts.append(f" {self.table}")
         if self.columns:
-            parts.append(f" AS {' '.join(str(col) for col in self.columns)}")
+            parts.append(f" AS {', '.join(str(col) for col in self.columns)}")
         return "".join(parts)
 
 
@@ -1250,7 +1254,7 @@ class FunctionTable(TableExpression, Named, Operation):
     def __str__(self) -> str:
         alias = f" AS {self.alias}" if self.alias else ""
         cols = f"({', '.join(str(col) for col in self.column_list)})"
-        return f"{self.name}({', '.join(str(arg) for arg in self.args)}){alias}{cols}"
+        return f"{self.name}{alias}{cols}"
 
 
 @dataclass(eq=False)
