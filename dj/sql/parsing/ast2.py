@@ -713,6 +713,7 @@ class TableExpression(Aliasable, Expression):
     A type for table expressions
     """
 
+    column_list: List[Column] = field(default_factory=list)
     _columns: Set[Column] = field(init=False, repr=False, default_factory=set)
 
     @property
@@ -757,7 +758,7 @@ class TableExpression(Aliasable, Expression):
 
 
 @dataclass(eq=False)
-class Table(Named, TableExpression):
+class Table(TableExpression, Named):
     """
     A type for tables
     """
@@ -1162,15 +1163,20 @@ class Join(Node):
     """
 
     join_type: str
-    table: Expression
+    right: Expression
     criteria: Optional[JoinCriteria] = None
-
+    lateral: bool = False
+    natural:bool = False
     def __str__(self) -> str:
         parts = []
+        if self.natural:
+            parts.append("NATURAL ")
         if self.join_type:
             parts.append(f"{self.join_type} ")
         parts.append("JOIN ")
-        parts.append(str(self.table))
+        if self.lateral:
+            parts.append("LATERAL ")
+        parts.append(str(self.right))
         if self.criteria:
             parts.append(f" {self.criteria}")
         return "".join(parts)
@@ -1234,7 +1240,7 @@ class From(Node):
 
 
 @dataclass(eq=False)
-class FunctionTable(Named, TableExpression, Operation):
+class FunctionTable(TableExpression, Named, Operation):
     """
     Represents a table-valued function used in a statement
     """
@@ -1242,7 +1248,9 @@ class FunctionTable(Named, TableExpression, Operation):
     args: List[Expression] = field(default_factory=list)
 
     def __str__(self) -> str:
-        return f"{self.name}({', '.join(str(arg) for arg in self.args)})"
+        alias = f" AS {self.alias}" if self.alias else ""
+        cols = f"({', '.join(str(col) for col in self.column_list)})"
+        return f"{self.name}({', '.join(str(arg) for arg in self.args)}){alias}{cols}"
 
 
 @dataclass(eq=False)

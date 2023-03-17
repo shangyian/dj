@@ -175,10 +175,12 @@ class Visitor:
             return None
         func = self.registry.get(type(ctx), None)
         if func is None:
-            raise TypeError(f"No visitor registered for type {type(ctx).__name__}")
+            line, col = ctx.start.line, ctx.start.column
+            raise TypeError(f"{line}:{col} No visitor registered for type {type(ctx).__name__}")
         result = func(ctx)
         if result is None:
-            raise DJParseException(f"Could not parse {ctx.getText()}")
+            line, col = ctx.start.line, ctx.start.column
+            raise DJParseException(f"{line}:{col} Could not parse {ctx.getText()}")
         return result
 
 
@@ -234,7 +236,7 @@ def _(ctx: sbp.SortItemContext):
     order = ""
     if ordering := ctx.ordering:
         order = ordering.text.upper()
-    null_order = ""
+    nulls = ""
     if null_order := ctx.nullOrder:
         nulls = "NULLS " + null_order.text
     return ast.SortItem(expr, order, nulls)
@@ -422,26 +424,12 @@ def _(ctx: sbp.StarContext):
 
 
 @visit.register
-def _(ctx: sbp.FromClauseContext):
-    relations = visit((ctx.relation()))
-    laterals = visit((ctx.lateralView()))
-    tables = [rel for rel in relations if isinstance(rel, ast.Table)]
-    joins = [rel for rel in relations if isinstance(rel, ast.Join)]
-    return ast.From(tables, joins, laterals)
-
-
-@visit.register
-def _(ctx: sbp.RelationContext):
-    return visit(ctx.relationPrimary())
-
-
-@visit.register
 def _(ctx: sbp.TableNameContext):
     if ctx.temporalClause():
         return
     name = visit(ctx.multipartIdentifier())
-    alias = visit(ctx.tableAlias())
-    table = ast.Table(name)
+    alias, cols = visit(ctx.tableAlias())
+    table = ast.Table(name, column_list=cols)
     if alias:
         table.set_alias(ast.Name(alias))
     return table
@@ -453,16 +441,6 @@ def _(ctx: sbp.MultipartIdentifierContext):
     for i in range(len(names) - 1, 0, -1):
         names[i].namespace = names[i - 1]
     return names[-1]
-
-
-@visit.register
-def _(ctx: sbp.TableAliasContext):
-    name = ""
-    if ident := ctx.strictIdentifier():
-        name = visit(ident)
-    if ctx.identifierList():
-        return
-    return name
 
 
 @visit.register
@@ -485,6 +463,76 @@ def _(ctx: sbp.LateralViewContext):
     table = ast.Table(visit(ctx.tblName))
     columns = [ast.Column(name) for name in visit(ctx.colName)]
     return ast.LateralView(outer, func, table, columns)
+
+@visit.register
+def _(ctx: sbp.RelationContext):
+    rels = []
+    if rel_ext:=ctx.relationExtension():
+        rels = visit(rel_ext)
+    return visit(ctx.relationPrimary()), rels
+
+@visit.register
+def _(ctx: sbp.RelationExtensionContext):
+    if join_rel:=ctx.joinRelation():
+        return visit(join_rel)
+    
+@visit.register
+def _(ctx: sbp.JoinTypeContext):
+    return ctx.getText()
+    
+@visit.register
+def _(ctx: sbp.JoinRelationContext):
+    kind = visit(ctx.joinType())
+    lateral = bool(ctx.LATERAL())
+    natural = bool(ctx.NATURAL())
+    criteria = None
+    right = visit(ctx.right)
+    if join_criteria:=ctx.joinCriteria():
+        criteria = visit(join_criteria)
+    return ast.Join(kind, right, criteria=criteria, lateral=lateral, natural=natural)
+
+@visit.register
+def _(ctx: sbp.TableValuedFunctionContext):
+    return visit(ctx.functionTable())
+
+@visit.register
+def _(ctx: sbp.FunctionTableContext):
+    name = visit(ctx.funcName)
+    args = visit(ctx.expression())
+    alias, cols = visit(ctx.tableAlias())
+    return ast.FunctionTable(name, args = args, column_list = [ast.Column(name) for name in cols]).set_alias(alias)
+
+@visit.register
+def _(ctx: sbp.TableAliasContext):
+    if ident:=ctx.strictIdentifier():
+        return visit(ident), visit(ctx.identifierList())
+    return None, []
+
+@visit.register
+def _(ctx: sbp.IdentifierListContext):
+    return visit(ctx.identifierSeq())
+
+@visit.register
+def _(ctx: sbp.IdentifierSeqContext):
+    return visit(ctx.ident)
+
+@visit.register
+def _(ctx: sbp.FromClauseContext):
+    relations = visit((ctx.relation()))
+    laterals = visit((ctx.lateralView()))
+    tables = [rel[0] for rel in relations]
+    joins = list(ast.flatten([rel[1] for rel in relations]))
+    if ctx.pivotClause() or ctx.unpivotClause():
+        return
+    return ast.From(tables, joins, laterals)
+
+@visit.register
+def _(ctx: sbp.JoinCriteriaContext):
+    if expr:=ctx.booleanExpression():
+        return ast.Join(on=visit(expr))
+    return ast.Join(using(visit(ctx.identifierList())))
+    
+
 
 def parse(sql: str) -> ast.Query:
     """
