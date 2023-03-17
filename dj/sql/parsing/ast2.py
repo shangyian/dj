@@ -1224,7 +1224,7 @@ class From(Node):
 
     def __str__(self) -> str:
         parts = ["FROM "]
-        tables_and_views = self.tables + [view.table for view in self.lateral_views]
+        tables_and_views = self.tables
         parts.append(",\n".join(str(tbl) for tbl in tables_and_views))
         for join in self.joins:
             parts.append(f"\n{join}")
