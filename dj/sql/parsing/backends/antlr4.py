@@ -545,6 +545,15 @@ def _(ctx: sbp.ComparisonContext):
 def _(ctx: sbp.ComparisonOperatorContext):
     return ctx.getText()
 
+
+@visit.register
+def _(ctx: sbp.WhereClauseContext):
+    return visit(ctx.booleanExpression())
+
+@visit.register
+def _(ctx: sbp.StringLiteralContext):
+    return ast.String(ctx.getText())
+
 def parse(sql: str) -> ast.Query:
     """
     Parse a string into a DJ ast using the ANTLR4 backend.

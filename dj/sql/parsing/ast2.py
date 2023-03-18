@@ -892,8 +892,6 @@ class Value(Expression):
     value: Union[str, bool, float, int, None]
 
     def __str__(self) -> str:
-        if isinstance(self, String):
-            return f"'{self.value}'"
         return str(self.value)
 
 
