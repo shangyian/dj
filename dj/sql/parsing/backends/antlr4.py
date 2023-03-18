@@ -619,7 +619,9 @@ def _(ctx: sbp.WhenClauseContext):
 
 @visit.register
 def _(ctx: sbp.ParenthesizedExpressionContext):
-    return visit(ctx.expression())
+    expr = visit(ctx.expression())
+    expr.set_parenthesized(True)
+    return expr
 
 @visit.register
 def _(ctx: sbp.NullLiteralContext):
