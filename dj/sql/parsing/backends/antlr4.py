@@ -658,6 +658,10 @@ def _(ctx: sbp.ExistsContext):
 def _(ctx: sbp.LogicalNotContext):
     return ast.UnaryOp(op="NOT", expr=visit(ctx.booleanExpression()))
 
+@visit.register
+def _(ctx: sbp.SubqueryContext):
+    return visit(ctx.query().queryTerm())
+
 def parse(sql: str) -> ast.Query:
     """
     Parse a string into a DJ ast using the ANTLR4 backend.
