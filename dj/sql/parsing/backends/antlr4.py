@@ -508,7 +508,8 @@ def _(ctx: sbp.FunctionTableContext):
 @visit.register
 def _(ctx: sbp.TableAliasContext):
     if ident:=ctx.strictIdentifier():
-        return visit(ident), visit(ctx.identifierList())
+        identifier_list = visit(ctx.identifierList()) if ctx.identifierList() else []
+        return visit(ident), identifier_list
     return None, []
 
 @visit.register
@@ -545,7 +546,6 @@ def _(ctx: sbp.ComparisonContext):
 def _(ctx: sbp.ComparisonOperatorContext):
     return ctx.getText()
 
-
 @visit.register
 def _(ctx: sbp.WhereClauseContext):
     return visit(ctx.booleanExpression())
@@ -553,6 +553,30 @@ def _(ctx: sbp.WhereClauseContext):
 @visit.register
 def _(ctx: sbp.StringLiteralContext):
     return ast.String(ctx.getText())
+
+@visit.register
+def _(ctx: sbp.CtesContext):
+    names = {}
+    selects = []
+    for namedQuery in ctx.namedQuery():
+        if namedQuery.name in names:
+            raise SqlSyntaxError(f"Duplicate CTE definition names: {namedQuery.name}")
+        select = visit(namedQuery.query().queryTerm())
+        select.set_alias(namedQuery.name)
+        selects.append(select)
+    return selects
+
+@visit.register
+def _(ctx: sbp.NamedQueryContext):
+    return visit(ctx.query())
+
+@visit.register
+def _(ctx: sbp.LogicalBinaryContext):
+    return ast.BinaryOp(ctx.operator.text, visit(ctx.left), visit(ctx.right))
+
+@visit.register
+def _(ctx: sbp.SubqueryExpressionContext):
+    return visit(ctx.query())
 
 def parse(sql: str) -> ast.Query:
     """
