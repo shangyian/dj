@@ -578,6 +578,49 @@ def _(ctx: sbp.LogicalBinaryContext):
 def _(ctx: sbp.SubqueryExpressionContext):
     return visit(ctx.query())
 
+@visit.register
+def _(ctx: sbp.SetOperationContext):
+    left = visit(ctx.left)
+    right = visit(ctx.left)
+    set_op = ast.SetOp(kind="UNION", table=right)
+    left.add_set_op(set_op)
+    return left
+
+@visit.register
+def _(ctx: sbp.AliasedQueryContext):
+    ident, _ = visit(ctx.tableAlias())
+    query = visit(ctx.query())
+    select = query.select
+    select.set_alias(ident)
+    return select
+
+@visit.register
+def _(ctx: sbp.SearchedCaseContext):
+    conditions = []
+    results = []
+    for when in ctx.whenClause():
+        condition, result = visit(when)
+        conditions.append(condition)
+        results.append(result)
+    return ast.Case(
+        conditions=conditions,
+        else_result=visit(ctx.elseExpression),
+        results=results,
+    )
+
+@visit.register
+def _(ctx: sbp.WhenClauseContext):
+    condition, result = visit(ctx.condition), visit(ctx.result)
+    return condition, result
+
+@visit.register
+def _(ctx: sbp.ParenthesizedExpressionContext):
+    return visit(ctx.expression())
+
+@visit.register
+def _(ctx: sbp.NullLiteralContext):
+    return ast.Null(value=None)
+
 def parse(sql: str) -> ast.Query:
     """
     Parse a string into a DJ ast using the ANTLR4 backend.

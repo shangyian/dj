@@ -1293,6 +1293,12 @@ class Select(TableExpression):
                 f"Expected at least a single item in projection at {self}.",
             )
 
+    def add_set_op(self, set_op: SetOp):
+        """
+        Add a set op such as UNION, UNION ALL or INTERSECT
+        """
+        self.set_op = set_op
+
     def add_aliases_to_unnamed_columns(self) -> None:
         """
         Add an alias to any unnamed columns in the projection (`col{n}`)
