@@ -483,21 +483,13 @@ class Node(ABC):
 
 TExpression = TypeVar("TExpression", bound="Expression")  # pylint: disable=C0103
 
-
+@dataclass(eq=False)
 class Expression(Node):
     """
     An expression type simply for type checking
     """
 
-    parenthesized_: bool = False
-
-    @property
-    def parenthesized(self)->bool:
-        return self.parenthesized_
-
-    def set_parenthesized(self: TNode, parenthesized:bool) -> TNode:
-        self.parenthesized_=parenthesized
-        return self
+    parenthesized: bool = field(init=False, default = False)
 
     @property
     def type(self) -> ColumnType:
@@ -576,11 +568,7 @@ class Aliasable(Node):
     A mixin for Nodes that are aliasable
     """
 
-    alias_: Optional[Name] = None
-
-    @property
-    def alias(self)->Optional[Name]:
-        return self.alias_
+    alias: Optional[Name] = field(init=False, default=None)
 
     def set_alias(self: TNode, alias: Name) -> TNode:
         self.alias_ = alias

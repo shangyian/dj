@@ -184,7 +184,7 @@ class Visitor:
             line, col = ctx.start.line, ctx.start.column
             raise DJParseException(f"{line}:{col} Could not parse {ctx.getText()}")
         if isinstance(result, ast.Expression) and context_parenthesis(ctx):
-            result.set_parenthesized(True)
+            result.parenthesized=(True)
         return result
 
 
@@ -341,7 +341,7 @@ def _(ctx: sbp.NamedExpressionSeqContext):
 def _(ctx: sbp.NamedExpressionContext):
     expr = visit(ctx.expression())
     if alias := ctx.name:
-        expr.set_alias(visit(alias))
+        expr.alias=(visit(alias))
     return expr
 
 
@@ -438,7 +438,7 @@ def _(ctx: sbp.TableNameContext):
     alias, cols = visit(ctx.tableAlias())
     table = ast.Table(name, column_list=cols)
     if alias:
-        table.set_alias(ast.Name(alias))
+        table.alias=(ast.Name(alias))
     return table
 
 
@@ -566,7 +566,7 @@ def _(ctx: sbp.CtesContext):
         if namedQuery.name in names:
             raise SqlSyntaxError(f"Duplicate CTE definition names: {namedQuery.name}")
         select = visit(namedQuery.query().queryTerm())
-        select.set_alias(namedQuery.name)
+        select.alias=(namedQuery.name)
         selects.append(select)
     return selects
 
@@ -595,7 +595,7 @@ def _(ctx: sbp.AliasedQueryContext):
     ident, _ = visit(ctx.tableAlias())
     query = visit(ctx.query())
     select = query.select
-    select.set_alias(ident)
+    select.alias=(ident)
     return select
 
 @visit.register
@@ -634,7 +634,6 @@ def _(ctx: sbp.WhenClauseContext):
 @visit.register
 def _(ctx: sbp.ParenthesizedExpressionContext):
     expr = visit(ctx.expression())
-    expr.set_parenthesized(True)
     return expr
 
 @visit.register
