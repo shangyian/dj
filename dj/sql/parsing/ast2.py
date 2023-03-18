@@ -1382,18 +1382,6 @@ class Select(TableExpression):
 
 
 @dataclass(eq=False)
-class Not(Node):
-    """
-    Logical not
-    """
-
-    child: Node
-
-    def __str__(self) -> str:
-        return f"NOT {self.child}"
-
-
-@dataclass(eq=False)
 class SortItem(Node):
     """
     Defines a sort item of an expression
