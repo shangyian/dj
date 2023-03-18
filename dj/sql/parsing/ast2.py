@@ -1114,6 +1114,31 @@ class Case(Expression):
             self.else_result.is_aggregation() if self.else_result else True
         )
 
+@dataclass(eq=False)
+class Interval(Expression):
+    """
+    An interval
+    """
+
+    conditions: List[Expression] = field(default_factory=list)
+    else_result: Optional[Expression] = None
+    operand: Optional[Expression] = None
+    results: List[Expression] = field(default_factory=list)
+
+    def __str__(self) -> str:
+        branches = "\n\tWHEN ".join(
+            f"{(cond)} THEN {(result)}"
+            for cond, result in zip(self.conditions, self.results)
+        )
+        return f"""(CASE
+        WHEN {branches}
+        ELSE {(self.else_result)}
+    END)"""
+
+    def is_aggregation(self) -> bool:
+        return all(result.is_aggregation() for result in self.results) and (
+            self.else_result.is_aggregation() if self.else_result else True
+        )
 
 @dataclass(eq=False)
 class Subscript(Expression):
@@ -1284,6 +1309,19 @@ class SetOp(Node):
 
 
 @dataclass(eq=False)
+class Cast(Node):
+    """
+    A cast to a specified type
+    """
+
+    data_type: str
+    expression: Expression
+
+    def __str__(self) -> str:
+        return f"CAST({self.expression} AS {self.data_type})"
+
+
+@dataclass(eq=False)
 class Select(TableExpression):
     """
     A single select statement type
@@ -1353,6 +1391,18 @@ class Select(TableExpression):
         if subselect:
             return "(" + select + ")"
         return select
+
+
+@dataclass(eq=False)
+class Not(Node):
+    """
+    Logical not
+    """
+
+    child: Node
+
+    def __str__(self) -> str:
+        return f"NOT {self.child}"
 
 
 @dataclass(eq=False)

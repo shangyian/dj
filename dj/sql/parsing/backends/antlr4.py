@@ -599,6 +599,20 @@ def _(ctx: sbp.AliasedQueryContext):
     return select
 
 @visit.register
+def _(ctx: sbp.SimpleCaseContext):
+    conditions = []
+    results = []
+    for when in ctx.whenClause():
+        condition, result = visit(when)
+        conditions.append(condition)
+        results.append(result)
+    return ast.Case(
+        conditions=conditions,
+        else_result=visit(ctx.elseExpression) if ctx.elseExpression else None,
+        results=results,
+    )
+
+@visit.register
 def _(ctx: sbp.SearchedCaseContext):
     conditions = []
     results = []
@@ -608,7 +622,7 @@ def _(ctx: sbp.SearchedCaseContext):
         results.append(result)
     return ast.Case(
         conditions=conditions,
-        else_result=visit(ctx.elseExpression),
+        else_result=visit(ctx.elseExpression) if ctx.elseExpression else None,
         results=results,
     )
 
@@ -626,6 +640,24 @@ def _(ctx: sbp.ParenthesizedExpressionContext):
 @visit.register
 def _(ctx: sbp.NullLiteralContext):
     return ast.Null(value=None)
+
+@visit.register
+def _(ctx: sbp.CastContext):
+    data_type = visit(ctx.dataType())
+    expression = visit(ctx.expression())
+    return ast.Cast(data_type=data_type, expression=expression)
+
+@visit.register
+def _(ctx: sbp.PrimitiveDataTypeContext):
+    return visit(ctx.identifier())
+
+@visit.register
+def _(ctx: sbp.ExistsContext):
+    return ast.UnaryOp(op="EXISTS", expr=ctx.query().queryTerm())
+
+@visit.register
+def _(ctx: sbp.LogicalNotContext):
+    return ast.UnaryOp(op="NOT", expr=visit(ctx.booleanExpression()))
 
 def parse(sql: str) -> ast.Query:
     """
