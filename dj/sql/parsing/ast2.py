@@ -489,6 +489,16 @@ class Expression(Node):
     An expression type simply for type checking
     """
 
+    parenthesized_: bool = False
+
+    @property
+    def parenthesized(self)->bool:
+        return self.parenthesized_
+
+    def set_parenthesized(self: TNode, parenthesized:bool) -> TNode:
+        self.parenthesized_=parenthesized
+        return self
+
     @property
     def type(self) -> ColumnType:
         """
@@ -812,7 +822,10 @@ class UnaryOp(Operation):
     expr: Expression
 
     def __str__(self) -> str:
-        return f"{self.op} {(self.expr)}"
+        ret = f"{self.op} {(self.expr)}"
+        if self.parenthesized:
+            return f"({ret})"
+        return ret
 
 
 @dataclass(eq=False)
@@ -826,8 +839,10 @@ class BinaryOp(Operation):
     right: Expression
 
     def __str__(self) -> str:
-        return f"{self.left} {self.op} {self.right}"
-
+        ret = f"{self.left} {self.op} {self.right}"
+        if self.parenthesized:
+            return f"({ret})"
+        return ret
 
 @dataclass(eq=False)
 class Over(Expression):

@@ -149,6 +149,10 @@ def tree_to_strings(tree, indent=0):
             result += tree_to_strings(child, indent + 1)
     return result
 
+def context_parenthesis(ctx):
+    if hasattr(ctx, "LEFT_PAREN") and hasattr(ctx, "RIGHT_PAREN") and ctx.LEFT_PAREN() and ctx.RIGHT_PAREN():
+        return True
+    return False
 
 class Visitor:
     def __init__(self):
@@ -169,8 +173,6 @@ class Visitor:
         return func
 
     def __call__(self, ctx):
-        # if ctx.getText()[-1]=='k':
-        #     import pdb; pdb.set_trace()
         if type(ctx) == antlr4.tree.Tree.TerminalNodeImpl:
             return None
         func = self.registry.get(type(ctx), None)
@@ -181,6 +183,8 @@ class Visitor:
         if result is None:
             line, col = ctx.start.line, ctx.start.column
             raise DJParseException(f"{line}:{col} Could not parse {ctx.getText()}")
+        if isinstance(result, ast.Expression) and context_parenthesis(ctx):
+            result.set_parenthesized(True)
         return result
 
 
