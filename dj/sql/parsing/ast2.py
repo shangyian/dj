@@ -157,17 +157,11 @@ class Node(ABC):
 
     parent: Optional["Node"] = None
     parent_key: Optional[str] = None
-    validate_strict: Optional[bool] = True  # how to validate; `None` is no validation
     __instantiated = False
 
     def __post_init__(self):
         self.add_self_as_parent()
         self.__instantiated = True
-
-    def validate(self):
-        """
-        Validate a Node
-        """
 
     def clear_parent(self: TNode) -> TNode:
         """
@@ -210,9 +204,7 @@ class Node(ABC):
         for child in flatten(value):
             if isinstance(child, Node) and not key.startswith("_"):
                 child.set_parent(self, key)
-        # if node is not being instantiated for the first time let's validate
-        if self.__instantiated:
-            self.validate()
+
 
     def swap(self: TNode, other: "Node") -> TNode:
         if not (self.parent and self.parent_key):
@@ -478,6 +470,42 @@ class Node(ABC):
         """
 
 
+class Aliasable(Node):
+    """
+    A mixin for Nodes that are aliasable
+    """
+
+    alias: Optional[Name] = None
+
+    def set_alias(self: TNode, alias: Name) -> TNode:
+        self.alias = alias
+        return self
+
+    @property
+    def alias_or_name(self):
+        if self.alias is None and isinstance(self, Named):
+            return self.name
+        return self.alias
+
+
+AliasedType = TypeVar("AliasedType", bound=Node)  # pylint: disable=C0103
+
+
+@dataclass(eq=False)
+class Alias(Aliasable, Generic[AliasedType]):
+    """
+    Wraps node types with an alias
+    """
+
+    child: AliasedType = field(default_factory=Node)  # type: ignore
+
+    def __str__(self) -> str:
+        return f"{self.child} AS {self.alias}"
+
+    def is_aggregation(self) -> bool:
+        return isinstance(self.child, Expression) and self.child.is_aggregation()
+
+
 TExpression = TypeVar("TExpression", bound="Expression")  # pylint: disable=C0103
 
 @dataclass(eq=False)
@@ -511,6 +539,8 @@ class Expression(Node):
             ]
             or [False],
         )
+    def set_alias(self: TExpression, alias: "Name") -> Alias[TExpression]:
+        return Alias(self).set_alias(alias)
 
 
 @dataclass(eq=False)
@@ -560,40 +590,7 @@ class Named(Node):
         )
 
 
-class Aliasable(Node):
-    """
-    A mixin for Nodes that are aliasable
-    """
 
-    alias: Optional[Name] = None
-
-    def set_alias(self: TNode, alias: Name) -> TNode:
-        self.alias = alias
-        return self
-
-    @property
-    def alias_or_name(self):
-        if self.alias is None and isinstance(self, Named):
-            return self.name
-        return self.alias
-
-
-AliasedType = TypeVar("AliasedType", bound=Node)  # pylint: disable=C0103
-
-
-@dataclass(eq=False)
-class Alias(Aliasable, Generic[AliasedType]):
-    """
-    Wraps node types with an alias
-    """
-
-    child: AliasedType = field(default_factory=Node)  # type: ignore
-
-    def __str__(self) -> str:
-        return f"{self.child} AS {self.alias}"
-
-    def is_aggregation(self) -> bool:
-        return isinstance(self.child, Expression) and self.child.is_aggregation()
 
 
 @dataclass(eq=False)
@@ -840,12 +837,6 @@ class Over(Expression):
         super().__post_init__()
         self.validate()
 
-    def validate(self):
-        if not (self.partition_by or self.order_by):
-            raise DJParseException(
-                "An OVER requires at least a PARTITION BY or ORDER BY",
-            )
-
     def __str__(self) -> str:
         partition_by = (  # pragma: no cover
             " PARTITION BY " + ", ".join(str(exp) for exp in self.partition_by)
@@ -864,7 +855,7 @@ class Over(Expression):
 
 
 @dataclass(eq=False)
-class Function(Named, Operation, Aliasable):
+class Function(Named, Operation):
     """
     Represents a function used in a statement
     """
@@ -874,25 +865,16 @@ class Function(Named, Operation, Aliasable):
     over: Optional[Over] = None
 
     def __str__(self) -> str:
-        alias = f" AS {self.alias}" if self.alias else ""
         over = f" {self.over}" if self.over else ""
-        return f"{self.name}({self.quantifier}{', '.join(str(arg) for arg in self.args)}){over}{alias}"
+        return f"{self.name}({self.quantifier}{', '.join(str(arg) for arg in self.args)}){over}"
 
     def is_aggregation(self) -> bool:
         return function_registry[self.name.name.upper()].is_aggregation
 
-
-@dataclass(eq=False)  # type: ignore
 class Value(Expression):
     """
     Base class for all values number, string, boolean
     """
-
-    value: Union[str, bool, float, int, None]
-
-    def __str__(self) -> str:
-        return str(self.value)
-
 
 @dataclass(eq=False)
 class Null(Value):
@@ -900,16 +882,8 @@ class Null(Value):
     Null value
     """
 
-    value = None
-
-    def __post_init__(self):
-        super().__post_init__()
-        self.validate()
-
-    def validate(self):
-        if self.value is not None:
-            raise DJParseException("NULL does not take a value.")
-
+    def __str__(self) -> str:
+        return "NULL"
 
 @dataclass(eq=False)
 class Number(Value):
@@ -919,18 +893,9 @@ class Number(Value):
 
     value: Union[float, int]
 
-    def __post_init__(self):
-        super().__post_init__()
-        self.validate()
-
-    def validate(self):
-        if type(self.value) not in (float, int):
-            try:
-                self.value = int(self.value)
-            except ValueError:
-                self.value = float(self.value)
-
-
+    def __str__(self) -> str:
+        return str(self.value)
+@dataclass(eq=False)
 class String(Value):
     """
     String value
@@ -938,7 +903,9 @@ class String(Value):
 
     value: str
 
-
+    def __str__(self) -> str:
+        return str(self.value)
+@dataclass(eq=False)
 class Boolean(Value):
     """
     Boolean True/False value
@@ -946,9 +913,11 @@ class Boolean(Value):
 
     value: bool
 
+    def __str__(self) -> str:
+        return str(self.value)
 
 @dataclass(eq=False)
-class Interval(Value, Aliasable):
+class Interval(Value):
     """
     Interval value
     """
@@ -958,7 +927,17 @@ class Interval(Value, Aliasable):
     
     def __str__(self) -> str:
         return f"INTERVAL {self.sign if self.sign else ''}{self.interval} {self.qualifier}"
+@dataclass(eq=False)
+class Struct(Value):
+    """
+    Struct value
+    """
 
+    values: List[Aliasable]
+        
+    def __str__(self):
+        inner = ", ".join(str(value) for value in self.values)
+        return f"STRUCT({inner})"
 
 @dataclass(eq=False)
 class Predicate(Operation):
@@ -967,7 +946,6 @@ class Predicate(Operation):
     """
 
     negated: bool = False
-
 
 @dataclass(eq=False)
 class Between(Predicate):
@@ -1139,20 +1117,6 @@ class JoinCriteria(Node):
     on: Optional[Expression] = None
     using: Optional[List[Named]] = None
 
-    def __post_init__(self):
-        super().__post_init__()
-        self.validate()
-
-    def validate(self):
-        if self.on is None and self.using is None:
-            raise DJParseException(f"Expected either an ON or USING clause at {self}.")
-        if self.on is not None and self.using is not None:
-            raise DJParseException(
-                f"Expected either an ON or USING clause, not both, at {self}.",
-            )
-        if self.on is not None:
-            self.on.validate()
-
     def __str__(self) -> str:
         if self.on:
             return f"ON {self.on}"
@@ -1219,20 +1183,6 @@ class From(Node):
     joins: List[Join] = field(default_factory=list)
     lateral_views: List[LateralView] = field(default_factory=list)
 
-    def __post_init__(self):
-        super().__post_init__()
-        self.validate()
-
-    def validate(self):
-        if not self.tables:
-            raise DJParseException(
-                f"Expected at least one table in from clause at {self}.",
-            )
-        for table in self.tables:
-            table.validate()
-        for join in self.joins:
-            join.validate()
-
     def __str__(self) -> str:
         parts = ["FROM "]
         tables_and_views = self.tables
@@ -1297,17 +1247,6 @@ class Select(TableExpression):
     having: Optional[Expression] = None
     where: Optional[Expression] = None
     set_op: Optional[SetOp] = None
-
-    def __post_init__(self):
-        super().__post_init__()
-        self.validate()
-
-    def validate(self):
-        super().validate()
-        if not self.projection:
-            raise DJParseException(
-                f"Expected at least a single item in projection at {self}.",
-            )
 
     def add_set_op(self, set_op: SetOp):
         """
