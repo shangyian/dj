@@ -783,11 +783,10 @@ class Table(TableExpression, Named):
         return self
 
     def __str__(self) -> str:
-        if self.alias_or_name.name == "AS":
-            alias_or_name = ""
-        else:
-            alias_or_name = str(self.alias_or_name)
-        return alias_or_name
+        table_str = str(self.name)
+        if self.alias:
+            table_str += f" AS {self.alias}"
+        return table_str
 
 
 class Operation(Expression):
@@ -1352,7 +1351,7 @@ class Select(TableExpression):
             parts.extend((str(self.set_op), "\n"))
 
         select = " ".join(parts).strip()
-        if subselect or self.parenthesized:
+        if subselect:
             return "(" + select + ")"
         return select
 

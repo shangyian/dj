@@ -184,7 +184,7 @@ class Visitor:
             line, col = ctx.start.line, ctx.start.column
             raise DJParseException(f"{line}:{col} Could not parse {ctx.getText()}")
         if isinstance(result, ast.Expression) and context_parenthesis(ctx):
-            result.parenthesized=(True)
+            result.parenthesized=True
         return result
 
 
