@@ -567,6 +567,7 @@ def _(ctx: sbp.CtesContext):
             raise SqlSyntaxError(f"Duplicate CTE definition names: {namedQuery.name}")
         select = visit(namedQuery.query().queryTerm())
         select.alias=visit(namedQuery.name)
+        select.parenthesized = True
         selects.append(select)
     return selects
 

@@ -1352,7 +1352,7 @@ class Select(TableExpression):
             parts.extend((str(self.set_op), "\n"))
 
         select = " ".join(parts).strip()
-        if subselect:
+        if subselect or self.parenthesized:
             return "(" + select + ")"
         return select
 
