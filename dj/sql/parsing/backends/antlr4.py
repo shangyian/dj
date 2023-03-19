@@ -216,7 +216,6 @@ def _(ctx: sbp.QueryContext):
     if ctes_ctx := ctx.ctes():
         ctes = visit(ctes_ctx)
     limit, organization = visit(ctx.queryOrganization())
-
     select = visit(ctx.queryTerm())
 
     return ast.Query(ctes=ctes, select=select, limit=limit, organization=organization)
@@ -303,6 +302,7 @@ def _(ctx: sbp.QueryPrimaryContext):
 def _(ctx: sbp.RegularQuerySpecificationContext):
     quantifier, projection = visit(ctx.selectClause())
     from_ = visit(ctx.fromClause()) if ctx.fromClause() else None
+    group_by = visit(ctx.aggregationClause())
     where = None
     if where_clause:=ctx.whereClause():
         where = visit(where_clause)
@@ -310,9 +310,31 @@ def _(ctx: sbp.RegularQuerySpecificationContext):
         quantifier=quantifier,
         projection=projection,
         from_=from_,
-        where=where
+        where=where,
+        group_by=group_by,
     )
 
+
+@visit.register
+def _(ctx: sbp.AggregationClauseContext):
+    return visit(ctx.groupByClause())
+
+@visit.register
+def _(ctx: sbp.GroupByClauseContext):
+    return visit(ctx.groupingAnalytics())
+
+@visit.register
+def _(ctx: sbp.GroupingAnalyticsContext):
+    grouping_set = visit(ctx.groupingSet())
+    if ctx.ROLLUP():
+        return ast.Function("ROLLUP", args=grouping_set)
+    if ctx.CUBE():
+        return ast.Function("CUBE", args=grouping_set)
+    return grouping_set
+
+@visit.register
+def _(ctx: sbp.GroupingSetContext):
+    return ast.Column(ctx.getText())
 
 @visit.register
 def _(ctx: sbp.SelectClauseContext):
