@@ -425,7 +425,7 @@ def _(ctx: sbp.NamedExpressionSeqContext):
 def _(ctx: sbp.NamedExpressionContext):
     expr = visit(ctx.expression())
     if alias := ctx.name:
-        expr.alias=visit(alias)
+        return expr.set_alias(visit(alias))
     return expr
 
 
@@ -522,7 +522,7 @@ def _(ctx: sbp.TableNameContext):
     alias, cols = visit(ctx.tableAlias())
     table = ast.Table(name, column_list=cols)
     if alias:
-        table.alias=(ast.Name(alias))
+        return table.set_alias(ast.Name(alias))
     return table
 
 
@@ -650,7 +650,7 @@ def _(ctx: sbp.CtesContext):
         if namedQuery.name in names:
             raise SqlSyntaxError(f"Duplicate CTE definition names: {namedQuery.name}")
         select = visit(namedQuery.query().queryTerm())
-        select.alias=visit(namedQuery.name)
+        select = select.set_alias(visit(namedQuery.name))
         select.parenthesized = True
         selects.append(select)
     return selects
@@ -680,7 +680,7 @@ def _(ctx: sbp.AliasedQueryContext):
     ident, _ = visit(ctx.tableAlias())
     query = visit(ctx.query())
     select = query.select
-    select.alias=(ident)
+    select = select.set_alias(ident)
     return select
 
 @visit.register
@@ -770,7 +770,7 @@ def _(ctx: sbp.SubqueryContext):
 @visit.register
 def _(ctx: sbp.StructContext):
     return ast.Struct(visit(ctx.argument))
-    
+
 def parse(sql: str) -> ast.Query:
     """
     Parse a string into a DJ ast using the ANTLR4 backend.
