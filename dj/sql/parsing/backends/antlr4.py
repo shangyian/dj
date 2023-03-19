@@ -767,6 +767,10 @@ def _(ctx: sbp.MultiUnitsIntervalContext):
 def _(ctx: sbp.SubqueryContext):
     return visit(ctx.query().queryTerm())
 
+@visit.register
+def _(ctx: sbp.StructContext):
+    return ast.Struct(visit(ctx.argument))
+    
 def parse(sql: str) -> ast.Query:
     """
     Parse a string into a DJ ast using the ANTLR4 backend.
