@@ -659,6 +659,26 @@ def _(ctx: sbp.LogicalNotContext):
     return ast.UnaryOp(op="NOT", expr=visit(ctx.booleanExpression()))
 
 @visit.register
+def _(ctx: sbp.IntervalLiteralContext):
+    interval_ctx = ctx.interval()
+    if inner_ctx:=interval_ctx.errorCapturingMultiUnitsInterval():
+        if err:=inner_ctx.unitToUnitInterval():
+            raise SqlParsingError(f"More than one from-to unit: {err}")
+        value, qualifier = visit(inner_ctx.multiUnitsInterval())
+    if inner_ctx:=interval_ctx.errorCapturingUnitToUnitInterval():
+        if inner_ctx.error1 or inner_ctx.error2:
+            err = inner_ctx.error1 if inner_ctx.error1 else inner_ctx.error2
+            raise SqlParsingError(f"More than one from-to unit: {err}")
+        value, qualifier = visit(inner_ctx.body())
+    return ast.Interval(value=value, qualifier=qualifier)
+
+@visit.register
+def _(ctx: sbp.MultiUnitsIntervalContext):
+    value = ctx.intervalValue()[0].getText()
+    units = ctx.unitInMultiUnits()[0].getText()
+    return value, units
+
+@visit.register
 def _(ctx: sbp.SubqueryContext):
     return visit(ctx.query().queryTerm())
 

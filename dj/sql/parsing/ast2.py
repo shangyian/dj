@@ -952,12 +952,16 @@ class Boolean(Value):
 
 
 @dataclass(eq=False)
-class Interval(Value):
+class Interval(Value, Aliasable):
     """
     Interval value
     """
 
-    value: timedelta
+    qualifier: str
+    sign: Optional[str] = None
+    
+    def __str__(self) -> str:
+        return f"INTERVAL {self.sign if self.sign else ''}{self.interval} {self.qualifier}"
 
 
 @dataclass(eq=False)
@@ -1102,31 +1106,6 @@ class Case(Expression):
             self.else_result.is_aggregation() if self.else_result else True
         )
 
-@dataclass(eq=False)
-class Interval(Expression):
-    """
-    An interval
-    """
-
-    conditions: List[Expression] = field(default_factory=list)
-    else_result: Optional[Expression] = None
-    operand: Optional[Expression] = None
-    results: List[Expression] = field(default_factory=list)
-
-    def __str__(self) -> str:
-        branches = "\n\tWHEN ".join(
-            f"{(cond)} THEN {(result)}"
-            for cond, result in zip(self.conditions, self.results)
-        )
-        return f"""(CASE
-        WHEN {branches}
-        ELSE {(self.else_result)}
-    END)"""
-
-    def is_aggregation(self) -> bool:
-        return all(result.is_aggregation() for result in self.results) and (
-            self.else_result.is_aggregation() if self.else_result else True
-        )
 
 @dataclass(eq=False)
 class Subscript(Expression):
