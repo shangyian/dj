@@ -253,7 +253,66 @@ def _(ctx: sbp.ExpressionContext):
 @visit.register
 def _(ctx: sbp.PredicatedContext):
     if value_expr := ctx.valueExpression():
-        return visit(value_expr)
+        if not ctx.predicate():
+            return visit(value_expr)
+    if predicate_ctx := ctx.predicate():
+        return visit(predicate_ctx)
+
+
+@visit.register
+def _(ctx: sbp.PredicateContext):
+    negated = True if ctx.NOT() else False
+    if ctx.ALL():
+        return
+    if ctx.ANY():
+        return
+    if ctx.BETWEEN():
+        low = visit(ctx.lower)
+        high = visit(ctx.upper)
+        expr = visit(ctx.parentCtx.valueExpression())
+        return ast.Between(negated, expr, low, high)
+    if ctx.DISTINCT():
+        if ctx.FROM():
+            return
+        return
+    if ctx.FALSE():
+        return
+    if ctx.LIKE():
+        if ctx.ANY():
+            return
+        if ctx.ALL():
+            return
+        if ctx.SOME():
+            return
+        return
+    if ctx.ILIKE():
+        if ctx.ANY():
+            return
+        if ctx.ALL():
+            return
+        if ctx.SOME():
+            return
+        return
+    if ctx.IN():
+        if source_ctx := ctx.query():
+            source = visit(source_ctx.queryTerm())
+        if source_ctx := ctx.expression():
+            source = visit(source_ctx)
+        expr = visit(ctx.parentCtx.valueExpression())
+        return ast.In(negated, expr, source)
+    if ctx.IS():
+        if ctx.NULL():
+            return
+        if ctx.TRUE():
+            return
+        if ctx.FALSE():
+            return
+        if ctx.UNKNOWN():
+            return
+        return
+    if ctx.RLIKE():
+        return
+    return
 
 
 @visit.register
@@ -302,7 +361,7 @@ def _(ctx: sbp.QueryPrimaryContext):
 def _(ctx: sbp.RegularQuerySpecificationContext):
     quantifier, projection = visit(ctx.selectClause())
     from_ = visit(ctx.fromClause()) if ctx.fromClause() else None
-    group_by = visit(ctx.aggregationClause())
+    group_by = visit(ctx.aggregationClause()) if ctx.aggregationClause() else []
     where = None
     if where_clause:=ctx.whereClause():
         where = visit(where_clause)
@@ -321,7 +380,10 @@ def _(ctx: sbp.AggregationClauseContext):
 
 @visit.register
 def _(ctx: sbp.GroupByClauseContext):
-    return visit(ctx.groupingAnalytics())
+    if grouping_analytics := ctx.groupingAnalytics():
+        return visit(grouping_analytics)
+    if expression:= ctx.expression():
+        return visit(expression)
 
 @visit.register
 def _(ctx: sbp.GroupingAnalyticsContext):
