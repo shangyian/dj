@@ -668,7 +668,6 @@ class Column(Aliasable, Named, Expression):
 
     def __str__(self) -> str:
         alias = "" if not self.alias else f" AS {self.alias}"
-        prefix = ""
         if self.table is not None:
             return (
                 f"{self.table}.{self.name.quote_style}{self.name}{self.name.quote_style}"
@@ -1418,7 +1417,7 @@ class Query(Expression):
 
     def __str__(self) -> str:
         subquery = bool(self.parent)
-        ctes = ",\n".join(f"{cte.name} AS ({cte.child})" for cte in self.ctes)
+        ctes = ",\n".join(f"{cte.alias_or_name} AS ({cte})" for cte in self.ctes)
         with_ = "WITH" if ctes else ""
         select = f"({(self.select)})" if subquery else (self.select)
         parts = [f"{with_}\n{ctes}\n{select}\n"]
