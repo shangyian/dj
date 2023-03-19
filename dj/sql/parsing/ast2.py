@@ -475,9 +475,9 @@ class Aliasable(Node):
     A mixin for Nodes that are aliasable
     """
 
-    alias: Optional[Name] = None
+    alias: Optional["Name"] = None
 
-    def set_alias(self: TNode, alias: Name) -> TNode:
+    def set_alias(self: TNode, alias: "Name") -> TNode:
         self.alias = alias
         return self
 
