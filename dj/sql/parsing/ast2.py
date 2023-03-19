@@ -477,9 +477,6 @@ class Node(ABC):
         Get the string of a node
         """
 
-    def set_alias(self, alias: "Name") -> "Alias":
-        return Alias(self).set_alias(alias)
-
 
 TExpression = TypeVar("TExpression", bound="Expression")  # pylint: disable=C0103
 
@@ -571,7 +568,7 @@ class Aliasable(Node):
     alias: Optional[Name] = None
 
     def set_alias(self: TNode, alias: Name) -> TNode:
-        self.alias_ = alias
+        self.alias = alias
         return self
 
     @property
@@ -868,7 +865,7 @@ class Over(Expression):
 
 
 @dataclass(eq=False)
-class Function(Named, Operation):
+class Function(Named, Operation, Aliasable):
     """
     Represents a function used in a statement
     """
@@ -878,8 +875,9 @@ class Function(Named, Operation):
     over: Optional[Over] = None
 
     def __str__(self) -> str:
+        alias = f" AS {self.alias}" if self.alias else ""
         over = f" {self.over}" if self.over else ""
-        return f"{self.name}({self.quantifier}{', '.join(str(arg) for arg in self.args)}){over}"
+        return f"{self.name}({self.quantifier}{', '.join(str(arg) for arg in self.args)}){over}{alias}"
 
     def is_aggregation(self) -> bool:
         return function_registry[self.name.name.upper()].is_aggregation
