@@ -165,10 +165,10 @@ class Visitor:
             raise ValueError(
                 "No type annotation found for the first parameter of the visitor.",
             )
-        if type_ in self.registry:
-            raise ValueError(
-                f"A visitor is already registered for type {type_.__name__}.",
-            )
+        # if type_ in self.registry:
+        #     raise ValueError(
+        #         f"A visitor is already registered for type {type_.__name__}.",
+        #     )
         self.registry[type_] = func
         return func
 

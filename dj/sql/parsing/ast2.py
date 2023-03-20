@@ -902,6 +902,7 @@ class Number(Value):
 
     def __str__(self) -> str:
         return str(self.value)
+
 @dataclass(eq=False)
 class String(Value):
     """
@@ -935,10 +936,8 @@ class Interval(Value):
     to_unit: Optional[str] = None
 
     def __str__(self) -> str:
-        if self.to is None:
-            return f"INTERVAL {self.from_} {self.from_unit}"
-        else:
-            return f"INTERVAL {self.from_} {self.from_unit} TO {self.to} {self.to_unit}"
+        to = f' TO {self.to or ""} {self.to_unit or ""}' if self.to or self.to_unit else ""
+        return f"INTERVAL {self.from_} {self.from_unit}{to}"
     
 
 @dataclass(eq=False)
