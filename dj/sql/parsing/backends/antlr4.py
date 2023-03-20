@@ -265,23 +265,18 @@ def _(ctx: sbp.PredicateContext):
     any = True if ctx.ANY() else False
     all = True if ctx.ALL() else False
     some = True if ctx.SOME() else False
+    expr = visit(ctx.parentCtx.valueExpression())
     if ctx.BETWEEN():
         low = visit(ctx.lower)
         high = visit(ctx.upper)
-        expr = visit(ctx.parentCtx.valueExpression())
         return ast.Between(negated, expr, low, high)
     if ctx.DISTINCT():
-        if ctx.FROM():
-            return
-        return
-    if ctx.FALSE():
-        return
+        right = visit(ctx.right)
+        return ast.IsDistinctFrom(negated, expr, right)
     if ctx.LIKE():
-        expr = visit(ctx.parentCtx.valueExpression())
         pattern = visit(ctx.pattern)
         return ast.Like(negated, expr, all or any or some or "", pattern, ctx.ESCAPE())
     if ctx.ILIKE():
-        expr = visit(ctx.parentCtx.valueExpression())
         pattern = visit(ctx.pattern)
         return ast.Like(negated, expr, all or any or some or "", pattern, ctx.ESCAPE(), case_sensitive=False)
     if ctx.IN():
@@ -289,20 +284,17 @@ def _(ctx: sbp.PredicateContext):
             source = visit(source_ctx.queryTerm())
         if source_ctx := ctx.expression():
             source = visit(source_ctx)
-        expr = visit(ctx.parentCtx.valueExpression())
         return ast.In(negated, expr, source)
     if ctx.IS():
         if ctx.NULL():
-            return
+            return ast.IsNull(negated, expr)
         if ctx.TRUE():
-            return
+            return ast.IsBoolean(negated, expr, "TRUE")
         if ctx.FALSE():
-            return
+            return ast.IsBoolean(negated, expr, "FALSE")
         if ctx.UNKNOWN():
-            return
-        return
+            return ast.IsBoolean(negated, expr, "UNKNOWN")
     if ctx.RLIKE():
-        expr = visit(ctx.parentCtx.valueExpression())
         pattern = visit(ctx.pattern)
         return ast.Rlike(negated, expr, pattern)
     return
