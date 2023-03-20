@@ -747,7 +747,7 @@ def _(ctx: sbp.IntervalLiteralContext):
         if inner_ctx.error1 or inner_ctx.error2:
             err = inner_ctx.error1 if inner_ctx.error1 else inner_ctx.error2
             raise SqlParsingError(f"More than one from-to unit: {err}")
-        value, qualifier = visit(inner_ctx.body())
+        value, qualifier = visit(inner_ctx.body)
     return ast.Interval(value=value, qualifier=qualifier)
 
 @visit.register
@@ -763,6 +763,32 @@ def _(ctx: sbp.SubqueryContext):
 @visit.register
 def _(ctx: sbp.StructContext):
     return ast.Struct(visit(ctx.argument))
+
+@visit.register
+def _(ctx: sbp.YearMonthIntervalDataTypeContext):
+    return ast.Interval(
+        qualifier="YEAR" if ctx.YEAR() else "MONTH",
+        sign="-" if ctx.SUB() else None,
+        interval=int(ctx.INTEGER_VALUE().getText())
+    )
+
+@visit.register
+def _(ctx: sbp.DayTimeIntervalDataTypeContext):
+    return ast.Interval(
+        qualifier="DAY" if ctx.DAY() else (
+            "HOUR" if ctx.HOUR() else (
+                "MINUTE" if ctx.MINUTE() else "SECOND"
+            )
+        ),
+        sign="-" if ctx.SUB() else None,
+        interval=int(ctx.INTEGER_VALUE()[0].getText()),
+        to_qualifier=None if len(ctx.INTEGER_VALUE()) == 1 else (
+            "HOUR" if ctx.HOUR() else (
+                "MINUTE" if ctx.MINUTE() else "SECOND"
+            )
+        ),
+        to_interval=None if len(ctx.INTEGER_VALUE()) == 1 else int(ctx.INTEGER_VALUE()[1].getText())
+    )
 
 def parse(sql: str) -> ast.Query:
     """
