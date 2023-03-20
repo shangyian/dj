@@ -452,6 +452,12 @@ def _(ctx: sbp.ConstantDefaultContext):
 def _(ctx: sbp.NumericLiteralContext):
     return ast.Number(ctx.number().getText())
 
+@visit.register
+def _(ctx: sbp.StringLitContext):
+    if string := ctx.STRING():
+        return string.getSymbol().text.strip("'")
+    return ctx.DOUBLEQUOTED_STRING().getSymbol().text.strip('"')
+
 
 @visit.register
 def _(ctx: sbp.DereferenceContext):
@@ -756,7 +762,10 @@ def _(ctx: sbp.ErrorCapturingMultiUnitsIntervalContext):
     to = None
     if utu:=ctx.unitToUnitInterval():
         to = visit(utu)
-    return ast.Interval(from_+to.from_, to.to)
+        interval = ast.Interval(from_+to.from_, to.to)
+    else:
+        interval = ast.Interval(from_)
+    return interval
     
 @visit.register
 def _(ctx: sbp.UnitToUnitIntervalContext):   
@@ -783,6 +792,8 @@ def _(ctx: sbp.ErrorCapturingUnitToUnitIntervalContext):
 
 @visit.register
 def _(ctx: sbp.IntervalValueContext):
+    if stringlit_ctx := ctx.stringLit():
+        return ast.Number(visit(stringlit_ctx))
     return ast.Number(ctx.getText())
 
 @visit.register
