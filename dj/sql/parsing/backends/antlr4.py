@@ -739,12 +739,6 @@ def _(ctx: sbp.IntervalLiteralContext):
     return visit(ctx.interval())
 
 @visit.register
-def _(ctx: sbp.MultiUnitsIntervalContext):
-    value = ctx.intervalValue()[0].getText()
-    units = ctx.unitInMultiUnits()[0].getText()
-    return value, units
-
-@visit.register
 def _(ctx: sbp.SubqueryContext):
     return visit(ctx.query().queryTerm())
 
