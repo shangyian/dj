@@ -1005,12 +1005,18 @@ class Like(Predicate):
     quantifier: str = ""
     patterns: List[Expression] = field(default_factory=list)
     escape_char: Optional[str] = None
+    case_sensitive: Optional[bool] = True
 
     def __str__(self) -> str:
         not_ = "NOT " if self.negated else ""
-        patterns = ", ".join(str(p) for p in self.patterns)
+        if self.quantifier: # quantifier means a pattern with multiple elements
+            pattern = f'({", ".join(str(p) for p in self.patterns)})'
+        else:
+            pattern = self.patterns
         escape_char = f" ESCAPE '{self.escape_char}'" if self.escape_char else ""
-        return f"{not_}{self.expr} LIKE {self.quantifier} ({patterns}){escape_char}"
+        quantifier = f"{self.quantifier} " if self.quantifier else ""
+        like_type = "LIKE" if self.case_sensitive else "ILIKE"
+        return f"{not_}{self.expr} {like_type} {quantifier}{pattern}{escape_char}"
 
 
 @dataclass(eq=False)

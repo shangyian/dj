@@ -262,10 +262,9 @@ def _(ctx: sbp.PredicatedContext):
 @visit.register
 def _(ctx: sbp.PredicateContext):
     negated = True if ctx.NOT() else False
-    if ctx.ALL():
-        return
-    if ctx.ANY():
-        return
+    any = True if ctx.ANY() else False
+    all = True if ctx.ALL() else False
+    some = True if ctx.SOME() else False
     if ctx.BETWEEN():
         low = visit(ctx.lower)
         high = visit(ctx.upper)
@@ -278,21 +277,13 @@ def _(ctx: sbp.PredicateContext):
     if ctx.FALSE():
         return
     if ctx.LIKE():
-        if ctx.ANY():
-            return
-        if ctx.ALL():
-            return
-        if ctx.SOME():
-            return
-        return
+        expr = visit(ctx.parentCtx.valueExpression())
+        pattern = visit(ctx.pattern)
+        return ast.Like(negated, expr, all or any or some or "", pattern, ctx.ESCAPE())
     if ctx.ILIKE():
-        if ctx.ANY():
-            return
-        if ctx.ALL():
-            return
-        if ctx.SOME():
-            return
-        return
+        expr = visit(ctx.parentCtx.valueExpression())
+        pattern = visit(ctx.pattern)
+        return ast.Like(negated, expr, all or any or some or "", pattern, ctx.ESCAPE(), case_sensitive=False)
     if ctx.IN():
         if source_ctx := ctx.query():
             source = visit(source_ctx.queryTerm())
@@ -311,7 +302,9 @@ def _(ctx: sbp.PredicateContext):
             return
         return
     if ctx.RLIKE():
-        return
+        expr = visit(ctx.parentCtx.valueExpression())
+        pattern = visit(ctx.pattern)
+        return ast.Rlike(negated, expr, pattern)
     return
 
 
