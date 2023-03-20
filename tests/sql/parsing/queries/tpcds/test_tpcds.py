@@ -415,10 +415,8 @@ def test_tpcds_antlr_tree_comparisons(
         content = file.read()
         for query in content.split(";"):
             if not query.isspace():
-                tree1 = parse_antlr4(query)
                 q = parse_antlr4_to_ast(query)
-                tree2 = parse_antlr4(str(q))
-                assert compare_parse_trees(tree1, tree2)
+                assert compare_parse_trees(query, str(q))
 
 
 @pytest.mark.skipif("not config.getoption('tpcds')")
