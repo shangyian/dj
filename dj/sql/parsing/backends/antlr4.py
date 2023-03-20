@@ -165,10 +165,10 @@ class Visitor:
             raise ValueError(
                 "No type annotation found for the first parameter of the visitor.",
             )
-        # if type_ in self.registry:
-        #     raise ValueError(
-        #         f"A visitor is already registered for type {type_.__name__}.",
-        #     )
+        if type_ in self.registry:
+            raise ValueError(
+                f"A visitor is already registered for type {type_.__name__}.",
+            )
         self.registry[type_] = func
         return func
 
@@ -410,7 +410,7 @@ def _(ctx: sbp.NamedExpressionSeqContext):
 def _(ctx: sbp.NamedExpressionContext):
     expr = visit(ctx.expression())
     if alias := ctx.name:
-        return ast.Alias(expr).set_alias(visit(alias))
+        return expr.set_alias(visit(alias))
     return expr
 
 

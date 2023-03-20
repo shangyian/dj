@@ -6,9 +6,10 @@ from difflib import SequenceMatcher
 
 import pytest
 
-from dj.sql.parsing.backends.antlr4 import parse as parse_antlr4_to_ast
+from dj.sql.parsing.backends.antlr4 import parse as parse_antlr4_to_ast, parse_statement
 from dj.sql.parsing.backends.antlr4 import parse_statement as parse_antlr4
 from dj.sql.parsing.backends.sqloxide import parse
+import re
 
 ansi_tpcds_files = [
         ("./ansi/query1.sql"),
@@ -349,7 +350,19 @@ def compare_parse_trees(tree1, tree2):
     # If all checks passed, the trees are equal
     return True
 
+AS_RE = re.compile(r'\sAS\s|\sas\s')
 
+def compare_query_strings(str1, str2):
+    """
+    Recursively compare two ANTLR parse trees for equality, ignoring certain elements.
+    """
+
+    str1 = AS_RE.sub(" ", str1)
+    str2 = AS_RE.sub(" ", str2)
+    tree1 = parse_statement(str1)
+    tree2 = parse_statement(str2)
+    
+    return compare_parse_trees(tree1, tree2)
 @pytest.mark.skipif("not config.getoption('tpcds')")
 @pytest.mark.parametrize(
     "query_file",
