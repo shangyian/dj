@@ -730,17 +730,7 @@ def _(ctx: sbp.LogicalNotContext):
 
 @visit.register
 def _(ctx: sbp.IntervalLiteralContext):
-    interval_ctx = ctx.interval()
-    if inner_ctx:=interval_ctx.errorCapturingMultiUnitsInterval():
-        if err:=inner_ctx.unitToUnitInterval():
-            raise SqlParsingError(f"More than one from-to unit: {err}")
-        value, qualifier = visit(inner_ctx.multiUnitsInterval())
-    if inner_ctx:=interval_ctx.errorCapturingUnitToUnitInterval():
-        if inner_ctx.error1 or inner_ctx.error2:
-            err = inner_ctx.error1 if inner_ctx.error1 else inner_ctx.error2
-            raise SqlParsingError(f"More than one from-to unit: {err}")
-        value, qualifier = visit(inner_ctx.body)
-    return ast.Interval(value=value, qualifier=qualifier)
+    return visit(ctx.interval())
 
 @visit.register
 def _(ctx: sbp.MultiUnitsIntervalContext):
@@ -757,30 +747,56 @@ def _(ctx: sbp.StructContext):
     return ast.Struct(visit(ctx.argument))
 
 @visit.register
-def _(ctx: sbp.YearMonthIntervalDataTypeContext):
-    return ast.Interval(
-        qualifier="YEAR" if ctx.YEAR() else "MONTH",
-        sign="-" if ctx.SUB() else None,
-        interval=int(ctx.INTEGER_VALUE().getText())
-    )
+def _(ctx: sbp.IntervalContext):
+    interval = visit(ctx.getChild(1))
+    return ast.Interval(from_=interval.from_, from_unit=interval.from_unit, to=interval.to, to_unit=interval.to_unit)
+
 
 @visit.register
-def _(ctx: sbp.DayTimeIntervalDataTypeContext):
-    return ast.Interval(
-        qualifier="DAY" if ctx.DAY() else (
-            "HOUR" if ctx.HOUR() else (
-                "MINUTE" if ctx.MINUTE() else "SECOND"
-            )
-        ),
-        sign="-" if ctx.SUB() else None,
-        interval=int(ctx.INTEGER_VALUE()[0].getText()),
-        to_qualifier=None if len(ctx.INTEGER_VALUE()) == 1 else (
-            "HOUR" if ctx.HOUR() else (
-                "MINUTE" if ctx.MINUTE() else "SECOND"
-            )
-        ),
-        to_interval=None if len(ctx.INTEGER_VALUE()) == 1 else int(ctx.INTEGER_VALUE()[1].getText())
-    )
+def _(ctx: sbp.ErrorCapturingMultiUnitsIntervalContext):
+    values = []
+    units = []
+    for child in ctx.getChildren():
+        if isinstance(child, sbp.IntervalValueContext):
+            value = visit(child)
+            values.append(value)
+        elif isinstance(child, sbp.UnitInMultiUnitsContext):
+            unit = visit(child)
+            units.append(unit)
+    from_ = values[0]
+    from_unit = units[0]
+    to = values[-1] if len(values) == 2 else None
+    to_unit = units[-1] if len(units) == 2 else None
+    return ast.Interval(from_=from_, from_unit=from_unit, to=to, to_unit=to_unit)
+
+
+@visit.register
+def _(ctx: sbp.ErrorCapturingUnitToUnitIntervalContext):
+    if ctx.error1 or ctx.error2:
+        raise ValueError("Error capturing unit-to-unit interval")
+    return visit(ctx.body)
+
+
+@visit.register
+def _(ctx: sbp.UnitToUnitIntervalContext):
+    from_ = visit(ctx.intervalValue())
+    from_unit, to_unit = visit(ctx.unitInUnitToUnit())
+    return ast.Interval(from_=from_, from_unit=from_unit, to=None, to_unit=to_unit)
+
+
+@visit.register
+def _(ctx: sbp.IntervalValueContext):
+    value = ctx.getText()
+    return ast.Number(value=value)
+
+@visit.register
+def _(ctx: sbp.UnitInMultiUnitsContext):
+    return ctx.getText().upper().rstrip("S")
+
+
+@visit.register
+def _(ctx: sbp.UnitInUnitToUnitContext):
+    return ctx.getText().upper()
 
 def parse(sql: str) -> ast.Query:
     """

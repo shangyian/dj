@@ -893,6 +893,13 @@ class Number(Value):
 
     value: Union[float, int]
 
+    def __post_init__(self):
+        super().__post_init__()
+        try:
+            self.value = int(self.value)
+        except ValueError:
+            self.value = float(self.value)
+
     def __str__(self) -> str:
         return str(self.value)
 @dataclass(eq=False)
@@ -922,11 +929,18 @@ class Interval(Value):
     Interval value
     """
 
-    qualifier: str
-    sign: Optional[str] = None
-    
+    from_: Number
+    from_unit: str
+    to: Optional[Number] = None
+    to_unit: Optional[str] = None
+
     def __str__(self) -> str:
-        return f"INTERVAL {self.sign if self.sign else ''}{self.interval} {self.qualifier}"
+        if self.to is None:
+            return f"INTERVAL {self.from_} {self.from_unit}"
+        else:
+            return f"INTERVAL {self.from_} {self.from_unit} TO {self.to} {self.to_unit}"
+    
+
 @dataclass(eq=False)
 class Struct(Value):
     """
