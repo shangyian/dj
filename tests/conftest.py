@@ -193,17 +193,3 @@ def pytest_addoption(parser):
         default=False,
         help="include tests for parsing TPC-DS queries",
     )
-    parser.addoption(
-        "--tpcds-antlr",
-        action="store_true",
-        dest="tpcds-antlr",
-        default=False,
-        help="include tests for parsing TPC-DS queries using antlr",
-    )
-    parser.addoption(
-        "--tpcds-antlr-to-ast",
-        action="store_true",
-        dest="tpcds-antlr-to-ast",
-        default=False,
-        help="include tests for parsing TPC-DS queries using antlr and converting it to a DJ AST",
-    )
