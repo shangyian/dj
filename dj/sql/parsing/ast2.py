@@ -903,6 +903,8 @@ class Number(Value):
     def __str__(self) -> str:
         return str(self.value)
 
+
+
 @dataclass(eq=False)
 class String(Value):
     """
@@ -913,6 +915,7 @@ class String(Value):
 
     def __str__(self) -> str:
         return str(self.value)
+
 @dataclass(eq=False)
 class Boolean(Value):
     """
@@ -924,21 +927,31 @@ class Boolean(Value):
     def __str__(self) -> str:
         return str(self.value)
 
+
+@dataclass(eq=False)
+class IntervalUnit(Value):
+    """
+    Interval unit value
+    """
+
+    unit: str
+    value: Optional[Number] = None
+    
+    def __str__(self)->str:
+        return f"{self.value or ''} {self.unit}"
+
 @dataclass(eq=False)
 class Interval(Value):
     """
     Interval value
     """
 
-    from_: Number
-    from_unit: str
-    to: Optional[Number] = None
-    to_unit: Optional[str] = None
+    from_: List[IntervalUnit]
+    to: Optional[IntervalUnit] = None
 
-    def __str__(self) -> str:
-        to = f' TO {self.to or ""} {self.to_unit or ""}' if self.to or self.to_unit else ""
-        return f"INTERVAL {self.from_} {self.from_unit}{to}"
-    
+    def __str__(self)->str:
+        to = f"TO {self.to}" if self.to else ""
+        return f"INTERVAL {' '.join(str(interval) for interval in self.from_)} {to}"
 
 @dataclass(eq=False)
 class Struct(Value):

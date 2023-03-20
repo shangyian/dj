@@ -748,51 +748,46 @@ def _(ctx: sbp.StructContext):
 
 @visit.register
 def _(ctx: sbp.IntervalContext):
-    interval = visit(ctx.getChild(1))
-    return ast.Interval(from_=interval.from_, from_unit=interval.from_unit, to=interval.to, to_unit=interval.to_unit)
-
+    return visit(ctx.children[1])
 
 @visit.register
 def _(ctx: sbp.ErrorCapturingMultiUnitsIntervalContext):
-    values = []
-    units = []
-    for child in ctx.getChildren():
-        if isinstance(child, sbp.IntervalValueContext):
-            value = visit(child)
-            values.append(value)
-        elif isinstance(child, sbp.UnitInMultiUnitsContext):
-            unit = visit(child)
-            units.append(unit)
-    from_ = values[0]
-    from_unit = units[0]
-    to = values[-1] if len(values) == 2 else None
-    to_unit = units[-1] if len(units) == 2 else None
-    return ast.Interval(from_=from_, from_unit=from_unit, to=to, to_unit=to_unit)
+    from_ = visit(ctx.body)
+    to = None
+    if utu:=ctx.unitToUnitInterval():
+        to = visit(utu)
+    return ast.Interval(from_+to.from_, to.to)
+    
+@visit.register
+def _(ctx: sbp.UnitToUnitIntervalContext):   
+    value = visit(ctx.value)
+    from_ = visit(ctx.from_)
+    to = visit(ctx.to)
+    return ast.Interval([ast.IntervalUnit(from_, value)], ast.IntervalUnit(to))
 
+@visit.register
+def _(ctx: sbp.MultiUnitsIntervalContext):
+    units = []
+    for pair_i in range(0, len(ctx.children), 2):
+        value, unit = ctx.children[pair_i:pair_i+2]
+        value = visit(value)
+        unit = visit(unit)
+        units.append(ast.IntervalUnit(unit, value))
+    return units
 
 @visit.register
 def _(ctx: sbp.ErrorCapturingUnitToUnitIntervalContext):
     if ctx.error1 or ctx.error2:
-        raise ValueError("Error capturing unit-to-unit interval")
+        raise SqlSyntaxError(f"{ctx.start.line}:{ctx.start.column} Error capturing unit-to-unit interval.")
     return visit(ctx.body)
-
-
-@visit.register
-def _(ctx: sbp.UnitToUnitIntervalContext):
-    from_ = visit(ctx.intervalValue())
-    from_unit, to_unit = visit(ctx.unitInUnitToUnit())
-    return ast.Interval(from_=from_, from_unit=from_unit, to=None, to_unit=to_unit)
-
 
 @visit.register
 def _(ctx: sbp.IntervalValueContext):
-    value = ctx.getText()
-    return ast.Number(value=value)
+    return ast.Number(ctx.getText())
 
 @visit.register
 def _(ctx: sbp.UnitInMultiUnitsContext):
     return ctx.getText().upper().rstrip("S")
-
 
 @visit.register
 def _(ctx: sbp.UnitInUnitToUnitContext):
