@@ -361,7 +361,10 @@ def test_tpcds_parse(query_file, request, monkeypatch):
     """
     monkeypatch.chdir(request.fspath.dirname)
     with open(query_file, encoding="UTF-8") as file:
-        parse_antlr4(file.read())
+        content = file.read()
+        for query in content.split(";"):
+            if not query.isspace():
+                parse_antlr4(query)
 
 
 @pytest.mark.skipif("not config.getoption('tpcds')")
@@ -375,8 +378,10 @@ def test_tpcds_to_ast(query_file, request, monkeypatch):
     """
     monkeypatch.chdir(request.fspath.dirname)
     with open(query_file, encoding="UTF-8") as file:
-        query = file.read()
-        parse_antlr4_to_ast(query)
+        content = file.read()
+        for query in content.split(";"):
+            if not query.isspace():
+                parse_antlr4_to_ast(query)
 
 
 @pytest.mark.skipif("not config.getoption('tpcds')")
@@ -421,6 +426,5 @@ def test_tpcds_str_similarities(
         content = file.read()
         for query in content.split(";"):
             if not query.isspace():
-                tree1 = parse_antlr4(query)
-                q = parse_antlr4_to_ast(query)
-                assert similar(query, str(q)) > 0.9
+                query_ast = parse_antlr4_to_ast(query)
+                assert similar(query, str(query_ast)) > 0.9
