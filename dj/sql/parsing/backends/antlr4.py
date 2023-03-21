@@ -798,6 +798,14 @@ def _(ctx: sbp.UnitInMultiUnitsContext):
 def _(ctx: sbp.UnitInUnitToUnitContext):
     return ctx.getText().upper()
 
+@visit.register
+def _(ctx: sbp.TrimContext):
+    both = "BOTH " if ctx.BOTH() else ""
+    leading = "LEADING " if ctx.LEADING() else ""
+    trailing = "TRAILING " if ctx.TRAILING() else ""
+    from_ = "FROM " if ctx.FROM() else ""
+    return ast.Function("TRIM", [visit(ctx.srcStr)], f"{both or leading or trailing}{from_}")
+
 def parse(sql: str) -> ast.Query:
     """
     Parse a string into a DJ ast using the ANTLR4 backend.

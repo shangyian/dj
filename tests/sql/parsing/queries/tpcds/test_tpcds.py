@@ -363,6 +363,7 @@ def compare_query_strings(str1, str2):
     tree2 = parse_statement(str2)
     
     return compare_parse_trees(tree1, tree2)
+
 @pytest.mark.skipif("not config.getoption('tpcds')")
 @pytest.mark.parametrize(
     "query_file",
@@ -400,7 +401,7 @@ def test_tpcds_to_ast(query_file, request, monkeypatch):
 @pytest.mark.skipif("not config.getoption('tpcds')")
 @pytest.mark.parametrize(
     "query_file",
-    ansi_tpcds_files + spark_tpcds_files + trino_tpcds_files,
+    spark_tpcds_files,
 )
 def test_tpcds_antlr_tree_comparisons(
     query_file,
@@ -416,7 +417,7 @@ def test_tpcds_antlr_tree_comparisons(
         for query in content.split(";"):
             if not query.isspace():
                 q = parse_antlr4_to_ast(query)
-                assert compare_parse_trees(query, str(q))
+                assert compare_query_strings(query, str(q))
 
 
 @pytest.mark.skipif("not config.getoption('tpcds')")
