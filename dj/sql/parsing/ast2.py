@@ -1004,7 +1004,7 @@ class In(Predicate):
             if isinstance(self.source, Select)
             else "(" + ", ".join(str(exp) for exp in self.source) + ")"
         )
-        return f"{self.expr} {not_}IN {source}"
+        return f"{self.expr} {not_}IN ({source})"
 
 
 @dataclass(eq=False)
