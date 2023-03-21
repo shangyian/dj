@@ -664,8 +664,11 @@ def _(ctx: sbp.SubqueryExpressionContext):
 @visit.register
 def _(ctx: sbp.SetOperationContext):
     left = visit(ctx.left)
-    right = visit(ctx.left)
-    set_op = ast.SetOp(kind="UNION", table=right)
+    right = visit(ctx.right)
+    right.parenthesized = False
+    operator = ctx.operator.text
+    quantifier = f" {visit(ctx.setQuantifier())}" if ctx.setQuantifier() else ""
+    set_op = ast.SetOp(kind=f"{operator}{quantifier}", table=right)
     left.add_set_op(set_op)
     return left
 
@@ -728,9 +731,11 @@ def _(ctx: sbp.CastContext)->ast.Cast:
 
 @visit.register
 def _(ctx: sbp.PrimitiveDataTypeContext)->ast.Value:
+    left_paren = ctx.LEFT_PAREN() or ""
+    right_paren = ctx.RIGHT_PAREN() or ""
     ident = visit(ctx.identifier())
     integer_values = ",".join(str(value) for value in ctx.INTEGER_VALUE()) if ctx.INTEGER_VALUE() else ""
-    return ast.Name(f"{ident} {ctx.LEFT_PAREN()}{integer_values}{ctx.RIGHT_PAREN()}")
+    return ast.Name(f"{ident} {left_paren}{integer_values}{right_paren}")
 
 @visit.register
 def _(ctx: sbp.ExistsContext)->ast.UnaryOp:

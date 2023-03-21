@@ -1277,13 +1277,13 @@ class Select(TableExpression):
     group_by: List[Expression] = field(default_factory=list)
     having: Optional[Expression] = None
     where: Optional[Expression] = None
-    set_op: Optional[SetOp] = None
+    set_op: Optional[List[SetOp]] = field(default_factory=list)
 
     def add_set_op(self, set_op: SetOp):
         """
         Add a set op such as UNION, UNION ALL or INTERSECT
         """
-        self.set_op = set_op
+        self.set_op.append(set_op)
 
     def add_aliases_to_unnamed_columns(self) -> None:
         """
@@ -1317,11 +1317,15 @@ class Select(TableExpression):
             parts.extend(("GROUP BY ", ", ".join(str(exp) for exp in self.group_by)))
         if self.having is not None:
             parts.extend(("HAVING ", str(self.having), "\n"))
-        if self.set_op is not None:
-            parts.extend((str(self.set_op), "\n"))
+        if self.set_op:
+            set_ops = "\n".join([str(so) for so in self.set_op])
+            parts.extend((set_ops, "\n"))
 
         select = " ".join(parts).strip()
 
+        if not self.parenthesized:
+            return select
+        
         if subselect:
             return "(" + select + ")"
         
