@@ -650,8 +650,8 @@ def _(ctx: sbp.CtesContext)->List[ast.Select]:
     return selects
 
 @visit.register
-def _(ctx: sbp.NamedQueryContext)->ast.Query:
-    return visit(ctx.query())
+def _(ctx: sbp.NamedQueryContext)->ast.Select:
+    return visit(ctx.query().queryTerm())
 
 @visit.register
 def _(ctx: sbp.LogicalBinaryContext)->ast.BinaryOp:
@@ -728,7 +728,9 @@ def _(ctx: sbp.CastContext)->ast.Cast:
 
 @visit.register
 def _(ctx: sbp.PrimitiveDataTypeContext)->ast.Value:
-    return visit(ctx.identifier())
+    ident = visit(ctx.identifier())
+    integer_values = ",".join(str(value) for value in ctx.INTEGER_VALUE()) if ctx.INTEGER_VALUE() else ""
+    return ast.Name(f"{ident} {ctx.LEFT_PAREN()}{integer_values}{ctx.RIGHT_PAREN()}")
 
 @visit.register
 def _(ctx: sbp.ExistsContext)->ast.UnaryOp:
