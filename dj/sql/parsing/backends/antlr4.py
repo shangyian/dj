@@ -564,7 +564,15 @@ def _(ctx: sbp.RelationExtensionContext):
     
 @visit.register
 def _(ctx: sbp.JoinTypeContext):
-    return ctx.getText()
+    anti = f"{ctx.ANTI()} " if ctx.ANTI() else ""
+    cross = f"{ctx.CROSS()} " if ctx.CROSS() else ""
+    full = f"{ctx.FULL()} " if ctx.FULL() else ""
+    inner = f"{ctx.INNER()} " if ctx.INNER() else ""
+    outer = f"{ctx.OUTER()} " if ctx.OUTER() else ""
+    semi = f"{ctx.SEMI()} " if ctx.SEMI() else ""
+    left = f"{ctx.LEFT()} " if ctx.LEFT() else ""
+    right = f"{ctx.RIGHT()} " if ctx.RIGHT() else ""
+    return f"{left}{right}{cross}{full}{semi}{outer}{inner}{anti}"
     
 @visit.register
 def _(ctx: sbp.JoinRelationContext):
