@@ -824,6 +824,35 @@ class BinaryOp(Operation):
             return f"({ret})"
         return ret
 
+
+@dataclass(eq=False)
+class FrameBound(Expression):
+    """
+    Represents frame bound in a window function
+    """
+
+    start: str
+    stop: str
+
+    def __str__(self) -> str:
+        return f"{self.start} {self.stop}"
+
+
+@dataclass(eq=False)
+class Frame(Expression):
+    """
+    Represents frame in window function
+    """
+
+    frame_type: str
+    start: FrameBound
+    end: Optional[FrameBound] = None
+
+    def __str__(self) -> str:
+        end = f" AND {self.end}" if self.end else ""
+        between = f" BETWEEN" if self.end else ""
+        return f"{self.frame_type}{between} {self.start}{end}"
+
 @dataclass(eq=False)
 class Over(Expression):
     """
@@ -831,11 +860,8 @@ class Over(Expression):
     """
 
     partition_by: List[Expression] = field(default_factory=list)
-    order_by: List["Order"] = field(default_factory=list)
-
-    def __post_init__(self):
-        super().__post_init__()
-        self.validate()
+    order_by: List["SortItem"] = field(default_factory=list)
+    window_frame: Optional[Frame] = None
 
     def __str__(self) -> str:
         partition_by = (  # pragma: no cover
@@ -851,7 +877,8 @@ class Over(Expression):
         consolidated_by = "\n".join(
             po_by for po_by in (partition_by, order_by) if po_by
         )
-        return f"OVER ({consolidated_by})"
+        window_frame = f" {self.window_frame}" if self.window_frame else ""
+        return f"OVER ({consolidated_by}{window_frame})"
 
 
 @dataclass(eq=False)

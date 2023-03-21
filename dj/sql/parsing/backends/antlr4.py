@@ -470,12 +470,30 @@ def _(ctx: sbp.DereferenceContext):
 @visit.register
 def _(ctx: sbp.FunctionCallContext):
     name = visit(ctx.functionName())
-    quantifier = ""
-    if quant_ctx := ctx.setQuantifier():
-        quantifier = visit(quant_ctx)
+    quantifier = visit(ctx.setQuantifier()) if ctx.setQuantifier() else ""
+    over = visit(ctx.windowSpec()) if ctx.windowSpec() else None
     args = visit((ctx.argument))
+    return ast.Function(name, args, quantifier=quantifier, over=over)
 
-    return ast.Function(name, args, quantifier=quantifier)
+
+@visit.register
+def _(ctx: sbp.WindowDefContext):
+    partition_by = visit(ctx.partition)
+    order_by = visit(ctx.sortItem())
+    window_frame = visit(ctx.windowFrame()) if ctx.windowFrame() else None
+    return ast.Over(partition_by=partition_by, order_by=order_by, window_frame=window_frame)
+
+
+@visit.register
+def _(ctx: sbp.WindowFrameContext):
+    start = visit(ctx.start)
+    end = visit(ctx.end) if ctx.end else None
+    return ast.Frame(ctx.frameType.text, start=start, end=end)
+
+
+@visit.register
+def _(ctx: sbp.FrameBoundContext):
+    return ast.FrameBound(start=ctx.start.text, stop=ctx.stop.text)
 
 
 @visit.register
