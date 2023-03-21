@@ -1384,7 +1384,7 @@ class Query(Expression):
 
     def __str__(self) -> str:
         subquery = bool(self.parent)
-        ctes = ",\n".join(f"{cte.alias_or_name} AS ({cte})" for cte in self.ctes)
+        ctes = ",\n".join(f"{cte.alias_or_name} AS ({cte.copy().set_alias(None)})" for cte in self.ctes)
         with_ = "WITH" if ctes else ""
         select = f"({(self.select)})" if subquery else (self.select)
         parts = [f"{with_}\n{ctes}\n{select}\n"]
