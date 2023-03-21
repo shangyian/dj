@@ -6,7 +6,7 @@ from antlr4 import InputStream, RecognitionException
 from antlr4.error.ErrorListener import ErrorListener
 from antlr4.error.Errors import ParseCancellationException
 from antlr4.error.ErrorStrategy import BailErrorStrategy
-
+from typing import List, Tuple
 from dj.sql.parsing import ast2 as ast
 from dj.sql.parsing.backends.exceptions import DJParseException
 from dj.sql.parsing.backends.grammar.generated.SqlBaseLexer import SqlBaseLexer
@@ -260,7 +260,7 @@ def _(ctx: sbp.PredicatedContext):
 
 
 @visit.register
-def _(ctx: sbp.PredicateContext):
+def _(ctx: sbp.PredicateContext)->ast.Predicate:
     negated = True if ctx.NOT() else False
     any = True if ctx.ANY() else False
     all = True if ctx.ALL() else False
@@ -634,7 +634,7 @@ def _(ctx: sbp.StringLiteralContext):
     return ast.String(ctx.getText())
 
 @visit.register
-def _(ctx: sbp.CtesContext):
+def _(ctx: sbp.CtesContext)->List[ast.Select]:
     names = {}
     selects = []
     for namedQuery in ctx.namedQuery():
@@ -647,7 +647,7 @@ def _(ctx: sbp.CtesContext):
     return selects
 
 @visit.register
-def _(ctx: sbp.NamedQueryContext):
+def _(ctx: sbp.NamedQueryContext)->ast.Query:
     return visit(ctx.query())
 
 @visit.register
@@ -703,7 +703,7 @@ def _(ctx: sbp.SearchedCaseContext)->ast.Case:
     )
 
 @visit.register
-def _(ctx: sbp.WhenClauseContext):
+def _(ctx: sbp.WhenClauseContext)->Tuple[ast.Expression, ast.Expression]:
     condition, result = visit(ctx.condition), visit(ctx.result)
     return condition, result
 
