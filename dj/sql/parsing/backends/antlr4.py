@@ -727,15 +727,15 @@ def _(ctx: sbp.PrimitiveDataTypeContext):
     return visit(ctx.identifier())
 
 @visit.register
-def _(ctx: sbp.ExistsContext):
-    return ast.UnaryOp(op="EXISTS", expr=ctx.query().queryTerm())
+def _(ctx: sbp.ExistsContext)->ast.Exists:
+    return ast.Exists(expr=ctx.query().queryTerm())
 
 @visit.register
-def _(ctx: sbp.LogicalNotContext):
+def _(ctx: sbp.LogicalNotContext)->ast.UnaryOp:
     return ast.UnaryOp(op="NOT", expr=visit(ctx.booleanExpression()))
 
 @visit.register
-def _(ctx: sbp.IntervalLiteralContext):
+def _(ctx: sbp.IntervalLiteralContext)->ast.Interval:
     return visit(ctx.interval())
 
 @visit.register
@@ -743,15 +743,15 @@ def _(ctx: sbp.SubqueryContext):
     return visit(ctx.query().queryTerm())
 
 @visit.register
-def _(ctx: sbp.StructContext):
+def _(ctx: sbp.StructContext)->ast.Struct:
     return ast.Struct(visit(ctx.argument))
 
 @visit.register
-def _(ctx: sbp.IntervalContext):
+def _(ctx: sbp.IntervalContext)->ast.Interval:
     return visit(ctx.children[1])
 
 @visit.register
-def _(ctx: sbp.ErrorCapturingMultiUnitsIntervalContext):
+def _(ctx: sbp.ErrorCapturingMultiUnitsIntervalContext)->ast.Interval:
     from_ = visit(ctx.body)
     to = None
     if utu:=ctx.unitToUnitInterval():
@@ -762,14 +762,14 @@ def _(ctx: sbp.ErrorCapturingMultiUnitsIntervalContext):
     return interval
     
 @visit.register
-def _(ctx: sbp.UnitToUnitIntervalContext):   
+def _(ctx: sbp.UnitToUnitIntervalContext)->ast.Interval:   
     value = visit(ctx.value)
     from_ = visit(ctx.from_)
     to = visit(ctx.to)
     return ast.Interval([ast.IntervalUnit(from_, value)], ast.IntervalUnit(to))
 
 @visit.register
-def _(ctx: sbp.MultiUnitsIntervalContext):
+def _(ctx: sbp.MultiUnitsIntervalContext)->List[ast.IntervalUnit]:
     units = []
     for pair_i in range(0, len(ctx.children), 2):
         value, unit = ctx.children[pair_i:pair_i+2]
@@ -779,27 +779,27 @@ def _(ctx: sbp.MultiUnitsIntervalContext):
     return units
 
 @visit.register
-def _(ctx: sbp.ErrorCapturingUnitToUnitIntervalContext):
+def _(ctx: sbp.ErrorCapturingUnitToUnitIntervalContext)->ast.Interval:
     if ctx.error1 or ctx.error2:
         raise SqlSyntaxError(f"{ctx.start.line}:{ctx.start.column} Error capturing unit-to-unit interval.")
     return visit(ctx.body)
 
 @visit.register
-def _(ctx: sbp.IntervalValueContext):
+def _(ctx: sbp.IntervalValueContext)->ast.Number:
     if stringlit_ctx := ctx.stringLit():
         return ast.Number(visit(stringlit_ctx))
     return ast.Number(ctx.getText())
 
 @visit.register
-def _(ctx: sbp.UnitInMultiUnitsContext):
+def _(ctx: sbp.UnitInMultiUnitsContext)->str:
     return ctx.getText().upper().rstrip("S")
 
 @visit.register
-def _(ctx: sbp.UnitInUnitToUnitContext):
+def _(ctx: sbp.UnitInUnitToUnitContext)->str:
     return ctx.getText().upper()
 
 @visit.register
-def _(ctx: sbp.TrimContext):
+def _(ctx: sbp.TrimContext)->ast.Function:
     both = "BOTH " if ctx.BOTH() else ""
     leading = "LEADING " if ctx.LEADING() else ""
     trailing = "TRAILING " if ctx.TRAILING() else ""
