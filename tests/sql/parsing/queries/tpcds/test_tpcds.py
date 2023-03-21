@@ -7,7 +7,6 @@ from difflib import SequenceMatcher
 import pytest
 
 from dj.sql.parsing.backends.antlr4 import parse as parse_antlr4_to_ast, parse_statement
-from dj.sql.parsing.backends.antlr4 import parse_statement as parse_antlr4
 from dj.sql.parsing.backends.sqloxide import parse
 import re
 
@@ -378,7 +377,7 @@ def test_tpcds_parse(query_file, request, monkeypatch):
         content = file.read()
         for query in content.split(";"):
             if not query.isspace():
-                parse_antlr4(query)
+                parse_statement(query)
 
 
 @pytest.mark.skipif("not config.getoption('tpcds')")
@@ -396,6 +395,24 @@ def test_tpcds_to_ast(query_file, request, monkeypatch):
         for query in content.split(";"):
             if not query.isspace():
                 parse_antlr4_to_ast(query)
+
+
+@pytest.mark.skipif("not config.getoption('tpcds')")
+@pytest.mark.parametrize(
+    "query_file",
+    spark_tpcds_files,
+)
+def test_tpcds_circular_parse(query_file, request, monkeypatch):
+    """
+    Test that the string representation of TPCDS DJ ASTs can be re-parsed
+    """
+    monkeypatch.chdir(request.fspath.dirname)
+    with open(query_file, encoding="UTF-8") as file:
+        content = file.read()
+        for query in content.split(";"):
+            if not query.isspace():
+                query_ast = parse_antlr4_to_ast(query)
+                parse_statement(str(query_ast))
 
 
 @pytest.mark.skipif("not config.getoption('tpcds')")
