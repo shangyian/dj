@@ -551,7 +551,12 @@ def _(ctx: sbp.RelationContext):
     rels = []
     if rel_ext:=ctx.relationExtension():
         rels = visit(rel_ext)
-    return visit(ctx.relationPrimary()), rels
+    relation_primary_ctx = ctx.relationPrimary()
+    select = visit(relation_primary_ctx)
+    if table_alias_ctx := relation_primary_ctx.tableAlias():
+        ident, _ = visit(table_alias_ctx)
+        select.set_alias(ident)
+    return select, rels
 
 @visit.register
 def _(ctx: sbp.RelationExtensionContext):
@@ -642,7 +647,6 @@ def _(ctx: sbp.CtesContext)->List[ast.Select]:
             raise SqlSyntaxError(f"Duplicate CTE definition names: {namedQuery.name}")
         select = visit(namedQuery.query().queryTerm())
         select = select.set_alias(visit(namedQuery.name))
-        select.parenthesized = True
         selects.append(select)
     return selects
 
@@ -656,7 +660,7 @@ def _(ctx: sbp.LogicalBinaryContext)->ast.BinaryOp:
 
 @visit.register
 def _(ctx: sbp.SubqueryExpressionContext):
-    return visit(ctx.query())
+    return visit(ctx.query().queryTerm())
 
 @visit.register
 def _(ctx: sbp.SetOperationContext):
@@ -710,7 +714,8 @@ def _(ctx: sbp.WhenClauseContext)->Tuple[ast.Expression, ast.Expression]:
 @visit.register
 def _(ctx: sbp.ParenthesizedExpressionContext)->ast.Expression:
     expr = visit(ctx.expression())
-    return expr.set_parenthesize(True)
+    expr.parenthesized = True
+    return expr
 
 @visit.register
 def _(ctx: sbp.NullLiteralContext)->ast.Null:

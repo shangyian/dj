@@ -1101,10 +1101,10 @@ class Case(Expression):
             f"{(cond)} THEN {(result)}"
             for cond, result in zip(self.conditions, self.results)
         )
-        return f"""(CASE
+        return f"""CASE
         WHEN {branches}
         ELSE {(self.else_result)}
-    END)"""
+    END"""
 
     def is_aggregation(self) -> bool:
         return all(result.is_aggregation() for result in self.results) and (
@@ -1321,8 +1321,12 @@ class Select(TableExpression):
             parts.extend((str(self.set_op), "\n"))
 
         select = " ".join(parts).strip()
+
         if subselect:
             return "(" + select + ")"
+        
+        if self.alias:
+            return f"({select}) {self.alias}"
         return select
 
 
@@ -1386,7 +1390,7 @@ class Query(Expression):
         subquery = bool(self.parent)
         ctes = ",\n".join(f"{cte.alias_or_name} AS ({cte.copy().set_alias(None)})" for cte in self.ctes)
         with_ = "WITH" if ctes else ""
-        select = f"({(self.select)})" if subquery else (self.select)
+        select = f"{self.select}" if subquery else (self.select)
         parts = [f"{with_}\n{ctes}\n{select}\n"]
         if self.organization:
             parts.append(str(self.organization))
