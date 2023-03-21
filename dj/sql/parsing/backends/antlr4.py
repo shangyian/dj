@@ -739,7 +739,9 @@ def _(ctx: sbp.PrimitiveDataTypeContext)->ast.Value:
 
 @visit.register
 def _(ctx: sbp.ExistsContext)->ast.UnaryOp:
-    return ast.UnaryOp(op="EXISTS", expr=ctx.query().queryTerm())
+    expr = visit(ctx.query().queryTerm())
+    expr.parenthesized = True
+    return ast.UnaryOp(op="EXISTS", expr=expr)
 
 @visit.register
 def _(ctx: sbp.LogicalNotContext)->ast.UnaryOp:
