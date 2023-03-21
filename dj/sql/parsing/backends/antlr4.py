@@ -410,7 +410,7 @@ def _(ctx: sbp.NamedExpressionSeqContext):
 def _(ctx: sbp.NamedExpressionContext):
     expr = visit(ctx.expression())
     if alias := ctx.name:
-        return expr.set_alias(visit(alias))
+        return ast.Alias(expr).set_alias(visit(alias))
     return expr
 
 
