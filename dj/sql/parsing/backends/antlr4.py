@@ -651,7 +651,7 @@ def _(ctx: sbp.NamedQueryContext):
     return visit(ctx.query())
 
 @visit.register
-def _(ctx: sbp.LogicalBinaryContext):
+def _(ctx: sbp.LogicalBinaryContext)->ast.BinaryOp:
     return ast.BinaryOp(ctx.operator.text, visit(ctx.left), visit(ctx.right))
 
 @visit.register
@@ -667,7 +667,7 @@ def _(ctx: sbp.SetOperationContext):
     return left
 
 @visit.register
-def _(ctx: sbp.AliasedQueryContext):
+def _(ctx: sbp.AliasedQueryContext)->ast.Select:
     ident, _ = visit(ctx.tableAlias())
     query = visit(ctx.query())
     select = query.select
@@ -675,7 +675,7 @@ def _(ctx: sbp.AliasedQueryContext):
     return select
 
 @visit.register
-def _(ctx: sbp.SimpleCaseContext):
+def _(ctx: sbp.SimpleCaseContext)->ast.Case:
     conditions = []
     results = []
     for when in ctx.whenClause():
@@ -689,7 +689,7 @@ def _(ctx: sbp.SimpleCaseContext):
     )
 
 @visit.register
-def _(ctx: sbp.SearchedCaseContext):
+def _(ctx: sbp.SearchedCaseContext)->ast.Case:
     conditions = []
     results = []
     for when in ctx.whenClause():
@@ -708,27 +708,27 @@ def _(ctx: sbp.WhenClauseContext):
     return condition, result
 
 @visit.register
-def _(ctx: sbp.ParenthesizedExpressionContext):
+def _(ctx: sbp.ParenthesizedExpressionContext)->ast.Expression:
     expr = visit(ctx.expression())
-    return expr
+    return expr.set_parenthesize(True)
 
 @visit.register
-def _(ctx: sbp.NullLiteralContext):
+def _(ctx: sbp.NullLiteralContext)->ast.Null:
     return ast.Null()
 
 @visit.register
-def _(ctx: sbp.CastContext):
+def _(ctx: sbp.CastContext)->ast.Cast:
     data_type = visit(ctx.dataType())
     expression = visit(ctx.expression())
     return ast.Cast(data_type=data_type, expression=expression)
 
 @visit.register
-def _(ctx: sbp.PrimitiveDataTypeContext):
+def _(ctx: sbp.PrimitiveDataTypeContext)->ast.Value:
     return visit(ctx.identifier())
 
 @visit.register
-def _(ctx: sbp.ExistsContext)->ast.Exists:
-    return ast.Exists(expr=ctx.query().queryTerm())
+def _(ctx: sbp.ExistsContext)->ast.UnaryOp:
+    return ast.UnaryOp(op="EXISTS", expr=ctx.query().queryTerm())
 
 @visit.register
 def _(ctx: sbp.LogicalNotContext)->ast.UnaryOp:

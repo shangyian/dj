@@ -1058,18 +1058,6 @@ class IsNull(Predicate):
         return f"{self.expr} IS {not_}NULL"
 
 @dataclass(eq=False)
-class Exists(Predicate):
-    """
-    An exists check statement
-    """
-
-    expr: Expression = field(default_factory=Expression)
-
-    def __str__(self) -> str:
-        not_ = "NOT " if self.negated else ""
-        return f"{not_}EXISTS {self.expr}"
-
-@dataclass(eq=False)
 class IsBoolean(Predicate):
     """
     A boolean check statement
