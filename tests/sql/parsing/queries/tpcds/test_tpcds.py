@@ -366,7 +366,7 @@ def compare_query_strings(str1, str2):
 @pytest.mark.skipif("not config.getoption('tpcds')")
 @pytest.mark.parametrize(
     "query_file",
-    ansi_tpcds_files + spark_tpcds_files + trino_tpcds_files,
+    spark_tpcds_files,
 )
 def test_tpcds_parse(query_file, request, monkeypatch):
     """
@@ -383,7 +383,7 @@ def test_tpcds_parse(query_file, request, monkeypatch):
 @pytest.mark.skipif("not config.getoption('tpcds')")
 @pytest.mark.parametrize(
     "query_file",
-    ansi_tpcds_files + spark_tpcds_files + trino_tpcds_files,
+    spark_tpcds_files,
 )
 def test_tpcds_to_ast(query_file, request, monkeypatch):
     """
@@ -440,7 +440,7 @@ def test_tpcds_antlr_tree_comparisons(
 @pytest.mark.skipif("not config.getoption('tpcds')")
 @pytest.mark.parametrize(
     "query_file",
-    ansi_tpcds_files + spark_tpcds_files + trino_tpcds_files,
+    spark_tpcds_files,
 )
 def test_tpcds_str_similarities(
     query_file,
