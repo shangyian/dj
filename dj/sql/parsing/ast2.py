@@ -155,11 +155,15 @@ class Node(ABC):
 
     parent: Optional["Node"] = None
     parent_key: Optional[str] = None
-    __instantiated = False
 
     def __post_init__(self):
         self.add_self_as_parent()
-        self.__instantiated = True
+
+    @property
+    def depth(self)->int:
+        if self.parent is None:
+            return 0
+        return self.parent.depth+1
 
     def clear_parent(self: TNode) -> TNode:
         """
@@ -489,10 +493,13 @@ class Aliasable(Node):
         return self
 
     @property
-    def alias_or_name(self):
-        if self.alias is None and isinstance(self, Named):
+    def alias_or_name(self)->"Name":
+        if self.alias is not None :
+            return self.alias
+        elif isinstance(self, Named):
             return self.name
-        return self.alias
+        else:
+            raise DJParseException("Node has no alias or name.")
 
 
 AliasedType = TypeVar("AliasedType", bound=Node)  # pylint: disable=C0103
@@ -564,9 +571,12 @@ class Name(Node):
     namespace: Optional["Name"] = None
 
     def __str__(self) -> str:
-        namespace = str(self.namespace) + "." if self.namespace else ""
-        return f"{namespace}{self.quote_style}{self.name}{self.quote_style}"  # pylint: disable=C0301
+        return self.identifier()
 
+    def identifier(self, quotes: bool = True) -> str:
+        quote_style = "" if not quotes else self.quote_style
+        namespace = str(self.namespace) + "." if self.namespace else ""
+        return f"{namespace}{quote_style}{self.name}{quote_style}"  # pylint: disable=C0301
 
 TNamed = TypeVar("TNamed", bound="Named")  # pylint: disable=C0103
 
@@ -609,7 +619,7 @@ class Column(Aliasable, Named, Expression):
     _table: Optional["TableExpression"] = field(repr=False, default=None)
     _type: Optional["ColumnType"] = field(repr=False, default=None)
     _expression: Optional[Expression] = field(repr=False, default=None)
-    _api_column: bool = False
+    _correlation: bool = False
 
     def add_type(self, type_: ColumnType) -> "Column":
         """
@@ -621,29 +631,15 @@ class Column(Aliasable, Named, Expression):
     @property
     def expression(self) -> Optional[Expression]:
         """
-        Return the dj_node referenced by this table
+        Return the Expression this node points to in a subquery
         """
         return self._expression
 
     def add_expression(self, expression: "Expression") -> "Column":
         """
-        Add a referenced expression
+        Add a referenced expression where the column came from
         """
         self._expression = expression
-        return self
-
-    @property
-    def is_api_column(self) -> bool:
-        """
-        Is the column added from the api?
-        """
-        return self._api_column
-
-    def set_api_column(self, api_column: bool = False) -> "Column":
-        """
-        Set the api column flag
-        """
-        self._api_column = api_column
         return self
 
     @property
@@ -653,19 +649,26 @@ class Column(Aliasable, Named, Expression):
         """
         return self._table
 
-    def add_table(self, table: "TableExpression") -> "Column":
+    def compile(self, ctx: CompileContext) -> bool:
         """
         Add a referenced table
         """
-        self._table = table.alias_or_self()  # type: ignore
-        # add column to table if it's a Table or Alias[Table]
-        if isinstance(self._table, Alias):
-            table_ = self._table.child  # type: ignore
-        else:
-            table_ = self._table  # type: ignore
-        if isinstance(table_, Table):
-            table_.add_columns(self)
-        return self
+        namespace = self.name.identifier(False) # a.x -> a
+        depth = self.depth
+        query = table.get_nearest_parent_of_type(Query) # the column's parent query
+
+        for table in ctx.query.find_all(TableExpression):
+            if namespace and namespace==table.alias_or_name.identifier(False):
+                table_depth = table.depth
+                if table_depth<depth:
+                    if table.add_ref_column(self):
+
+                elif table_depth>depth and table.get_nearest_parent_of_type(From) is query.select.from_:
+                    below_tables.append
+        
+            return False
+        if :
+            return True
 
     def __str__(self) -> str:
         as_ = " AS " if self.as_ else " "
@@ -713,31 +716,8 @@ class TableExpression(Aliasable, Expression):
     A type for table expressions
     """
 
-    column_list: List[Column] = field(default_factory=list)
-    _columns: Set[Column] = field(init=False, repr=False, default_factory=set)
-
-    @property
-    def dj_node(self) -> Optional[DJNode]:
-        """
-        Return the dj_node referenced by this table
-        """
-        return self._dj_node
-
-    def add_dj_node(self, dj_node: DJNode) -> "Table":
-        """
-        Add dj_node referenced by this table
-        """
-        if dj_node.type not in (
-            DJNodeType.TRANSFORM,
-            DJNodeType.SOURCE,
-            DJNodeType.DIMENSION,
-        ):
-            raise DJParseException(
-                f"Expected dj node of TRANSFORM, SOURCE, or DIMENSION "
-                f"but got {dj_node.type}.",
-            )
-        self._dj_node = dj_node
-        return self
+    _columns: List[Column] = field(default_factory=list)
+    _ref_columns: Set[Column] = field(init=False, repr=False, default_factory=set)
 
     @property
     def columns(self) -> Set[Column]:
@@ -746,15 +726,24 @@ class TableExpression(Aliasable, Expression):
         """
         return self._columns
 
-    def add_columns(self, *columns: Column) -> "Table":
+    @property
+    def ref_columns(self) -> Set[Column]:
         """
-        Add columns referenced from this table
+        Return the columns referenced from this table
         """
-        for column in columns:
-            if column not in self._columns:
-                self._columns.add(column)
-                column.add_table(self)
-        return self
+        return self._ref_columns
+
+    def add_ref_column(self, column: Column) -> bool:
+        """
+        Add column referenced from this table
+        returning True if the table has the column
+        and False otherwise
+        """
+        if column not in self._columns:
+            return False
+        self._columns.add(column)
+        column.add_table(self)
+        return True
 
 
 @dataclass(eq=False)
@@ -797,7 +786,6 @@ class Operation(Expression):
     """
     A type to overarch types that operate on other expressions
     """
-
 
 @dataclass(eq=False)
 class UnaryOp(Operation):
