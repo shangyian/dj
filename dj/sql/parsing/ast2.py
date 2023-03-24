@@ -666,7 +666,7 @@ class Column(Aliasable, Named, Expression):
                         self._correlation=True
                 elif table_depth>depth and table.get_nearest_parent_of_type(From) is query.select.from_:
                     below_tables.append
-        
+        #if found sources!=1 add Exception to context
             return False
         if :
             return True
