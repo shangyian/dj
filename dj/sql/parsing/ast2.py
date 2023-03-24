@@ -655,12 +655,12 @@ class Column(Aliasable, Named, Expression):
         """
         namespace = self.name.identifier(False) # a.x -> a
         depth = self.depth
-        query = table.get_nearest_parent_of_type(Query) # the column's parent query
+        query = self.get_nearest_parent_of_type(Query) # the column's parent query
         found_sources = 0
         for table in ctx.query.find_all(TableExpression):
             if namespace and namespace==table.alias_or_name.identifier(False):
                 table_depth = table.depth
-                if table_depth<depth:
+                if table_depth<depth:#checking tables above the column if the column is in a correlated subquery
                     if table.add_ref_column(self):
                         found_sources+=1
                         self._correlation=True
