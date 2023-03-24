@@ -29,9 +29,7 @@ from dj.models.node import NodeType as DJNodeType
 from dj.sql.functions import function_registry
 from dj.sql.parsing.backends.exceptions import DJParseException
 from dj.typing import ColumnType, ColumnTypeError
-
-if TYPE_CHECKING:
-    from dj.construction.build_planning import BuildPlan  # type:ignore
+from dj.construction.utils import get_dj_node, CompileContext, DJErrorException
 
 PRIMITIVES = {int, float, str, bool, type(None)}
 
@@ -467,6 +465,10 @@ class Node(ABC):
         """
         Get the string of a node
         """
+    def compile(self):
+        """
+        Compile a DJ Node
+        """
 
 
 @dataclass(eq=False)
@@ -770,19 +772,10 @@ class Table(TableExpression, Named):
         """
         return self._dj_node
 
-    def add_dj_node(self, dj_node: DJNode) -> "Table":
+    def set_dj_node(self, dj_node: DJNode) -> "Table":
         """
-        Add dj_node referenced by this table
+        Set dj_node referenced by this table
         """
-        if dj_node.type not in (
-            DJNodeType.TRANSFORM,
-            DJNodeType.SOURCE,
-            DJNodeType.DIMENSION,
-        ):
-            raise DJParseException(
-                f"Expected dj node of TRANSFORM, SOURCE, or DIMENSION "
-                f"but got {dj_node.type}.",
-            )
         self._dj_node = dj_node
         return self
 
@@ -793,7 +786,13 @@ class Table(TableExpression, Named):
             table_str += f"{as_}{self.alias}"
         return table_str
 
-
+    def compile(self, ctx: CompileContext):
+        try:
+            dj_node = get_dj_node(ctx.session, self.identifier(), {DJNodeType.SOURCE, DJNodeType.TRANSFORM, DJNodeType.DIMENSION})
+            self.set_dj_node(dj_node)
+        except DJErrorException as exc:
+            ctx.exception.errors.append(exc.dj_error)
+        
 class Operation(Expression):
     """
     A type to overarch types that operate on other expressions
