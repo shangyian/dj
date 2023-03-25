@@ -257,7 +257,7 @@ class Node(ABC):
         )
 
     def replace(  # pylint: disable=invalid-name
-        self: TNode,
+        self,
         from_: "Node",
         to: "Node",
         compare: Optional[Callable[[Any, Any], bool]] = None,
@@ -586,7 +586,7 @@ class Column(Aliasable, Named, Expression):
 
     def is_compiled(self):
         return self.table is not None and self.expression is not None
-        
+
     def compile(self, ctx: CompileContext):
         """
         Compile a column.
@@ -682,7 +682,7 @@ class TableExpression(Aliasable, Expression):
     """
 
     column_list: List[Column] = field(default_factory=list)
-    _columns: List[Column] = field(default_factory=list)
+    _columns: List[Expression] = field(default_factory=list) # all those expressions that can be had from the table
     _ref_columns: Set[Column] = field(init=False, repr=False, default_factory=set)
 
     @property
@@ -705,11 +705,16 @@ class TableExpression(Aliasable, Expression):
         returning True if the table has the column
         and False otherwise
         """
+        if not self.is_compiled():
+            raise DJParseException("Attempted to add ref column while table expression is not compiled.")
         if column not in self._columns:
             return False
         self._columns.add(column)
         column.add_table(self)
         return True
+
+    def is_compiled(self)->bool:
+        return bool(self._columns)
 
     def in_from(self) -> bool:
         """
@@ -751,6 +756,9 @@ class Table(TableExpression, Named):
             table_str += f"{as_}{self.alias}"
         return table_str
 
+    def is_compiled(self) -> bool:
+        return super().is_compiled() and (self.dj_node is not None)
+
     def compile(self, ctx: CompileContext):
         try:
             dj_node = get_dj_node(
@@ -759,8 +767,11 @@ class Table(TableExpression, Named):
                 {DJNodeType.SOURCE, DJNodeType.TRANSFORM, DJNodeType.DIMENSION},
             )
             self.set_dj_node(dj_node)
+            self._columns = [Column(Name(col.name), _type=col.type) for col in dj_node.columns]
         except DJErrorException as exc:
             ctx.exception.errors.append(exc.dj_error)
+
+        
 
 
 class Operation(Expression):
