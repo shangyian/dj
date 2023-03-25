@@ -543,7 +543,9 @@ class Named(Node):
                 self.name.name,
             ),
         )
-
+    @property
+    def alias_or_name(self) -> "Name":
+        return self.name
 
 @dataclass(eq=False)
 class Column(Aliasable, Named, Expression):
@@ -576,7 +578,9 @@ class Column(Aliasable, Named, Expression):
         """
         self._expression = expression
         return self
-
+    def add_table(self, table: "TableExpression"):
+        self._table = table
+        
     @property
     def table(self) -> Optional["TableExpression"]:
         """
@@ -707,11 +711,13 @@ class TableExpression(Aliasable, Expression):
         """
         if not self.is_compiled():
             raise DJParseException("Attempted to add ref column while table expression is not compiled.")
-        if column not in self._columns:
-            return False
-        self._columns.add(column)
-        column.add_table(self)
-        return True
+        for col in self._columns:
+            if isinstance(col, (Aliasable, Named)):
+                if column.name.name == col.alias_or_name.identifier(False):
+                    self._ref_columns.add(column)
+                    column.add_table(self)
+                    return True
+        return False
 
     def is_compiled(self)->bool:
         return bool(self._columns)
