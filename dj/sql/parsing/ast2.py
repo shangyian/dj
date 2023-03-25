@@ -46,8 +46,9 @@ def flatten(maybe_iterables: Any) -> Iterator:
         (flatten(maybe_iterable) for maybe_iterable in maybe_iterables)
     )
 
+
 @dataclass
-class CompileContext: 
+class CompileContext:
     session: Session
     exception: DJException
     query: "Query"
@@ -78,10 +79,10 @@ class Node(ABC):
         self.add_self_as_parent()
 
     @property
-    def depth(self)->int:
+    def depth(self) -> int:
         if self.parent is None:
             return 0
-        return self.parent.depth+1
+        return self.parent.depth + 1
 
     def clear_parent(self: TNode) -> TNode:
         """
@@ -260,19 +261,19 @@ class Node(ABC):
         from_: "Node",
         to: "Node",
         compare: Optional[Callable[[Any, Any], bool]] = None,
-        times: int = -1
+        times: int = -1,
     ):
         """
         Replace a node `from_` with a node `to` in the subtree
         """
         replacements = 0
-        compare_=(lambda a, b: a is b) if compare is None else compare
+        compare_ = (lambda a, b: a is b) if compare is None else compare
         for node in self.flatten():
             if compare_(node, from_):
                 node.swap(to)
-                replacements+=1
-            if replacements==times:
-                return 
+                replacements += 1
+            if replacements == times:
+                return
 
     def filter(self, func: Callable[["Node"], bool]) -> Iterator["Node"]:
         """
@@ -284,7 +285,7 @@ class Node(ABC):
         for node in chain(*[child.filter(func) for child in self.children]):
             yield node
 
-    def contains(self, other: "Node")->bool:
+    def contains(self, other: "Node") -> bool:
         """
         Checks if the subtree of `self` contains the node
         """
@@ -395,6 +396,7 @@ class Node(ABC):
         """
         Get the string of a node
         """
+
     def compile(self):
         """
         Compile a DJ Node
@@ -419,8 +421,8 @@ class Aliasable(Node):
         return self
 
     @property
-    def alias_or_name(self)->"Name":
-        if self.alias is not None :
+    def alias_or_name(self) -> "Name":
+        if self.alias is not None:
             return self.alias
         elif isinstance(self, Named):
             return self.name
@@ -502,7 +504,10 @@ class Name(Node):
     def identifier(self, quotes: bool = True) -> str:
         quote_style = "" if not quotes else self.quote_style
         namespace = str(self.namespace) + "." if self.namespace else ""
-        return f"{namespace}{quote_style}{self.name}{quote_style}"  # pylint: disable=C0301
+        return (
+            f"{namespace}{quote_style}{self.name}{quote_style}"  # pylint: disable=C0301
+        )
+
 
 TNamed = TypeVar("TNamed", bound="Named")  # pylint: disable=C0103
 
@@ -579,27 +584,48 @@ class Column(Aliasable, Named, Expression):
         """
         Add a referenced table
         """
-        namespace = self.name.namespace.identifier(False) if self.name.namespace else "" # a.x -> a
+        namespace = (
+            self.name.namespace.identifier(False) if self.name.namespace else ""
+        )  # a.x -> a
         depth = self.depth
-        query = self.get_nearest_parent_of_type(Query) # the column's parent query
-        
-        def check_col(node)->bool:
+        query = self.get_nearest_parent_of_type(Query)  # the column's parent query
+
+        def check_col(node) -> bool:
             # we're only looking for tables that are in a from clause
-            if isinstance(node, TableExpression) and node.in_from():#TODO: in_from is not complete. ex.  subquery in projection of a subquery in from will report true for the projection subquery
-                # check if the node is parent query of the column
+            if (
+                isinstance(node, TableExpression) and node.in_from()
+            ):
                 if node is not query:
                     # if the column has a namespace we need to check the table identifier to match
                     if namespace:
-                        if namespace==node.alias_or_name.identifier(False):
+                        if namespace == node.alias_or_name.identifier(False):
                             # see if the node will accept the column as its own
                             return node.add_ref_column(self)
+                        else:
+                            return False
                     else:
-                        
-                            
+                        return node.add_ref_column(self)
+            return False
+
         found_sources = ctx.query.filter(check_col)
-        if len(found_source)!=1:
-            ...
-            #add an appropriate error to the context error
+        if len(found_sources) < 1:
+            ctx.exception.errors.append(
+                DJErrorException(
+                    DJError(
+                        code=ErrorCode.INVALID_COLUMN,
+                        message=f"Column`{self}` does not exist on any valid table.",
+                    )
+                )
+            )
+        if len(found_sources) > 1:
+            ctx.exception.errors.append(
+                DJErrorException(
+                    DJError(
+                        code=ErrorCode.INVALID_COLUMN,
+                        message=f"Column `{self}` found in multiple tables. Consider namespacing.",
+                    )
+                )
+            )
 
     def __str__(self) -> str:
         as_ = " AS " if self.as_ else " "
@@ -646,6 +672,7 @@ class TableExpression(Aliasable, Expression):
     """
     A type for table expressions
     """
+
     column_list: List[Column] = field(default_factory=list)
     _columns: List[Column] = field(default_factory=list)
     _ref_columns: Set[Column] = field(init=False, repr=False, default_factory=set)
@@ -676,12 +703,14 @@ class TableExpression(Aliasable, Expression):
         column.add_table(self)
         return True
 
-    def in_from(self)->bool:
+    def in_from(self) -> bool:
         """
         Determines if the table expression is references in a From clause
         """
-        if from_:=self.get_nearest_parent_of_type(From):
-            return from_.get_nearest_parent_of_type(Select) is self.get_nearest_parent_of_type(Select)
+        if from_ := self.get_nearest_parent_of_type(From):
+            return from_.get_nearest_parent_of_type(
+                Select
+            ) is self.get_nearest_parent_of_type(Select)
         return False
 
 
@@ -690,7 +719,7 @@ class Table(TableExpression, Named):
     """
     A type for tables
     """
-    
+
     _dj_node: Optional[DJNode] = field(repr=False, default=None)
 
     @property
@@ -716,15 +745,21 @@ class Table(TableExpression, Named):
 
     def compile(self, ctx: CompileContext):
         try:
-            dj_node = get_dj_node(ctx.session, self.identifier(), {DJNodeType.SOURCE, DJNodeType.TRANSFORM, DJNodeType.DIMENSION})
+            dj_node = get_dj_node(
+                ctx.session,
+                self.identifier(),
+                {DJNodeType.SOURCE, DJNodeType.TRANSFORM, DJNodeType.DIMENSION},
+            )
             self.set_dj_node(dj_node)
         except DJErrorException as exc:
             ctx.exception.errors.append(exc.dj_error)
-        
+
+
 class Operation(Expression):
     """
     A type to overarch types that operate on other expressions
     """
+
 
 @dataclass(eq=False)
 class UnaryOp(Operation):
