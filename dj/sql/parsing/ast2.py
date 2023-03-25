@@ -401,6 +401,7 @@ class Node(ABC):
         """
         Compile a DJ Node
         """
+
     def is_compiled(self):
         """
         Checks whether a DJ AST Node is compiled
@@ -543,9 +544,11 @@ class Named(Node):
                 self.name.name,
             ),
         )
+
     @property
     def alias_or_name(self) -> "Name":
         return self.name
+
 
 @dataclass(eq=False)
 class Column(Aliasable, Named, Expression):
@@ -578,9 +581,10 @@ class Column(Aliasable, Named, Expression):
         """
         self._expression = expression
         return self
+
     def add_table(self, table: "TableExpression"):
         self._table = table
-        
+
     @property
     def table(self) -> Optional["TableExpression"]:
         """
@@ -599,14 +603,11 @@ class Column(Aliasable, Named, Expression):
         namespace = (
             self.name.namespace.identifier(False) if self.name.namespace else ""
         )  # a.x -> a
-        depth = self.depth
         query = self.get_nearest_parent_of_type(Query)  # the column's parent query
 
         def check_col(node) -> bool:
             # we're only looking for tables that are in a from clause
-            if (
-                isinstance(node, TableExpression) and node.in_from()
-            ):
+            if isinstance(node, TableExpression) and node.in_from():
                 if node is not query:
                     # if the column has a namespace we need to check the table identifier to match
                     if namespace:
@@ -686,7 +687,9 @@ class TableExpression(Aliasable, Expression):
     """
 
     column_list: List[Column] = field(default_factory=list)
-    _columns: List[Expression] = field(default_factory=list) # all those expressions that can be had from the table
+    _columns: List[Expression] = field(
+        default_factory=list
+    )  # all those expressions that can be had from the table
     _ref_columns: Set[Column] = field(init=False, repr=False, default_factory=set)
 
     @property
@@ -710,7 +713,9 @@ class TableExpression(Aliasable, Expression):
         and False otherwise
         """
         if not self.is_compiled():
-            raise DJParseException("Attempted to add ref column while table expression is not compiled.")
+            raise DJParseException(
+                "Attempted to add ref column while table expression is not compiled."
+            )
         for col in self._columns:
             if isinstance(col, (Aliasable, Named)):
                 if column.name.name == col.alias_or_name.identifier(False):
@@ -719,7 +724,7 @@ class TableExpression(Aliasable, Expression):
                     return True
         return False
 
-    def is_compiled(self)->bool:
+    def is_compiled(self) -> bool:
         return bool(self._columns)
 
     def in_from(self) -> bool:
@@ -773,11 +778,11 @@ class Table(TableExpression, Named):
                 {DJNodeType.SOURCE, DJNodeType.TRANSFORM, DJNodeType.DIMENSION},
             )
             self.set_dj_node(dj_node)
-            self._columns = [Column(Name(col.name), _type=col.type) for col in dj_node.columns]
+            self._columns = [
+                Column(Name(col.name), _type=col.type) for col in dj_node.columns
+            ]
         except DJErrorException as exc:
             ctx.exception.errors.append(exc.dj_error)
-
-        
 
 
 class Operation(Expression):
