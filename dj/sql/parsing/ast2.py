@@ -401,6 +401,10 @@ class Node(ABC):
         """
         Compile a DJ Node
         """
+    def is_compiled(self):
+        """
+        Checks whether a DJ AST Node is compiled
+        """
 
 
 @dataclass(eq=False)
@@ -580,9 +584,13 @@ class Column(Aliasable, Named, Expression):
         """
         return self._table
 
+    def is_compiled(self):
+        return self.table is not None and self.expression is not None
+        
     def compile(self, ctx: CompileContext):
         """
-        Add a referenced table
+        Compile a column.
+        Determines the table from which a column is from.
         """
         namespace = (
             self.name.namespace.identifier(False) if self.name.namespace else ""
