@@ -579,48 +579,27 @@ class Column(Aliasable, Named, Expression):
         """
         Add a referenced table
         """
-        namespace = self.name.identifier(False) # a.x -> a
+        namespace = self.name.namespace.identifier(False) if self.name.namespace else "" # a.x -> a
         depth = self.depth
         query = self.get_nearest_parent_of_type(Query) # the column's parent query
-        found_sources = []
-        def check_col(node):
-            # we're only looking for tables
-            if isinstance(node, TableExpression):
+        
+        def check_col(node)->bool:
+            # we're only looking for tables that are in a from clause
+            if isinstance(node, TableExpression) and node.in_from():#TODO: in_from is not complete. ex.  subquery in projection of a subquery in from will report true for the projection subquery
                 # check if the node is parent query of the column
                 if node is not query:
+                    # if the column has a namespace we need to check the table identifier to match
                     if namespace:
-                        if namespace==table.alias_or_name.identifier(False):
+                        if namespace==node.alias_or_name.identifier(False):
                             # see if the node will accept the column as its own
-                            if node.add_ref_column(self):
-                                found_sources.append(node)
+                            return node.add_ref_column(self)
                     else:
                         
-                    if node.contains(self):
                             
-        ctx.query.apply(check_col)
+        found_sources = ctx.query.filter(check_col)
         if len(found_source)!=1:
             ...
             #add an appropriate error to the context error
-        for table in ctx.query.find_all(TableExpression):
-            if namespace:
-                if namespace==table.alias_or_name.identifier(False):
-                    if table.add_ref_column(self):
-                        table_depth = table.depth
-                        if depth>table_depth:
-                            found_sources+=1
-                            self._correlation=True
-                        
-                
-                if table_depth<depth:#checking tables above the column if the column is in a correlated subquery
-                    if table.add_ref_column(self):
-                        found_sources+=1
-                        self._correlation=True
-                elif table_depth>depth and table.get_nearest_parent_of_type(From) is query.select.from_:
-                    below_tables.append
-        #if found sources!=1 add Exception to context
-            return False
-        if :
-            return True
 
     def __str__(self) -> str:
         as_ = " AS " if self.as_ else " "
