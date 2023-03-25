@@ -29,7 +29,8 @@ from dj.models.node import NodeType as DJNodeType
 from dj.sql.functions import function_registry
 from dj.sql.parsing.backends.exceptions import DJParseException
 from dj.typing import ColumnType, ColumnTypeError
-from dj.construction.utils import get_dj_node, CompileContext, DJErrorException
+from dj.construction.utils import get_dj_node
+from dj.errors import DJError, ErrorCode, DJException, DJErrorException
 
 PRIMITIVES = {int, float, str, bool, type(None)}
 
@@ -45,94 +46,11 @@ def flatten(maybe_iterables: Any) -> Iterator:
         (flatten(maybe_iterable) for maybe_iterable in maybe_iterables)
     )
 
-
-def _raw_clean_hash(obj) -> str:
-    """
-    Used to generate clean and unique replacement
-     hash strings for Raw
-
-    >>> _raw_clean_hash(-2)
-    'N2'
-
-    >>> _raw_clean_hash(1)
-    '1'
-    """
-    dirty = hash(obj)
-    if dirty < 0:
-        return f"N{abs(dirty)}"
-    return str(dirty)
-
-
-class Replacer:  # pylint: disable=too-few-public-methods
-    """
-    Replacer class keeps track of seen nodes
-    and does the compare and replace calls
-    while recursively calling `Node.replace`
-    """
-
-    def __init__(self, compare: Optional[Callable[[Any, Any], bool]] = None):
-        self._compare: Callable[[Any, Any], bool] = compare or (
-            lambda a, b: a.compare(b) if isinstance(a, Node) else a == b
-        )
-
-        self.seen: Set[
-            int
-        ] = (
-            set()
-        )  # to avoid infinite recursion from cycles ex. column->table->column...
-
-    def __call__(  # pylint: disable=too-many-branches,invalid-name
-        self,
-        self_node: "Node",
-        from_: Any,
-        to: Any,
-    ):
-        if id(self_node) in self.seen:
-            return
-        self.seen.add(id(self_node))
-        for name, child in self_node.fields(
-            flat=False,
-            nodes_only=False,
-            obfuscated=True,
-            nones=False,
-            named=True,
-        ):
-            iterable = False
-            for iterable_type in (list, tuple, set):
-                if isinstance(child, iterable_type):
-                    iterable = True
-                    new = []
-                    for element in child:
-                        if not self._compare(
-                            element,
-                            from_,
-                        ):  # if the node is not a match, keep the old
-                            new.append(element)
-                        else:
-                            new.append(to)
-                        # recurse to other nodes in the iterable
-                        if isinstance(element, Node):  # pragma: no cover
-                            element.replace(from_, to, _replace=self)
-                    new = iterable_type(new)  # type: ignore
-                    setattr(self_node, name, new)
-            if not iterable:
-                if isinstance(child, Node):
-                    if self._compare(child, from_):
-                        setattr(self_node, name, to)
-                else:
-                    if self._compare(child, from_):
-                        setattr(self_node, name, to)
-            if isinstance(child, Node):
-                child.replace(from_, to, _replace=self)
-
-
-class DJEnum(Enum):
-    """
-    A DJ AST enum
-    """
-
-    def __repr__(self) -> str:
-        return str(self)
+@dataclass
+class CompileContext: 
+    session: Session
+    exception: DJException
+    query: "Query"
 
 
 # typevar used for node methods that return self
@@ -339,20 +257,22 @@ class Node(ABC):
 
     def replace(  # pylint: disable=invalid-name
         self: TNode,
-        from_: Any,
-        to: Any,
+        from_: "Node",
+        to: "Node",
         compare: Optional[Callable[[Any, Any], bool]] = None,
-        _replace: Optional[Callable[["Node", Any, Any], "Node"]] = None,
-    ) -> TNode:
+        times: int = -1
+    ):
         """
         Replace a node `from_` with a node `to` in the subtree
-        ensures that parents and children are appropriately resolved
-        accounts for possible cycles
         """
-        if _replace is None:
-            _replace = Replacer(compare)
-        _replace(self, from_, to)
-        return self
+        replacements = 0
+        compare_=(lambda a, b: a is b) if compare is None else compare
+        for node in self.flatten():
+            if compare_(node, from_):
+                node.swap(to)
+                replacements+=1
+            if replacements==times:
+                return 
 
     def filter(self, func: Callable[["Node"], bool]) -> Iterator["Node"]:
         """
@@ -363,6 +283,12 @@ class Node(ABC):
 
         for node in chain(*[child.filter(func) for child in self.children]):
             yield node
+
+    def contains(self, other: "Node")->bool:
+        """
+        Checks if the subtree of `self` contains the node
+        """
+        return any(self.filter(lambda node: node is other))
 
     def find_all(self, node_type: Type[TNode]) -> Iterator[TNode]:
         """
@@ -649,17 +575,42 @@ class Column(Aliasable, Named, Expression):
         """
         return self._table
 
-    def compile(self, ctx: CompileContext) -> bool:
+    def compile(self, ctx: CompileContext):
         """
         Add a referenced table
         """
         namespace = self.name.identifier(False) # a.x -> a
         depth = self.depth
         query = self.get_nearest_parent_of_type(Query) # the column's parent query
-        found_sources = 0
+        found_sources = []
+        def check_col(node):
+            # we're only looking for tables
+            if isinstance(node, TableExpression):
+                # check if the node is parent query of the column
+                if node is not query:
+                    if namespace:
+                        if namespace==table.alias_or_name.identifier(False):
+                            # see if the node will accept the column as its own
+                            if node.add_ref_column(self):
+                                found_sources.append(node)
+                    else:
+                        
+                    if node.contains(self):
+                            
+        ctx.query.apply(check_col)
+        if len(found_source)!=1:
+            ...
+            #add an appropriate error to the context error
         for table in ctx.query.find_all(TableExpression):
-            if namespace and namespace==table.alias_or_name.identifier(False):
-                table_depth = table.depth
+            if namespace:
+                if namespace==table.alias_or_name.identifier(False):
+                    if table.add_ref_column(self):
+                        table_depth = table.depth
+                        if depth>table_depth:
+                            found_sources+=1
+                            self._correlation=True
+                        
+                
                 if table_depth<depth:#checking tables above the column if the column is in a correlated subquery
                     if table.add_ref_column(self):
                         found_sources+=1
@@ -716,7 +667,7 @@ class TableExpression(Aliasable, Expression):
     """
     A type for table expressions
     """
-
+    column_list: List[Column] = field(default_factory=list)
     _columns: List[Column] = field(default_factory=list)
     _ref_columns: Set[Column] = field(init=False, repr=False, default_factory=set)
 
@@ -746,13 +697,21 @@ class TableExpression(Aliasable, Expression):
         column.add_table(self)
         return True
 
+    def in_from(self)->bool:
+        """
+        Determines if the table expression is references in a From clause
+        """
+        if from_:=self.get_nearest_parent_of_type(From):
+            return from_.get_nearest_parent_of_type(Select) is self.get_nearest_parent_of_type(Select)
+        return False
+
 
 @dataclass(eq=False)
 class Table(TableExpression, Named):
     """
     A type for tables
     """
-
+    
     _dj_node: Optional[DJNode] = field(repr=False, default=None)
 
     @property

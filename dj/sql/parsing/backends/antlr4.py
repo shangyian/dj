@@ -749,7 +749,7 @@ def _(ctx: sbp.CtesContext) -> List[ast.Select]:
 
 @visit.register
 def _(ctx: sbp.NamedQueryContext) -> ast.Select:
-    return visit(ctx.query().queryTerm())
+    return visit(ctx.query())
 
 
 @visit.register
@@ -759,7 +759,7 @@ def _(ctx: sbp.LogicalBinaryContext) -> ast.BinaryOp:
 
 @visit.register
 def _(ctx: sbp.SubqueryExpressionContext):
-    return visit(ctx.query().queryTerm())
+    return visit(ctx.query())
 
 
 @visit.register
