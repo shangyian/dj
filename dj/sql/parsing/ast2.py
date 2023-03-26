@@ -260,6 +260,7 @@ class Node(ABC):
         to: "Node",
         compare: Optional[Callable[[Any, Any], bool]] = None,
         times: int = -1,
+        copy: bool = True,
     ):
         """
         Replace a node `from_` with a node `to` in the subtree
@@ -268,7 +269,7 @@ class Node(ABC):
         compare_ = (lambda a, b: a is b) if compare is None else compare
         for node in self.flatten():
             if compare_(node, from_):
-                node.swap(to)
+                node.swap(to.copy() if copy else to)
                 replacements += 1
             if replacements == times:
                 return
