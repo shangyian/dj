@@ -20,7 +20,7 @@ from typing import (
     cast,
 )
 
-from sqlmodel import LABEL_STYLE_DEFAULT, Session
+from sqlmodel import Session
 
 from dj.models.node import NodeRevision as DJNode
 from dj.models.node import NodeType as DJNodeType
@@ -126,7 +126,7 @@ class Node(ABC):
 
     def swap(self: TNode, other: "Node") -> TNode:
         """
-        Swap one Node for another
+        Swap the Node for another
         """
         if not (self.parent and self.parent_key):
             return self
@@ -1488,7 +1488,7 @@ class Query(TableExpression):
 
     def bake_ctes(self):
         """
-        Compile ctes into the select and return the select
+        Add ctes into the select and return the select
 
         Note: This destroys the structure of the query which cannot be undone
         you may want to deepcopy it first
