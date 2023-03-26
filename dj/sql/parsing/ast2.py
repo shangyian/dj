@@ -4,10 +4,8 @@
 from abc import ABC, abstractmethod
 from copy import deepcopy
 from dataclasses import dataclass, field, fields
-from enum import Enum
 from itertools import chain, zip_longest
 from typing import (
-    TYPE_CHECKING,
     Any,
     Callable,
     Generic,
@@ -24,12 +22,11 @@ from typing import (
 
 from sqlmodel import LABEL_STYLE_DEFAULT, Session
 
-from dj.models.database import Database
 from dj.models.node import NodeRevision as DJNode
 from dj.models.node import NodeType as DJNodeType
 from dj.sql.functions import function_registry
 from dj.sql.parsing.backends.exceptions import DJParseException
-from dj.typing import ColumnType, ColumnTypeError
+from dj.typing import ColumnType
 from dj.construction.utils import get_dj_node
 from dj.errors import DJError, ErrorCode, DJException, DJErrorException
 
@@ -403,7 +400,7 @@ class Node(ABC):
         Compile a DJ Node
         """
 
-    def is_compiled(self)->bool:
+    def is_compiled(self) -> bool:
         """
         Checks whether a DJ AST Node is compiled
         """
@@ -1245,14 +1242,15 @@ class Join(Node):
             parts.append(f" {self.criteria}")
         return "".join(parts)
 
+
 @dataclass(eq=False)
 class FunctionTableExpression(TableExpression, Named, Operation):
     """
     An uninitializable Type for FunctionTable for use as a
     default where a FunctionTable is required but succeeds optional fields
     """
-    args: List[Expression] = field(default_factory=list)
 
+    args: List[Expression] = field(default_factory=list)
 
 
 class FunctionTable(FunctionTableExpression):
@@ -1350,8 +1348,6 @@ class SetOp(TableExpression):
         if left.is_compiled():
             self._columns = left._columns[:]
 
-        
-
 
 @dataclass(eq=False)
 class Cast(Expression):
@@ -1365,12 +1361,14 @@ class Cast(Expression):
     def __str__(self) -> str:
         return f"CAST({self.expression} AS {self.data_type})"
 
+
 @dataclass(eq=False)
 class SelectExpression(Aliasable, Expression):
     """
     An uninitializable Type for Select for use as a
     default where a Select is required but succeeds optional fields
     """
+
     quantifier: str = ""  # Distinct, All
     projection: List[Expression] = field(default_factory=list)
     from_: Optional[From] = None
@@ -1378,7 +1376,6 @@ class SelectExpression(Aliasable, Expression):
     having: Optional[Expression] = None
     where: Optional[Expression] = None
     set_op: List[SetOp] = field(default_factory=list)
-
 
 
 class Select(SelectExpression):
