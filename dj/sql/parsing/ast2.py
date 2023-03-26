@@ -125,6 +125,9 @@ class Node(ABC):
                 child.set_parent(self, key)
 
     def swap(self: TNode, other: "Node") -> TNode:
+        """
+        Swap one Node for another
+        """
         if not (self.parent and self.parent_key):
             return self
         parent_attr = getattr(self.parent, self.parent_key)
