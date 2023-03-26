@@ -19,9 +19,10 @@ from typing import (
     Type,
     TypeVar,
     Union,
+    cast,
 )
 
-from sqlmodel import Session
+from sqlmodel import LABEL_STYLE_DEFAULT, Session
 
 from dj.models.database import Database
 from dj.models.node import NodeRevision as DJNode
@@ -559,7 +560,6 @@ class Column(Aliasable, Named, Expression):
     _table: Optional["TableExpression"] = field(repr=False, default=None)
     _type: Optional["ColumnType"] = field(repr=False, default=None)
     _expression: Optional[Expression] = field(repr=False, default=None)
-    _correlation: bool = False
 
     def add_type(self, type_: ColumnType) -> "Column":
         """
@@ -600,11 +600,19 @@ class Column(Aliasable, Named, Expression):
         Compile a column.
         Determines the table from which a column is from.
         """
+
+        if self.is_compiled():
+            return
+
         namespace = (
             self.name.namespace.identifier(False) if self.name.namespace else ""
         )  # a.x -> a
         query = self.get_nearest_parent_of_type(Query)  # the column's parent query
-
+        # things we could check here:
+        # - correlated queries: we could break out the check for tables into queries above and below the column
+        # - correlated subqueries must appear in a from clause
+        # - a column without a namespace can still be unambiguous even if multiple tables have a column of that name in the overall
+        #   and we would need to check the immediate FROM only first. Currently, this is not done.
         def check_col(node) -> bool:
             # we're only looking for tables that are in a from clause
             if isinstance(node, TableExpression) and node.in_from():
@@ -729,8 +737,9 @@ class TableExpression(Aliasable, Expression):
 
     def in_from(self) -> bool:
         """
-        Determines if the table expression is references in a From clause
+        Determines if the table expression is referenced in a From clause
         """
+
         if from_ := self.get_nearest_parent_of_type(From):
             return from_.get_nearest_parent_of_type(
                 Select
@@ -771,6 +780,8 @@ class Table(TableExpression, Named):
         return super().is_compiled() and (self.dj_node is not None)
 
     def compile(self, ctx: CompileContext):
+        if self.is_compiled():
+            return
         try:
             dj_node = get_dj_node(
                 ctx.session,
@@ -1323,6 +1334,22 @@ class SetOp(TableExpression):
 
     def __str__(self) -> str:
         return f"{self.left}\n{self.kind}\n{self.right}"
+
+    def compile(self, ctx: CompileContext):
+        """
+        Compile a set operation
+        """
+        if self.is_compiled():
+            return
+        left = cast(self.left, TableExpression)
+        right = cast(self.right, TableExpression)
+        left.compile(ctx)
+        right.compile(ctx)
+        # things we could check here:
+        # - all table expressions in the setop must have the same number of columns and the pairwise types must be the same
+
+        # column names are taken from the leading query i.e. left
+        self._columns = left._columns[:]
 
 
 @dataclass(eq=False)
