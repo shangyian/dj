@@ -403,10 +403,11 @@ class Node(ABC):
         Compile a DJ Node
         """
 
-    def is_compiled(self):
+    def is_compiled(self)->bool:
         """
         Checks whether a DJ AST Node is compiled
         """
+        return True
 
 
 @dataclass(eq=False)
@@ -1244,21 +1245,20 @@ class Join(Node):
             parts.append(f" {self.criteria}")
         return "".join(parts)
 
-
+@dataclass(eq=False)
 class FunctionTableExpression(TableExpression, Named, Operation):
     """
     An uninitializable Type for FunctionTable for use as a
     default where a FunctionTable is required but succeeds optional fields
     """
+    args: List[Expression] = field(default_factory=list)
 
 
-@dataclass(eq=False)
+
 class FunctionTable(FunctionTableExpression):
     """
     Represents a table-valued function used in a statement
     """
-
-    args: List[Expression] = field(default_factory=list)
 
     def __str__(self) -> str:
         alias = f" AS {self.alias}" if self.alias else ""
@@ -1341,15 +1341,16 @@ class SetOp(TableExpression):
         """
         if self.is_compiled():
             return
-        left = cast(self.left, TableExpression)
-        right = cast(self.right, TableExpression)
-        left.compile(ctx)
-        right.compile(ctx)
         # things we could check here:
         # - all table expressions in the setop must have the same number of columns and the pairwise types must be the same
 
         # column names are taken from the leading query i.e. left
-        self._columns = left._columns[:]
+        left = cast(self.left, TableExpression)
+        left.compile(ctx)
+        if left.is_compiled():
+            self._columns = left._columns[:]
+
+        
 
 
 @dataclass(eq=False)
@@ -1364,20 +1365,12 @@ class Cast(Expression):
     def __str__(self) -> str:
         return f"CAST({self.expression} AS {self.data_type})"
 
-
+@dataclass(eq=False)
 class SelectExpression(Aliasable, Expression):
     """
     An uninitializable Type for Select for use as a
     default where a Select is required but succeeds optional fields
     """
-
-
-@dataclass(eq=False)
-class Select(SelectExpression):
-    """
-    A single select statement type
-    """
-
     quantifier: str = ""  # Distinct, All
     projection: List[Expression] = field(default_factory=list)
     from_: Optional[From] = None
@@ -1385,6 +1378,13 @@ class Select(SelectExpression):
     having: Optional[Expression] = None
     where: Optional[Expression] = None
     set_op: List[SetOp] = field(default_factory=list)
+
+
+
+class Select(SelectExpression):
+    """
+    A single select statement type
+    """
 
     def add_set_op(self, set_op: SetOp):
         """
@@ -1478,9 +1478,14 @@ class Query(TableExpression):
     select: SelectExpression = field(default_factory=SelectExpression)
     ctes: List["Query"] = field(default_factory=list)
     limit: Optional[Expression] = None
-    organization: Organization = field(default_factory=list)
+    organization: Optional[Organization] = None
 
-    def subquery(self) -> Select:
+    def compile(self):
+        if self.is_compiled():
+            return
+        self._columns = self.select.projection[:]
+
+    def bake_ctes(self):
         """
         Compile ctes into the select and return the select
 
@@ -1489,8 +1494,7 @@ class Query(TableExpression):
         """
         for cte in self.ctes:
             table = Table(cte.name, cte.namespace)
-            self.select.replace(table, cte)
-        return self.select
+            self.replace(table, cte)
 
     def __str__(self) -> str:
         is_cte = self.parent is not None and self.parent_key == "ctes"
