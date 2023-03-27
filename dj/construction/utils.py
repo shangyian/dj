@@ -12,8 +12,19 @@ from sqlmodel import Session, select
 from dj.construction.exceptions import CompoundBuildException
 from dj.errors import DJError, ErrorCode, DJException, DJErrorException
 from dj.models.node import Node, NodeRevision, NodeType
-from dj.sql.parsing import ast2 as ast
 
+if TYPE_CHECKING:
+    from dj.sql.parsing.ast import Namespace
+
+
+def make_name(namespace: Optional["Namespace"], name="") -> str:
+    """utility taking a namespace and name to make a possible name of a DJ Node"""
+    ret = ""
+    if namespace:
+        ret += ".".join(n.name for n in namespace.names)
+    if name:
+        ret += ("." if ret else "") + name
+    return ret
 
 
 def get_dj_node(
