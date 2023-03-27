@@ -786,7 +786,7 @@ class Table(TableExpression, Named):
             return
 
         # things we can validate here:
-        # - if the node is a dimension, is it joinable?
+        # - if the node is a dimension in a groupby, is it joinable?
         try:
             dj_node = get_dj_node(
                 ctx.session,
