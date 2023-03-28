@@ -608,9 +608,9 @@ class Column(Aliasable, Named, Expression):
                 columns = table.columns
             for col in columns:
                 col_name = col.alias_or_name.name \
-                    if isinstance(col, Alias) else col.name \
-                    if isinstance(col.name, str) \
-                    else col.name.name
+                    if isinstance(col, Alias) else col.name.name \
+                    if isinstance(col.name, Name) \
+                    else col.name
                 if col_name == self.name.name:
                     self.add_type(col.type)
                     return col.type

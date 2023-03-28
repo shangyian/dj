@@ -136,7 +136,7 @@ def build_string_parser(string, strict_mode=False, early_bail=True):
     return parser
 
 
-def parse_sql(string, rule, converter, debug=False):
+def parse_sql(string, rule, converter=None, debug=False):
     tree = string_to_ast(string, rule, debug=debug)
     return converter(tree) if converter else tree
 
@@ -159,6 +159,7 @@ def tree_to_strings(tree, indent=0):
             result += tree_to_strings(child, indent + 1)
     return result
 
+
 def parse_rule(sql: str, rule: str) -> ast.Node:
     """
     Parse a string into a DJ ast using the ANTLR4 backend.
@@ -166,6 +167,7 @@ def parse_rule(sql: str, rule: str) -> ast.Node:
     antlr_tree = parse_sql(sql, rule)
     ast_tree = visit(antlr_tree)
     return ast_tree
+
 
 def parse(sql: str)->ast.Query:
     """
