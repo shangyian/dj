@@ -475,6 +475,9 @@ class Alias(Aliasable, Generic[AliasedType]):
     def is_aggregation(self) -> bool:
         return isinstance(self.child, Expression) and self.child.is_aggregation()
 
+    def compile(self, ctx: CompileContext):
+        self.child.compile(ctx)
+
 
 TExpression = TypeVar("TExpression", bound="Expression")  # pylint: disable=C0103
 
@@ -649,7 +652,7 @@ class Column(Aliasable, Named, Expression):
                         return node.add_ref_column(self)
             return False
 
-        found_sources = ctx.query.filter(check_col)
+        found_sources = list(ctx.query.filter(check_col))
         if len(found_sources) < 1:
             ctx.exception.errors.append(
                 DJErrorException(
@@ -814,7 +817,8 @@ class Table(TableExpression, Named):
             )
             self.set_dj_node(dj_node)
             self._columns = [
-                Column(Name(col.name), _type=col.type) for col in dj_node.columns
+                Column(Name(col.name), _type=col.type, _table=self)
+                for col in dj_node.columns
             ]
         except DJErrorException as exc:
             ctx.exception.errors.append(exc.dj_error)
@@ -1257,6 +1261,9 @@ class Subscript(Expression):
 
     def __str__(self) -> str:
         return f"{self.expr}[{self.index}]"
+
+    def compile(self, ctx: CompileContext):
+        self.expr.compile(ctx)
 
 
 @dataclass(eq=False)
