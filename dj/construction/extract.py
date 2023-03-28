@@ -9,7 +9,9 @@ from sqlmodel import Session
 from dj.construction.compile import CompoundBuildException, make_name
 from dj.errors import DJException
 from dj.models.node import NodeRevision, NodeType
-from dj.sql.parsing import ast, parse
+from dj.sql.parsing import ast2 as ast
+from dj.sql.parsing.ast2 import CompileContext
+from dj.sql.parsing.backends.antlr4 import parse
 
 
 def extract_dependencies_from_query_ast(
@@ -55,8 +57,13 @@ def extract_dependencies_from_str_query(
     query: str,
     dialect: Optional[str] = None,
 ) -> Tuple[ast.Query, Dict[NodeRevision, List[ast.Table]], Dict[str, List[ast.Table]]]:
-    """Find all dependencies in the a string query"""
-    return extract_dependencies_from_query_ast(session, parse(query, dialect))
+    """
+    Find all dependencies in a string query
+    """
+    query_ast = parse(query)
+    context = CompileContext(session=session, exception=DJException(), query=query_ast)
+    dependencies, missing_references = query_ast.extract_dependencies(context)
+    return query_ast, dependencies, missing_references
 
 
 def extract_dependencies_from_node(

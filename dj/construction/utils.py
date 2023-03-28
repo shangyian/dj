@@ -14,21 +14,23 @@ from dj.errors import DJError, ErrorCode, DJException, DJErrorException
 from dj.models.node import Node, NodeRevision, NodeType
 
 if TYPE_CHECKING:
-    from dj.sql.parsing.ast import Namespace
+    from dj.sql.parsing.ast2 import Name
 
 
-def make_name(namespace: Optional["Namespace"], name="") -> str:
-    """utility taking a namespace and name to make a possible name of a DJ Node"""
-    ret = ""
-    if namespace:
-        ret += ".".join(n.name for n in namespace.names)
-    if name:
-        ret += ("." if ret else "") + name
+def make_name(name: "Name") -> str:
+    """
+    Takes a namespaced name and returns a possible DJ node name.
+    """
+    ret = name.name
+    while name.namespace:
+        ret = name.namespace.name + "." + ret
+        name = name.namespace
     return ret
 
 
 def get_dj_node(
     session: Session,
+    exc: DJException,
     node_name: str,
     kinds: Optional[Set[NodeType]] = None,
 ) -> NodeRevision:
@@ -39,14 +41,17 @@ def get_dj_node(
         match = session.exec(query).one()
     except NoResultFound:
         kind_msg = " or ".join(str(k) for k in kinds) if kinds else ""
-        raise DJErrorException(DJError(
+        raise DJErrorException(
+            DJError(
                 code=ErrorCode.UNKNOWN_NODE,
                 message=f"No node `{node_name}` exists of kind {kind_msg}.",
-            )) 
+            )
+        )
 
     # found a node but it's not the right kind
     if match and kinds and (match.type not in kinds):
-        raise DJErrorException(DJError(
+        exc.errors.append(
+            DJError(
                 code=ErrorCode.NODE_TYPE_ERROR,
                 message=(
                     f"Node `{match.name}` is of type `{str(match.type).upper()}`. "
@@ -55,7 +60,7 @@ def get_dj_node(
             ),
         )
 
-    return match.current
+    return match.current if match else match
 
 
 ACCEPTABLE_CHARS = set(ascii_letters + digits + "_")

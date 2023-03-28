@@ -19,12 +19,13 @@ from typing import (
     Type,
     TypeVar,
     Union,
-    cast,
+    cast, Dict,
 )
 
 from sqlmodel import Session
 
-from dj.models.node import NodeRevision as DJNode
+from dj.construction.exceptions import CompoundBuildException
+from dj.models.node import NodeRevision as DJNode, NodeRevision, NodeType
 from dj.models.node import NodeType as DJNodeType
 from dj.sql.functions import function_registry
 from dj.sql.parsing.backends.exceptions import DJParseException
@@ -637,45 +638,48 @@ class Column(Aliasable, Named, Expression):
         # - correlated subqueries must appear in a from clause
         # - a column without a namespace can still be unambiguous even if multiple tables have a column of that name in the overall
         #   and we would need to check the immediate FROM only first. Currently, this is not done.
-        def check_col(node) -> bool:
+
+        def find_table_sources(node: Node) -> bool:
+            """
+            Find the tables that this column could come from. Search
+            for the exact column ref in that table and add it.
+            """
             # we're only looking for tables that are in a from clause
             if isinstance(node, TableExpression) and node.in_from():
                 if node is not query:
-                    # if the column has a namespace we need to check the table identifier to match
-                    if namespace:
-                        if namespace == node.alias_or_name.identifier(False):
-                            # see if the node will accept the column as its own
-                            return node.add_ref_column(self)
-                        else:
-                            return False
-                    else:
-                        try:
-                            if node.alias_or_name and node.alias_or_name.name == "bizarre":
-                                print(node)
-                        except Exception as e:
-                            print(e)
-                        return node.add_ref_column(self)
+                    # if the column has a namespace, the table identifier needs to match that
+                    if namespace and namespace != node.alias_or_name.identifier(False):
+                        return False
+                    if not node.columns:
+                        return False
+                    for col in node.columns:
+                        if isinstance(col, (Aliasable, Named)):
+                            if self.name.name == col.alias_or_name.identifier(False):
+                                return True
             return False
 
-        found_sources = list(query.filter(check_col))
+        found_sources: List["Node"] = list(query.filter(find_table_sources))
         if len(found_sources) < 1:
             ctx.exception.errors.append(
-                DJErrorException(
-                    DJError(
-                        code=ErrorCode.INVALID_COLUMN,
-                        message=f"Column`{self}` does not exist on any valid table.",
-                    )
-                )
+                DJError(
+                    code=ErrorCode.INVALID_COLUMN,
+                    message=f"Column`{self}` does not exist on any valid table.",
+                ),
             )
+            return
+
         if len(found_sources) > 1:
             ctx.exception.errors.append(
-                DJErrorException(
-                    DJError(
-                        code=ErrorCode.INVALID_COLUMN,
-                        message=f"Column `{self}` found in multiple tables. Consider namespacing.",
-                    )
-                )
+                DJError(
+                    code=ErrorCode.INVALID_COLUMN,
+                    message=f"Column `{self}` found in multiple tables. Consider namespacing.",
+                ),
             )
+            return
+
+        source_table = cast(TableExpression, found_sources[0])
+        source_table.add_ref_column(column=self)
+        self.add_table(source_table)
 
     def __str__(self) -> str:
         as_ = " AS " if self.as_ else " "
@@ -750,9 +754,10 @@ class TableExpression(Aliasable, Expression):
         and False otherwise
         """
         if not self.is_compiled():
-            raise DJParseException(
-                "Attempted to add ref column while table expression is not compiled."
-            )
+            return False
+            # raise DJParseException(
+            #     "Attempted to add ref column while table expression is not compiled."
+            # )
         for col in self._columns:
             if isinstance(col, (Aliasable, Named)):
                 if column.name.name == col.alias_or_name.identifier(False):
@@ -817,6 +822,7 @@ class Table(TableExpression, Named):
         try:
             dj_node = get_dj_node(
                 ctx.session,
+                ctx.exception,
                 self.identifier(),
                 {DJNodeType.SOURCE, DJNodeType.TRANSFORM, DJNodeType.DIMENSION},
             )
@@ -1358,6 +1364,10 @@ class Join(Node):
             parts.append(f" {self.criteria}")
         return "".join(parts)
 
+    def compile(self, ctx: CompileContext):
+        # TODO validate join conditions
+        self.right.compile(ctx)
+
 
 @dataclass(eq=False)
 class FunctionTableExpression(TableExpression, Named, Operation):
@@ -1420,6 +1430,8 @@ class Relation(Node):
 
     def compile(self, ctx: CompileContext):
         self.primary.compile(ctx)
+        for ext in self.extensions:
+            ext.compile(ctx)
 
 
 @dataclass(eq=False)
@@ -1660,3 +1672,36 @@ class Query(TableExpression):
             else:
                 query = f"{query}{as_}{self.alias}"
         return query
+
+    def extract_dependencies(
+        self,
+        context: Optional[CompileContext] = None,
+    ) -> Tuple[Dict[NodeRevision, List[Table]], Dict[str, List[Table]]]:
+        """
+        Find all dependencies in a compiled query
+        """
+
+        if not self.is_compiled():
+            if not context:
+                raise DJException("Context not provided for query compilation!")
+            self.compile(context)
+
+        deps: Dict[NodeRevision, List[Table]] = {}
+        danglers: Dict[str, List[Table]] = {}
+        for table in self.find_all(Table):
+            if node := table.dj_node:
+                deps[node] = deps.get(node, [])
+                deps[node].append(table)
+            else:
+                name = table.identifier(quotes=False)
+                danglers[name] = danglers.get(name, [])
+                danglers[name].append(table)
+
+        for col in self.find_all(Column):
+            if isinstance(col.table, Table):
+                if node := col.table.dj_node:  # pragma: no cover
+                    if node.type == NodeType.DIMENSION:
+                        deps[node] = deps.get(node, [])
+                        deps[node].append(col.table)
+
+        return deps, danglers

@@ -11,7 +11,9 @@ from dj.construction.exceptions import CompoundBuildException
 from dj.construction.utils import get_dj_node, make_name
 from dj.errors import DJError, DJException, ErrorCode
 from dj.models.node import NodeRevision, NodeType
-from dj.sql.parsing import ast, parse
+from dj.sql.parsing import ast, ast2
+from dj.sql.parsing.backends.antlr4 import parse
+from dj.sql.parsing.ast2 import CompileContext
 
 
 def _check_col(
@@ -403,7 +405,7 @@ def compile_node(
     session: Session,
     node: NodeRevision,
     dialect: Optional[str] = None,
-) -> ast.Query:
+) -> ast2.Query:
     """
     Get all dj node dependencies from a sql query while validating
     """
@@ -411,6 +413,7 @@ def compile_node(
         raise DJException(
             f"Cannot compile node `{node.node.name}` with no query.",
         )
-    query = parse(node.query, dialect)
-    query.compile(session)
-    return query
+    query_ast = parse(node.query)
+    context = CompileContext(session=session, query=query_ast, exception=DJException())
+    query_ast.compile(context)
+    return query_ast
