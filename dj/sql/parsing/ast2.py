@@ -413,6 +413,15 @@ class Node(ABC):
         return True
 
 
+class DJEnum(Enum):
+    """
+    A DJ AST enum
+    """
+
+    def __repr__(self) -> str:
+        return str(self)
+
+
 @dataclass(eq=False)
 class Aliasable(Node):
     """
@@ -809,29 +818,32 @@ class Operation(Expression):
     """
 
 
+# pylint: disable=C0103
+class UnaryOpKind(DJEnum):
+    """
+    The accepted unary operations
+    """
+    #
+    # Plus = "+"
+    # Minus = "-"
+    Exists = "EXISTS"
+    Not = "NOT"
+
+
 @dataclass(eq=False)
 class UnaryOp(Operation):
     """
     An operation that operates on a single expression
     """
 
-    op: str
+    op: UnaryOpKind
     expr: Expression
 
     def __str__(self) -> str:
-        ret = f"{self.op} {(self.expr)}"
+        ret = f"{self.op} {self.expr}"
         if self.parenthesized:
             return f"({ret})"
         return ret
-
-
-class DJEnum(Enum):
-    """
-    A DJ AST enum
-    """
-
-    def __repr__(self) -> str:
-        return str(self)
 
 
 # pylint: disable=C0103

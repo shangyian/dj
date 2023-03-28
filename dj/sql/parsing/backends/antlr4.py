@@ -11,6 +11,7 @@ from antlr4.error.Errors import ParseCancellationException
 from antlr4.error.ErrorStrategy import BailErrorStrategy
 
 from dj.sql.parsing import ast2 as ast
+from dj.sql.parsing.ast2 import UnaryOpKind
 from dj.sql.parsing.backends.exceptions import DJParseException
 from dj.sql.parsing.backends.grammar.generated.SqlBaseLexer import SqlBaseLexer
 from dj.sql.parsing.backends.grammar.generated.SqlBaseParser import SqlBaseParser
@@ -866,12 +867,12 @@ def _(ctx: sbp.PrimitiveDataTypeContext) -> ast.Value:
 def _(ctx: sbp.ExistsContext) -> ast.UnaryOp:
     expr = visit(ctx.query().queryTerm())
     expr.parenthesized = True
-    return ast.UnaryOp(op="EXISTS", expr=expr)
+    return ast.UnaryOp(op=UnaryOpKind.Exists, expr=expr)
 
 
 @visit.register
 def _(ctx: sbp.LogicalNotContext) -> ast.UnaryOp:
-    return ast.UnaryOp(op="NOT", expr=visit(ctx.booleanExpression()))
+    return ast.UnaryOp(op=UnaryOpKind.Not, expr=visit(ctx.booleanExpression()))
 
 
 @visit.register

@@ -205,12 +205,15 @@ def _(expression: ast2.UnaryOp):
         ast2.UnaryOpKind.Not: lambda type: ColumnType.BOOL
         if type == ColumnType.BOOL
         else raise_unop_exception(),
-        ast2.UnaryOpKind.Minus: lambda type: type_
-        if type in (ColumnType.INT, ColumnType.FLOAT)
+        ast2.UnaryOpKind.Exists: lambda type: ColumnType.BOOL
+        if type == ColumnType.BOOL
         else raise_unop_exception(),
-        ast2.UnaryOpKind.Plus: lambda type: type_
-        if type_ in (ColumnType.INT, ColumnType.FLOAT)
-        else raise_unop_exception(),
+        # ast2.UnaryOpKind.Minus: lambda type: type_
+        # if type in (ColumnType.INT, ColumnType.FLOAT)
+        # else raise_unop_exception(),
+        # ast2.UnaryOpKind.Plus: lambda type: type_
+        # if type_ in (ColumnType.INT, ColumnType.FLOAT)
+        # else raise_unop_exception(),
     }
     return UNOP_TYPE_COMBO_LOOKUP[kind](type_)
 
