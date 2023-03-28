@@ -28,6 +28,14 @@ DECIMAL_REGEX = re.compile(r"decimal\((\d+),\s*(\d+)\)")
 FIXED_PARSER = re.compile(rf"fixed\[(\d+)\]")
 
 
+def _convert_to_hashable_type(element: Any) -> Any:
+    if isinstance(element, dict):
+        return tuple((_convert_to_hashable_type(k), _convert_to_hashable_type(v)) for k, v in element.items())
+    elif isinstance(element, list):
+        return tuple(map(_convert_to_hashable_type, element))
+    return element
+
+
 class DataType:
     """Base type for all Data Types
 
