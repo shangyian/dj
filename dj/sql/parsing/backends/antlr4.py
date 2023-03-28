@@ -276,6 +276,11 @@ def _(ctx: sbp.ExpressionContext):
 
 
 @visit.register
+def _(ctx: sbp.BooleanLiteralContext):
+    return ast.Boolean(ctx.booleanValue())
+
+
+@visit.register
 def _(ctx: sbp.PredicatedContext):
     if value_expr := ctx.valueExpression():
         if not ctx.predicate():

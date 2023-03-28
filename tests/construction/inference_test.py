@@ -10,7 +10,7 @@ from dj.models.node import Node
 from dj.sql.parsing import ast, ast2
 from dj.sql.parsing.ast import BinaryOpKind
 from dj.sql.parsing.backends.exceptions import DJParseException
-from dj.sql.parsing.backends.sqloxide import parse
+from dj.sql.parsing.backends.antlr4 import parse
 from dj.typing import ColumnType
 
 
@@ -25,21 +25,21 @@ def test_infer_column_with_table(construction_session: Session):
             ),
         ),
     )[0]
-    table = ast2.Table(ast.Name("orders"), _dj_node=node.current)
+    table = ast2.Table(ast2.Name("orders"), _dj_node=node.current)
     assert (
-        get_type_of_expression(ast2.Column(ast.Name("id"), _table=table))
+        get_type_of_expression(ast2.Column(ast2.Name("id"), _table=table))
         == ColumnType.INT
     )
     assert (
-        get_type_of_expression(ast2.Column(ast.Name("user_id"), _table=table))
+        get_type_of_expression(ast2.Column(ast2.Name("user_id"), _table=table))
         == ColumnType.INT
     )
     assert (
-        get_type_of_expression(ast2.Column(ast.Name("order_date"), _table=table))
+        get_type_of_expression(ast2.Column(ast2.Name("order_date"), _table=table))
         == ColumnType.DATE
     )
     assert (
-        get_type_of_expression(ast2.Column(ast.Name("status"), _table=table))
+        get_type_of_expression(ast2.Column(ast2.Name("status"), _table=table))
         == ColumnType.STR
     )
 
@@ -65,10 +65,10 @@ def test_raise_on_invalid_infer_binary_op():
     """
     with pytest.raises(DJParseException) as exc_info:
         get_type_of_expression(
-            ast.BinaryOp(
-                op=BinaryOpKind.Modulo,
-                left=ast.String(value="foo"),
-                right=ast.String(value="bar"),
+            ast2.BinaryOp(
+                op=ast2.BinaryOpKind.Modulo,
+                left=ast2.String(value="foo"),
+                right=ast2.String(value="bar"),
             ),
         )
 
@@ -89,22 +89,33 @@ def test_infer_column_with_an_aliased_table(construction_session: Session):
             ),
         ),
     )[0]
-    table = ast.Table(ast.Name("orders"), _dj_node=node.current)
-    alias = ast.Alias(
-        ast.Name("foo"),
-        ast.Namespace([ast.Name("a"), ast.Name("b"), ast.Name("c")]),
+    table = ast2.Table(ast2.Name("orders"), _dj_node=node.current)
+    alias = ast2.Alias(
+        alias=ast2.Name(
+            name="foo",
+            namespace=ast2.Name(
+                name="a",
+                namespace=ast2.Name(
+                    name="b",
+                    namespace=ast2.Name("c"),
+                ),
+            ),
+        ),
         child=table,
     )
-    col = ast.Column(ast.Name("status"), _table=alias)
-    assert get_type_of_expression(col) == ColumnType.STR
+    assert get_type_of_expression(ast2.Column(ast2.Name("id"), _table=alias)) == ColumnType.INT
+    assert get_type_of_expression(ast2.Column(ast2.Name("user_id"), _table=alias)) == ColumnType.INT
+    assert get_type_of_expression(ast2.Column(ast2.Name("order_date"), _table=alias)) == ColumnType.DATE
+    assert get_type_of_expression(ast2.Column(ast2.Name("status"), _table=alias)) == ColumnType.STR
+    assert get_type_of_expression(ast2.Column(ast2.Name("_etl_loaded_at"), _table=alias)) == ColumnType.TIMESTAMP
 
 
 def test_raising_when_table_has_no_dj_node():
     """
     Test raising when getting the type of a column that has a table with no DJ node
     """
-    table = ast.Table(ast.Name("orders"))
-    col = ast.Column(ast.Name("status"), _table=table)
+    table = ast2.Table(ast2.Name("orders"))
+    col = ast2.Column(ast2.Name("status"), _table=table)
 
     with pytest.raises(DJParseException) as exc_info:
         get_type_of_expression(col)
@@ -120,8 +131,8 @@ def test_raising_when_expression_parent_not_a_table():
     Test raising when getting the type of a column thats parent is not a table
     """
     query = parse("select 1")
-    col = ast.Column(
-        ast.Name("status"),
+    col = ast2.Column(
+        ast2.Name("status"),
         _table=query.select,
     )  # intentionally adding a non-table AST node
 
@@ -173,7 +184,7 @@ def test_raising_when_expression_has_no_parent():
     """
     Test raising when getting the type of a column that has no parent
     """
-    col = ast.Column(ast.Name("status"), _table=None)
+    col = ast2.Column(ast2.Name("status"), _table=None)
 
     with pytest.raises(DJParseException) as exc_info:
         get_type_of_expression(col)

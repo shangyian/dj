@@ -82,6 +82,8 @@ def _(expression: ast2.Number):
     """
     Determine the type of the numeric expression.
     """
+    # expression.__post_init__()
+
     # We won't assume that anyone wants SHORT by default
     if isinstance(expression.value, int):
         if expression.value <= -2147483648 or expression.value >= 2147483647:

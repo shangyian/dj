@@ -5,6 +5,7 @@ import decimal
 from abc import ABC, abstractmethod
 from copy import deepcopy
 from dataclasses import dataclass, field, fields
+from enum import Enum
 from itertools import chain, zip_longest
 from typing import (
     Any,
@@ -560,7 +561,7 @@ class Column(Aliasable, Named, Expression):
     Column used in statements
     """
 
-    _table: Optional["TableExpression"] = field(repr=False, default=None)
+    _table: Optional[Union[Aliasable, "TableExpression"]] = field(repr=False, default=None)
     _type: Optional["ColumnType"] = field(repr=False, default=None)
     _expression: Optional[Expression] = field(repr=False, default=None)
 
@@ -824,18 +825,53 @@ class UnaryOp(Operation):
         return ret
 
 
+class DJEnum(Enum):
+    """
+    A DJ AST enum
+    """
+
+    def __repr__(self) -> str:
+        return str(self)
+
+
+# pylint: disable=C0103
+class BinaryOpKind(DJEnum):
+    """
+    The DJ AST accepted binary operations
+    """
+
+    And = "AND"
+    Or = "OR"
+    Is = "IS"
+    Eq = "="
+    NotEq = "<>"
+    Gt = ">"
+    Lt = "<"
+    GtEq = ">="
+    LtEq = "<="
+    BitwiseOr = "|"
+    BitwiseAnd = "&"
+    BitwiseXor = "^"
+    Multiply = "*"
+    Divide = "/"
+    Plus = "+"
+    Minus = "-"
+    Modulo = "%"
+    Like = "LIKE"
+
+
 @dataclass(eq=False)
 class BinaryOp(Operation):
     """
     Represents an operation that operates on two expressions
     """
 
-    op: str
+    op: BinaryOpKind
     left: Expression
     right: Expression
 
     def __str__(self) -> str:
-        ret = f"{self.left} {self.op} {self.right}"
+        ret = f"{self.left} {self.op.value} {self.right}"
         if self.parenthesized:
             return f"({ret})"
         return ret
@@ -956,9 +992,11 @@ class Number(Value):
             numeric_types = [int, float, decimal.Decimal]
             for cast_type in numeric_types:
                 try:
-                    cast(self.value, cast_type)
+                    self.value = cast_type(self.value)
                 except (ValueError, OverflowError) as exception:
                     cast_exceptions.append(exception)
+            print("cast_exceptions", cast_exceptions)
+            print("Value", self.value)
             if len(cast_exceptions) >= len(numeric_types):
                 raise DJException(message="Not a valid number!")
 
@@ -975,7 +1013,7 @@ class String(Value):
     value: str
 
     def __str__(self) -> str:
-        return str(self.value)
+        return f"'{self.value}'"
 
 
 @dataclass(eq=False)
