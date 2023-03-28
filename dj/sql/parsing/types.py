@@ -25,8 +25,7 @@ from pydantic import Field, PrivateAttr
 from pydantic.typing import AnyCallable
 
 DECIMAL_REGEX = re.compile(r"decimal\((\d+),\s*(\d+)\)")
-FIXED = "fixed"
-FIXED_PARSER = re.compile(rf"{FIXED}\[(\d+)\]")
+FIXED_PARSER = re.compile(rf"fixed\[(\d+)\]")
 
 
 class DataType(Singleton):
