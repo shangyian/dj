@@ -22,14 +22,36 @@ def test_ast_compile_table(session, client_with_examples):
     assert not exc.errors
 
 
-@pytest.mark.parametrize("query, table", [
-    ("SELECT a from foo", "foo"),
-])
-def test_ast_compile_table_missing_node(session, query, table):
-    query_ast = parse(query)
+
+def test_ast_compile_table_missing_node(session):
+    query_ast = parse("SELECT a FROM foo")
     exc = DJException()
     ctx = CompileContext(session=session, query=query_ast, exception=exc)
     query_ast.select.from_.relations[0].primary.compile(ctx)
-    assert f"No node `{table}` exists of kind" in exc.errors[0].message
+    assert f"No node `foo` exists of kind" in exc.errors[0].message
+    
+    query_ast = parse("SELECT a FROM foo, bar, baz")
+    exc = DJException()
+    ctx = CompileContext(session=session, query=query_ast, exception=exc)
+    query_ast.select.from_.relations[0].primary.compile(ctx)
+    assert f"No node `foo` exists of kind" in exc.errors[0].message
+    query_ast.select.from_.relations[1].primary.compile(ctx)
+    assert f"No node `bar` exists of kind" in exc.errors[1].message
+    query_ast.select.from_.relations[2].primary.compile(ctx)
+    assert f"No node `baz` exists of kind" in exc.errors[2].message
 
+    query_ast = parse("SELECT a FROM foo LEFT JOIN bar")
+    exc = DJException()
+    ctx = CompileContext(session=session, query=query_ast, exception=exc)
+    query_ast.select.from_.relations[0].primary.compile(ctx)
+    assert f"No node `foo` exists of kind" in exc.errors[0].message
+    query_ast.select.from_.relations[0].extensions[0].right.compile(ctx)
+    assert f"No node `bar` exists of kind" in exc.errors[1].message
 
+    query_ast = parse("SELECT a FROM foo LEFT JOIN (SELECT b FROM bar) b")
+    exc = DJException()
+    ctx = CompileContext(session=session, query=query_ast, exception=exc)
+    query_ast.select.from_.relations[0].primary.compile(ctx)
+    assert f"No node `foo` exists of kind" in exc.errors[0].message
+    query_ast.select.from_.relations[0].extensions[0].right.select.from_.relations[0].primary.compile(ctx)
+    assert f"No node `bar` exists of kind" in exc.errors[1].message
