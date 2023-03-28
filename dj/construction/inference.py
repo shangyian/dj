@@ -8,13 +8,13 @@ from functools import singledispatch
 from typing import Callable, Dict
 
 from dj.sql.functions import function_registry
-from dj.sql.parsing import ast2
+from dj.sql.parsing import ast2 as ast
 from dj.sql.parsing.backends.exceptions import DJParseException
 from dj.typing import ColumnType
 
 
 @singledispatch
-def get_type_of_expression(expression: ast2.Expression) -> ColumnType:
+def get_type_of_expression(expression: ast.Expression) -> ColumnType:
     """
     Get the type of an expression
     """
@@ -22,12 +22,12 @@ def get_type_of_expression(expression: ast2.Expression) -> ColumnType:
 
 
 @get_type_of_expression.register
-def _(expression: ast2.Alias):
+def _(expression: ast.Alias):
     return get_type_of_expression(expression.child)
 
 
 @get_type_of_expression.register
-def _(expression: ast2.Column):
+def _(expression: ast.Column):
     # column has already determined/stated its type
     if expression._type:  # pylint: disable=W0212
         return expression._type  # pylint: disable=W0212
@@ -38,35 +38,45 @@ def _(expression: ast2.Column):
         expression.add_type(type_)
         return type_
 
-    # column is from a table expression we can look through
+    # Look through a table expression for this column and return its type if found
     if table_or_alias := expression.table:
-        table = table_or_alias.child if isinstance(table_or_alias, ast2.Alias) else table_or_alias
-        columns = table.dj_node.columns if isinstance(table, ast2.Table) else table.columns
+        table = table_or_alias.child if isinstance(table_or_alias, ast.Alias) else table_or_alias
+        if isinstance(table, ast.Table):
+            if not table.dj_node:
+                raise DJParseException(
+                    f"Cannot resolve type of column `{table.name}.{expression.name.name}`: "
+                    f"the column's table does not have a DJ Node."
+                )
+        columns = []
+        if isinstance(table, ast.Table):
+            columns = table.dj_node.columns
+        if isinstance(table, ast.Query):
+            columns = table.columns
         for col in columns:  # pragma: no cover
-            col_name = col.alias_or_name.name if isinstance(col, ast2.Alias) else col.name
+            col_name = col.alias_or_name.name if isinstance(col, ast.Alias) else col.name
             if col_name == expression.name.name:
                 expression.add_type(col.type)
                 return col.type
         else:
             raise DJParseException(
-                f"Cannot resolve type of column {expression}. "
-                "column's table does not have a DJ Node.",
+                f"DJ does not currently traverse subqueries for type "
+                f"information. Consider extraction first.",
             )
     raise DJParseException(f"Cannot resolve type of column {expression}.")
 
 
 @get_type_of_expression.register
-def _(expression: ast2.Null):
+def _(expression: ast.Null):
     return ColumnType.NULL
 
 
 @get_type_of_expression.register
-def _(expression: ast2.String):
+def _(expression: ast.String):
     return ColumnType.STR
 
 
 @get_type_of_expression.register
-def _(expression: ast2.Number):
+def _(expression: ast.Number):
     """
     Determine the type of the numeric expression.
     """
@@ -91,17 +101,17 @@ def _(expression: ast2.Number):
 
 
 @get_type_of_expression.register
-def _(expression: ast2.Boolean):
+def _(expression: ast.Boolean):
     return ColumnType.BOOL
 
 
 @get_type_of_expression.register
-def _(expression: ast2.Wildcard):  # pragma: no cover
+def _(expression: ast.Wildcard):  # pragma: no cover
     return ColumnType.WILDCARD
 
 
 @get_type_of_expression.register
-def _(expression: ast2.Function):  # pragma: no cover
+def _(expression: ast.Function):  # pragma: no cover
     name = expression.name.name.upper()
     dj_func = function_registry[name]
     return dj_func.infer_type_from_types(
@@ -110,23 +120,23 @@ def _(expression: ast2.Function):  # pragma: no cover
 
 
 # @get_type_of_expression.register
-# def _(expression: ast2.Raw):
+# def _(expression: ast.Raw):
 #     return expression.type_
 
 
 @get_type_of_expression.register
-def _(expression: ast2.Subscript):
+def _(expression: ast.Subscript):
     type_ = expression.expr.type
     return type_.args[1]
 
 
 @get_type_of_expression.register
-def _(expression: ast2.Cast):
+def _(expression: ast.Cast):
     return expression.data_type
 
 
 @get_type_of_expression.register
-def _(expression: ast2.Case):
+def _(expression: ast.Case):
     result_types = [
         res.type
         for res in expression.results
@@ -141,17 +151,17 @@ def _(expression: ast2.Case):
 
 
 @get_type_of_expression.register
-def _(expression: ast2.IsNull):
+def _(expression: ast.IsNull):
     return ColumnType.BOOL
 
 
 @get_type_of_expression.register
-def _(expression: ast2.In):
+def _(expression: ast.In):
     return ColumnType.BOOL
 
 
 @get_type_of_expression.register
-def _(expression: ast2.Select):
+def _(expression: ast.Select):
     if len(expression.projection) != 1:
         raise DJParseException(
             "Can only infer type of a SELECT when it "
@@ -161,12 +171,12 @@ def _(expression: ast2.Select):
 
 
 @get_type_of_expression.register
-def _(expression: ast2.Query):
+def _(expression: ast.Query):
     return get_type_of_expression(expression.select)
 
 
 @get_type_of_expression.register
-def _(expression: ast2.Between):
+def _(expression: ast.Between):
     expr_type = get_type_of_expression(expression.expr)
     low_type = get_type_of_expression(expression.low)
     high_type = get_type_of_expression(expression.high)
@@ -179,7 +189,7 @@ def _(expression: ast2.Between):
 
 
 @get_type_of_expression.register
-def _(expression: ast2.UnaryOp):
+def _(expression: ast.UnaryOp):
     kind = expression.op
     type_ = get_type_of_expression(expression.expr)
 
@@ -190,19 +200,19 @@ def _(expression: ast2.UnaryOp):
         )
 
     UNOP_TYPE_COMBO_LOOKUP: Dict[  # pylint: disable=C0103
-        ast2.UnaryOpKind,
+        ast.UnaryOpKind,
         Callable[[ColumnType], ColumnType],
     ] = {
-        ast2.UnaryOpKind.Not: lambda type: ColumnType.BOOL
+        ast.UnaryOpKind.Not: lambda type: ColumnType.BOOL
         if type == ColumnType.BOOL
         else raise_unop_exception(),
-        ast2.UnaryOpKind.Exists: lambda type: ColumnType.BOOL
+        ast.UnaryOpKind.Exists: lambda type: ColumnType.BOOL
         if type == ColumnType.BOOL
         else raise_unop_exception(),
-        # ast2.UnaryOpKind.Minus: lambda type: type_
+        # ast.UnaryOpKind.Minus: lambda type: type_
         # if type in (ColumnType.INT, ColumnType.FLOAT)
         # else raise_unop_exception(),
-        # ast2.UnaryOpKind.Plus: lambda type: type_
+        # ast.UnaryOpKind.Plus: lambda type: type_
         # if type_ in (ColumnType.INT, ColumnType.FLOAT)
         # else raise_unop_exception(),
     }
@@ -210,7 +220,7 @@ def _(expression: ast2.UnaryOp):
 
 
 @get_type_of_expression.register
-def _(expression: ast2.Like):
+def _(expression: ast.Like):
     expr_type = get_type_of_expression(expression.expr)
     if expr_type == ColumnType.STR:
         return ColumnType.BOOL
@@ -220,7 +230,7 @@ def _(expression: ast2.Like):
 
 
 @get_type_of_expression.register
-def _(expression: ast2.BinaryOp):
+def _(expression: ast.BinaryOp):
     kind = expression.op
     left_type = get_type_of_expression(expression.left)
     right_type = get_type_of_expression(expression.right)
@@ -249,35 +259,35 @@ def _(expression: ast2.BinaryOp):
         return left
 
     BINOP_TYPE_COMBO_LOOKUP: Dict[  # pylint: disable=C0103
-        ast2.BinaryOpKind,
+        ast.BinaryOpKind,
         Callable[[ColumnType, ColumnType], ColumnType],
     ] = {
-        ast2.BinaryOpKind.And: lambda left, right: ColumnType.BOOL,
-        ast2.BinaryOpKind.Or: lambda left, right: ColumnType.BOOL,
-        ast2.BinaryOpKind.Is: lambda left, right: ColumnType.BOOL,
-        ast2.BinaryOpKind.Eq: lambda left, right: ColumnType.BOOL,
-        ast2.BinaryOpKind.NotEq: lambda left, right: ColumnType.BOOL,
-        ast2.BinaryOpKind.Gt: lambda left, right: ColumnType.BOOL,
-        ast2.BinaryOpKind.Lt: lambda left, right: ColumnType.BOOL,
-        ast2.BinaryOpKind.GtEq: lambda left, right: ColumnType.BOOL,
-        ast2.BinaryOpKind.LtEq: lambda left, right: ColumnType.BOOL,
-        ast2.BinaryOpKind.BitwiseOr: lambda left, right: ColumnType.INT
+        ast.BinaryOpKind.And: lambda left, right: ColumnType.BOOL,
+        ast.BinaryOpKind.Or: lambda left, right: ColumnType.BOOL,
+        ast.BinaryOpKind.Is: lambda left, right: ColumnType.BOOL,
+        ast.BinaryOpKind.Eq: lambda left, right: ColumnType.BOOL,
+        ast.BinaryOpKind.NotEq: lambda left, right: ColumnType.BOOL,
+        ast.BinaryOpKind.Gt: lambda left, right: ColumnType.BOOL,
+        ast.BinaryOpKind.Lt: lambda left, right: ColumnType.BOOL,
+        ast.BinaryOpKind.GtEq: lambda left, right: ColumnType.BOOL,
+        ast.BinaryOpKind.LtEq: lambda left, right: ColumnType.BOOL,
+        ast.BinaryOpKind.BitwiseOr: lambda left, right: ColumnType.INT
         if left == right == ColumnType.INT
         else raise_binop_exception(),
-        ast2.BinaryOpKind.BitwiseAnd: lambda left, right: ColumnType.INT
+        ast.BinaryOpKind.BitwiseAnd: lambda left, right: ColumnType.INT
         if left == right == ColumnType.INT
         else raise_binop_exception(),
-        ast2.BinaryOpKind.BitwiseXor: lambda left, right: ColumnType.INT
+        ast.BinaryOpKind.BitwiseXor: lambda left, right: ColumnType.INT
         if left == right == ColumnType.INT
         else raise_binop_exception(),
-        ast2.BinaryOpKind.Multiply: resolve_numeric_types_binary_operations,
-        ast2.BinaryOpKind.Divide: resolve_numeric_types_binary_operations,
-        ast2.BinaryOpKind.Plus: resolve_numeric_types_binary_operations,
-        ast2.BinaryOpKind.Minus: resolve_numeric_types_binary_operations,
-        ast2.BinaryOpKind.Modulo: lambda left, right: ColumnType.INT
+        ast.BinaryOpKind.Multiply: resolve_numeric_types_binary_operations,
+        ast.BinaryOpKind.Divide: resolve_numeric_types_binary_operations,
+        ast.BinaryOpKind.Plus: resolve_numeric_types_binary_operations,
+        ast.BinaryOpKind.Minus: resolve_numeric_types_binary_operations,
+        ast.BinaryOpKind.Modulo: lambda left, right: ColumnType.INT
         if left == right == ColumnType.INT
         else raise_binop_exception(),
-        ast2.BinaryOpKind.Like: lambda left, right: ColumnType.BOOL
+        ast.BinaryOpKind.Like: lambda left, right: ColumnType.BOOL
         if left == right == ColumnType.STR
         else raise_binop_exception(),
     }

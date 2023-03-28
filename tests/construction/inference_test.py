@@ -122,8 +122,8 @@ def test_raising_when_table_has_no_dj_node():
         get_type_of_expression(col)
 
     assert (
-        "Cannot resolve type of column orders.status. "
-        "column's table does not have a DJ Node."
+        "Cannot resolve type of column `orders.status`: "
+        "the column's table does not have a DJ Node."
     ) in str(exc_info.value)
 
 
@@ -302,7 +302,7 @@ def test_infer_types_complicated(construction_session: Session):
         ColumnType.INT,
         ColumnType.INT,
         ColumnType.INT,
-        ColumnType.INT,
+        ColumnType.DECIMAL,
         ColumnType.INT,
         ColumnType.INT,
         ColumnType.BOOL,
