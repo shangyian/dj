@@ -1502,6 +1502,12 @@ class SelectExpression(Aliasable, Expression):
     where: Optional[Expression] = None
     set_op: List[SetOp] = field(default_factory=list)
 
+    def compile(self, ctx: CompileContext):
+        """
+        Compile a set operation
+        """
+        for expr in self.projection:
+            expr.compile(ctx)
 
 class Select(SelectExpression):
     """

@@ -173,6 +173,11 @@ def _(expression: ast2.Select):
 
 
 @get_type_of_expression.register
+def _(expression: ast2.Query):
+    return get_type_of_expression(expression.select)
+
+
+@get_type_of_expression.register
 def _(expression: ast2.Between):
     expr_type = get_type_of_expression(expression.expr)
     low_type = get_type_of_expression(expression.low)
