@@ -449,14 +449,6 @@ class Aliasable(Node):
         else:
             raise DJParseException("Node has no alias or name.")
 
-    @property
-    def type(self):
-        from dj.construction.inference import (  # pylint: disable=C0415
-            get_type_of_expression,
-        )
-
-        return get_type_of_expression(self)
-
 
 AliasedType = TypeVar("AliasedType", bound=Node)  # pylint: disable=C0103
 
@@ -479,6 +471,10 @@ class Alias(Aliasable, Generic[AliasedType]):
     def compile(self, ctx: CompileContext):
         self.child.compile(ctx)
 
+    @property
+    def type(self) -> ColumnType:
+        return self.child.type
+
 
 TExpression = TypeVar("TExpression", bound="Expression")  # pylint: disable=C0103
 
@@ -496,11 +492,11 @@ class Expression(Node):
         """
         Return the type of the expression
         """
-        from dj.construction.inference import (  # pylint: disable=C0415
-            get_type_of_expression,
-        )
-
-        return get_type_of_expression(self)
+        # from dj.construction.inference import (  # pylint: disable=C0415
+        #     get_type_of_expression,
+        # )
+        #
+        # return get_type_of_expression(self)
 
     def is_aggregation(self) -> bool:
         """
@@ -594,7 +590,7 @@ class Column(Aliasable, Named, Expression):
         # Column was derived from some other expression we can get the type of
         if self.expression:
             self.add_type(self.expression.type)
-            return self._type
+            return self.expression.type
 
         # Look through a table expression for this column and return its type if found
         if table_or_alias := self.table:
@@ -610,8 +606,11 @@ class Column(Aliasable, Named, Expression):
                 columns = table.dj_node.columns
             if isinstance(table, Query):
                 columns = table.columns
-            for col in columns:  # pragma: no cover
-                col_name = col.alias_or_name.name if isinstance(col, Alias) else col.name
+            for col in columns:
+                col_name = col.alias_or_name.name \
+                    if isinstance(col, Alias) else col.name \
+                    if isinstance(col.name, str) \
+                    else col.name.name
                 if col_name == self.name.name:
                     self.add_type(col.type)
                     return col.type
@@ -694,7 +693,10 @@ class Column(Aliasable, Named, Expression):
                                 return True
             return False
 
-        found_sources: List["Node"] = list(query.filter(find_table_sources))
+        direct_tables = [relation.primary for relation in query.select.from_.relations]
+        joins = [ext.right for relation in query.select.from_.relations for ext in relation.extensions]
+        found_sources = [node for node in direct_tables + joins if find_table_sources(node)]
+
         if len(found_sources) < 1:
             ctx.exception.errors.append(
                 DJError(
@@ -1287,6 +1289,10 @@ class Predicate(Operation):
 
     negated: bool = False
 
+    @property
+    def type(self) -> ColumnType:
+        return ColumnType.BOOL
+
 
 @dataclass(eq=False)
 class Between(Predicate):
@@ -1747,6 +1753,7 @@ class SelectExpression(Aliasable, Expression):
         """
         for expr in self.projection:
             expr.compile(ctx)
+
 
 class Select(SelectExpression):
     """

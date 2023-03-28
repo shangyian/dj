@@ -341,8 +341,7 @@ def test_infer_bad_case_types(construction_session: Session):
             FROM dbt.source.jaffle_shop.customers
             """,
         )
-        exc = DJException()
-        ctx = CompileContext(session=construction_session, query=query, exception=exc)
+        ctx = CompileContext(session=construction_session, query=query, exception=DJException())
         query.compile(ctx)
         [  # pylint: disable=pointless-statement
             exp.type for exp in query.select.projection
