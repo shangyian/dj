@@ -893,15 +893,15 @@ EXAMPLES = (  # type: ignore
         "/nodes/transform/",
         {
             "query": (
-                'SELECT "dbt.source.jaffle_shop.customers".id, '
-                '        "dbt.source.jaffle_shop.customers".first_name, '
-                '        "dbt.source.jaffle_shop.customers".last_name, '
+                'SELECT c.id, '
+                '        c.first_name, '
+                '        c.last_name, '
                 "        COUNT(1) AS order_cnt "
                 "FROM dbt.source.jaffle_shop.orders o "
                 "JOIN dbt.source.jaffle_shop.customers c ON o.user_id = c.id "
-                'GROUP BY "dbt.source.jaffle_shop.customers".id, '
-                '        "dbt.source.jaffle_shop.customers".first_name, '
-                '        "dbt.source.jaffle_shop.customers".last_name '
+                'GROUP BY c.id, '
+                '        c.first_name, '
+                '        c.last_name '
             ),
             "description": "Country level agg table",
             "mode": "published",

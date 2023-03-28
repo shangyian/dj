@@ -11,7 +11,7 @@ from sqlmodel import Session, select
 
 from dj.construction.build import build_node
 from dj.construction.dj_query import build_dj_metric_query
-from dj.construction.extract import extract_dependencies_from_node
+from dj.construction.extract2 import extract_dependencies_from_compiled_query_ast
 from dj.construction.inference import get_type_of_expression
 from dj.errors import DJError, DJException, DJInvalidInputException, ErrorCode
 from dj.models import AttributeType, Catalog, Column, Engine
@@ -27,7 +27,8 @@ from dj.models.node import (
     NodeStatus,
     NodeType,
 )
-from dj.sql.parsing import ast
+from dj.sql.parsing import ast2 as ast
+from dj.sql.parsing.backends.antlr4 import parse
 from dj.sql.parsing.backends.exceptions import DJParseException
 
 
@@ -249,14 +250,17 @@ def validate_node_data(
 
     validated_node.status = NodeStatus.VALID
     # Try to parse the node's query and extract dependencies
+
+    query_ast = parse(validated_node.query)
+    exc = DJException()
+    ctx = ast.CompileContext(session=session, query=query_ast, exception=exc)
+    query_ast.compile(ctx=ctx)
     try:
         (
-            query_ast,
             dependencies_map,
             missing_parents_map,
-        ) = extract_dependencies_from_node(
-            session=session,
-            node=validated_node,
+        ) = extract_dependencies_from_compiled_query_ast(
+            query=query_ast,
         )
     except ValueError as exc:
         raise DJException(message=str(exc)) from exc
@@ -284,13 +288,13 @@ def validate_node_data(
     for col in query_ast.select.projection:
         try:
             column_type = get_type_of_expression(col)
+            column_name = col.alias_or_name
             validated_node.columns.append(
-                Column(name=col.name.name, type=column_type),  # type: ignore
+                Column(name=col.alias_or_name.name, type=column_type),  # type: ignore
             )
         except DJParseException:
-            type_inference_failed_columns.append(col.name.name)  # type: ignore
+            type_inference_failed_columns.append(col.alias_or_name.name)  # type: ignore
             validated_node.status = NodeStatus.INVALID
-
     return (
         validated_node,
         dependencies_map,
