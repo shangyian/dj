@@ -217,6 +217,16 @@ def _(expression: ast2.UnaryOp):
 
 
 @get_type_of_expression.register
+def _(expression: ast2.Like):
+    expr_type = get_type_of_expression(expression.expr)
+    if expr_type == ColumnType.STR:
+        return ColumnType.BOOL
+    raise DJParseException(
+        f"Incompatible type for {expression}: {expr_type}. Expected STR",
+    )
+
+
+@get_type_of_expression.register
 def _(expression: ast2.BinaryOp):
     kind = expression.op
     left_type = get_type_of_expression(expression.left)
@@ -227,6 +237,23 @@ def _(expression: ast2.BinaryOp):
             "Incompatible types in binary operation "
             f"{expression}. Got left {left_type}, right {right_type}.",
         )
+
+    numeric_types = {
+        type_: idx for idx, type_ in
+        enumerate([
+            ColumnType.DECIMAL, ColumnType.DOUBLE, ColumnType.FLOAT,
+            ColumnType.LONG, ColumnType.INT, ColumnType.SHORT,
+        ])
+    }
+
+    def resolve_numeric_types_binary_operations(left: ColumnType, right: ColumnType):
+        if left not in numeric_types or right not in numeric_types:
+            raise_binop_exception()
+        if left == right:
+            return left
+        if numeric_types[left] > numeric_types[right]:
+            return right
+        return left
 
     BINOP_TYPE_COMBO_LOOKUP: Dict[  # pylint: disable=C0103
         ast2.BinaryOpKind,
@@ -250,34 +277,10 @@ def _(expression: ast2.BinaryOp):
         ast2.BinaryOpKind.BitwiseXor: lambda left, right: ColumnType.INT
         if left == right == ColumnType.INT
         else raise_binop_exception(),
-        ast2.BinaryOpKind.Multiply: lambda left, right: left
-        if left == right
-        else (
-            ColumnType.FLOAT
-            if {left, right} == {ColumnType.FLOAT, ColumnType.INT}
-            else raise_binop_exception()
-        ),
-        ast2.BinaryOpKind.Divide: lambda left, right: left
-        if left == right
-        else (
-            ColumnType.FLOAT
-            if {left, right} == {ColumnType.FLOAT, ColumnType.INT}
-            else raise_binop_exception()
-        ),
-        ast2.BinaryOpKind.Plus: lambda left, right: left
-        if left == right
-        else (
-            ColumnType.FLOAT
-            if {left, right} == {ColumnType.FLOAT, ColumnType.INT}
-            else raise_binop_exception()
-        ),
-        ast2.BinaryOpKind.Minus: lambda left, right: left
-        if left == right
-        else (
-            ColumnType.FLOAT
-            if {left, right} == {ColumnType.FLOAT, ColumnType.INT}
-            else raise_binop_exception()
-        ),
+        ast2.BinaryOpKind.Multiply: resolve_numeric_types_binary_operations,
+        ast2.BinaryOpKind.Divide: resolve_numeric_types_binary_operations,
+        ast2.BinaryOpKind.Plus: resolve_numeric_types_binary_operations,
+        ast2.BinaryOpKind.Minus: resolve_numeric_types_binary_operations,
         ast2.BinaryOpKind.Modulo: lambda left, right: ColumnType.INT
         if left == right == ColumnType.INT
         else raise_binop_exception(),

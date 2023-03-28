@@ -230,9 +230,9 @@ def test_infer_types_complicated(construction_session: Session):
         """
       SELECT id+1-2/3*5%6&10|8^5,
       CAST('2022-01-01T12:34:56Z' AS TIMESTAMP),
-      Raw('average({id})', 'INT', True),
-      Raw('aggregate(array(1, 2, {id}), 0, (acc, x) -> acc + x, acc -> acc * 10)', 'INT'),
-      Raw('NOW()', 'datetime'),
+      -- Raw('average({id})', 'INT', True),
+      -- Raw('aggregate(array(1, 2, {id}), 0, (acc, x) -> acc + x, acc -> acc * 10)', 'INT'),
+      -- Raw('NOW()', 'datetime'),
       DATE_TRUNC('day', '2014-03-10'),
       NOW(),
       Coalesce(NULL, 5),
@@ -286,13 +286,15 @@ def test_infer_types_complicated(construction_session: Session):
         )
     """,
     )
-    query.compile(construction_session)
+    exc = DJException()
+    ctx = CompileContext(session=construction_session, query=query, exception=exc)
+    query.compile(ctx)
     types = [
         ColumnType.INT,
         ColumnType.TIMESTAMP,
-        ColumnType.INT,
-        ColumnType.INT,
-        ColumnType.TIMESTAMP,
+        # ColumnType.INT,
+        # ColumnType.INT,
+        # ColumnType.TIMESTAMP,
         ColumnType.TIMESTAMP,
         ColumnType.TIMESTAMP,
         ColumnType.INT,

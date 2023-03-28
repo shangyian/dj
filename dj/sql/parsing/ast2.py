@@ -900,6 +900,10 @@ class BinaryOp(Operation):
             return f"({ret})"
         return ret
 
+    def compile(self, ctx: CompileContext):
+        self.left.compile(ctx)
+        self.right.compile(ctx)
+
 
 @dataclass(eq=False)
 class FrameBound(Expression):
@@ -979,6 +983,10 @@ class Function(Named, Operation):
     def is_aggregation(self) -> bool:
         return function_registry[self.name.name.upper()].is_aggregation
 
+    def compile(self, ctx: CompileContext):
+        for expr in self.args:
+            expr.compile(ctx)
+
 
 class Value(Expression):
     """
@@ -1017,10 +1025,9 @@ class Number(Value):
             for cast_type in numeric_types:
                 try:
                     self.value = cast_type(self.value)
+                    break
                 except (ValueError, OverflowError) as exception:
                     cast_exceptions.append(exception)
-            print("cast_exceptions", cast_exceptions)
-            print("Value", self.value)
             if len(cast_exceptions) >= len(numeric_types):
                 raise DJException(message="Not a valid number!")
 
@@ -1118,6 +1125,11 @@ class Between(Predicate):
             between = f"({between})"
         return between
 
+    def compile(self, ctx: CompileContext):
+        self.expr.compile(ctx)
+        self.low.compile(ctx)
+        self.high.compile(ctx)
+
 
 @dataclass(eq=False)
 class In(Predicate):
@@ -1174,6 +1186,9 @@ class Like(Predicate):
         quantifier = f"{self.quantifier} " if self.quantifier else ""
         like_type = "LIKE" if self.case_sensitive else "ILIKE"
         return f"{not_}{self.expr} {like_type} {quantifier}{pattern}{escape_char}"
+
+    def compile(self, ctx: CompileContext):
+        self.expr.compile(ctx)
 
 
 @dataclass(eq=False)
@@ -1248,6 +1263,18 @@ class Case(Expression):
         return all(result.is_aggregation() for result in self.results) and (
             self.else_result.is_aggregation() if self.else_result else True
         )
+
+    def compile(self, ctx: CompileContext):
+        if self.expr:
+            self.expr.compile(ctx)
+        for cond in self.conditions:
+            cond.compile(ctx)
+        if self.else_result:
+            self.else_result.compile(ctx)
+        if self.operand:
+            self.operand.compile(ctx)
+        for result in self.results:
+            result.compile(ctx)
 
 
 @dataclass(eq=False)
@@ -1578,7 +1605,8 @@ class Query(TableExpression):
     def compile(self, ctx: CompileContext):
         if self.is_compiled():
             return
-        self.select.from_.compile(ctx)
+        if self.select.from_:
+            self.select.from_.compile(ctx)
         for projection in self.select.projection:
             projection.compile(ctx)
         self._columns = self.select.projection[:]

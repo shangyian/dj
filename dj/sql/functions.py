@@ -470,7 +470,11 @@ class Avg(Function):
 
     @staticmethod
     def infer_type_from_types(type_: ColumnType) -> ColumnType:  # type: ignore
-        return type_
+        if type_ == ColumnType.FLOAT:
+            return ColumnType.FLOAT
+        if type_ == ColumnType.DOUBLE:
+            return ColumnType.DOUBLE
+        return ColumnType.DECIMAL
 
     @staticmethod
     def get_sqla_function(  # type: ignore

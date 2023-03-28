@@ -278,7 +278,16 @@ def _(ctx: sbp.ExpressionContext):
 
 @visit.register
 def _(ctx: sbp.BooleanLiteralContext):
-    return ast.Boolean(ctx.booleanValue())
+    boolean_value_mapping = {"true": True, "false": False}
+    boolean_value = ctx.booleanValue().getText().lower()
+    if boolean_value in boolean_value_mapping:
+        return ast.Boolean(boolean_value_mapping[boolean_value])
+    raise DJParseException(f"Invalid boolean value {boolean_value}!")
+
+
+@visit.register
+def _(ctx: sbp.BooleanValueContext):
+    return ast.Boolean(visit(ctx.getText()))
 
 
 @visit.register
@@ -360,7 +369,7 @@ def _(ctx: sbp.ValueExpressionDefaultContext):
 
 @visit.register
 def _(ctx: sbp.ArithmeticBinaryContext):
-    return ast.BinaryOp(ctx.operator.text, visit(ctx.left), visit(ctx.right))
+    return ast.BinaryOp(ast.BinaryOpKind(ctx.operator.text.upper()), visit(ctx.left), visit(ctx.right))
 
 
 @visit.register
@@ -727,7 +736,7 @@ def _(ctx: sbp.JoinCriteriaContext):
 def _(ctx: sbp.ComparisonContext):
     left, right = visit(ctx.left), visit(ctx.right)
     op = visit(ctx.comparisonOperator())
-    return ast.BinaryOp(op, left, right)
+    return ast.BinaryOp(ast.BinaryOpKind(op.upper()), left, right)
 
 
 @visit.register
@@ -768,7 +777,7 @@ def _(ctx: sbp.NamedQueryContext) -> ast.Select:
 
 @visit.register
 def _(ctx: sbp.LogicalBinaryContext) -> ast.BinaryOp:
-    return ast.BinaryOp(ctx.operator.text, visit(ctx.left), visit(ctx.right))
+    return ast.BinaryOp(ast.BinaryOpKind(ctx.operator.text.upper()), visit(ctx.left), visit(ctx.right))
 
 
 @visit.register
@@ -855,7 +864,7 @@ def _(ctx: sbp.NullLiteralContext) -> ast.Null:
 def _(ctx: sbp.CastContext) -> ast.Cast:
     data_type = visit(ctx.dataType())
     expression = visit(ctx.expression())
-    return ast.Cast(data_type=data_type, expression=expression)
+    return ast.Cast(data_type=data_type.name, expression=expression)
 
 
 @visit.register
