@@ -2,7 +2,7 @@
 # mypy: ignore-errors
 import inspect
 import logging
-from typing import List, Tuple
+from typing import List, Tuple, cast
 
 import antlr4
 from antlr4 import InputStream, RecognitionException
@@ -158,6 +158,20 @@ def tree_to_strings(tree, indent=0):
         for child in tree.children:
             result += tree_to_strings(child, indent + 1)
     return result
+
+def parse_rule(sql: str, rule: str) -> ast.Node:
+    """
+    Parse a string into a DJ ast using the ANTLR4 backend.
+    """
+    antlr_tree = parse_sql(sql, rule)
+    ast_tree = visit(antlr_tree)
+    return ast_tree
+
+def parse(sql: str)->ast.Query:
+    """
+    Parse a string sql query into a DJ ast Query
+    """
+    return cast(ast.Query, parse_rule(sql, "singleStatement"))
 
 
 TERMINAL_NODE = antlr4.tree.Tree.TerminalNodeImpl
@@ -989,10 +1003,3 @@ def _(ctx: sbp.LambdaContext) -> ast.Function:
     return ast.Lambda(identifiers=identifier, expr=expr)
 
 
-def parse(sql: str) -> ast.Query:
-    """
-    Parse a string into a DJ ast using the ANTLR4 backend.
-    """
-    tree = parse_statement(sql)
-    query = visit(tree)
-    return query
