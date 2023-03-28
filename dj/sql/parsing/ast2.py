@@ -401,7 +401,7 @@ class Node(ABC):
         Get the string of a node
         """
 
-    def compile(self):
+    def compile(self, ctx: CompileContext):
         """
         Compile a DJ Node
         """
@@ -447,6 +447,14 @@ class Aliasable(Node):
             return self.name
         else:
             raise DJParseException("Node has no alias or name.")
+
+    @property
+    def type(self):
+        from dj.construction.inference import (  # pylint: disable=C0415
+            get_type_of_expression,
+        )
+
+        return get_type_of_expression(self)
 
 
 AliasedType = TypeVar("AliasedType", bound=Node)  # pylint: disable=C0103
@@ -1371,6 +1379,9 @@ class Relation(Node):
             extensions = ""
         return f"{self.primary}{extensions}"
 
+    def compile(self, ctx: CompileContext):
+        self.primary.compile(ctx)
+
 
 @dataclass(eq=False)
 class From(Node):
@@ -1387,6 +1398,10 @@ class From(Node):
         for view in self.lateral_views:
             parts.append(f"\n{view}")
         return "".join(parts)
+
+    def compile(self, ctx: CompileContext):
+        for relation in self.relations:
+            relation.compile(ctx)
 
 
 @dataclass(eq=False)
@@ -1446,7 +1461,7 @@ class SelectExpression(Aliasable, Expression):
     """
 
     quantifier: str = ""  # Distinct, All
-    projection: List[Expression] = field(default_factory=list)
+    projection: List[Union[Aliasable, Expression]] = field(default_factory=list)
     from_: Optional[From] = None
     group_by: List[Expression] = field(default_factory=list)
     having: Optional[Expression] = None
@@ -1553,9 +1568,12 @@ class Query(TableExpression):
     limit: Optional[Expression] = None
     organization: Optional[Organization] = None
 
-    def compile(self):
+    def compile(self, ctx: CompileContext):
         if self.is_compiled():
             return
+        self.select.from_.compile(ctx)
+        for projection in self.select.projection:
+            projection.compile(ctx)
         self._columns = self.select.projection[:]
 
     def bake_ctes(self):

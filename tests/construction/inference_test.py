@@ -6,9 +6,11 @@ from sqlalchemy import select
 from sqlmodel import Session
 
 from dj.construction.inference import get_type_of_expression
+from dj.errors import DJException
 from dj.models.node import Node
 from dj.sql.parsing import ast, ast2
 from dj.sql.parsing.ast import BinaryOpKind
+from dj.sql.parsing.ast2 import CompileContext
 from dj.sql.parsing.backends.exceptions import DJParseException
 from dj.sql.parsing.backends.antlr4 import parse
 from dj.typing import ColumnType
@@ -207,7 +209,9 @@ def test_infer_map_subscripts(construction_session: Session):
         FROM basic.source.users
     """,
     )
-    query.compile(construction_session)
+    exc = DJException()
+    ctx = CompileContext(session=construction_session, query=query, exception=exc)
+    query.compile(ctx)
     types = [
         ColumnType.STR,
         ColumnType.STR,

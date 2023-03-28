@@ -126,12 +126,12 @@ def _(expression: ast2.Function):  # pragma: no cover
 #     return expression.type_
 
 
-# @get_type_of_expression.register
-# def _(expression: ast2.Subscript):
-#     type_ = expression.map_column.type
-#     for _ in expression.keys:
-#         type_ = type_.args[1]  # type: ignore
-#     return type_  # type: ignore
+@get_type_of_expression.register
+def _(expression: ast2.Subscript):
+    type_ = expression.expr.type
+    # for _ in expression.index:
+    #     type_ = type_.args[1]  # type: ignore
+    return type_  # type: ignore
 
 
 @get_type_of_expression.register

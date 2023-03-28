@@ -340,6 +340,14 @@ def _(ctx: sbp.PredicateContext) -> ast.Predicate:
 
 
 @visit.register
+def _(ctx: sbp.SubscriptContext):
+    return ast.Subscript(
+        expr=visit(ctx.primaryExpression()),
+        index=visit(ctx.valueExpression()),
+    )
+
+
+@visit.register
 def _(ctx: sbp.ValueExpressionContext):
     if primary := ctx.primaryExpression():
         return visit(primary)
