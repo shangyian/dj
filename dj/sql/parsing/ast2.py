@@ -586,6 +586,42 @@ class Column(Aliasable, Named, Expression):
     _type: Optional["ColumnType"] = field(repr=False, default=None)
     _expression: Optional[Expression] = field(repr=False, default=None)
 
+    @property
+    def type(self):
+        if self._type:
+            return self._type
+
+        # Column was derived from some other expression we can get the type of
+        if self.expression:
+            self.add_type(self.expression.type)
+            return self._type
+
+        # Look through a table expression for this column and return its type if found
+        if table_or_alias := self.table:
+            table = table_or_alias.child if isinstance(table_or_alias, Alias) else table_or_alias
+            if isinstance(table, Table):
+                if not table.dj_node:
+                    raise DJParseException(
+                        f"Cannot resolve type of column `{table.name}.{self.name.name}`: "
+                        f"the column's table does not have a DJ Node."
+                    )
+            columns = []
+            if isinstance(table, Table):
+                columns = table.dj_node.columns
+            if isinstance(table, Query):
+                columns = table.columns
+            for col in columns:  # pragma: no cover
+                col_name = col.alias_or_name.name if isinstance(col, Alias) else col.name
+                if col_name == self.name.name:
+                    self.add_type(col.type)
+                    return col.type
+            else:
+                raise DJParseException(
+                    f"DJ does not currently traverse subqueries for type "
+                    f"information. Consider extraction first.",
+                )
+        raise DJParseException(f"Cannot resolve type of column {self}.")
+
     def add_type(self, type_: ColumnType) -> "Column":
         """
         Add a referenced type
@@ -719,6 +755,10 @@ class Wildcard(Named, Expression):
 
     def __str__(self) -> str:
         return "*"
+
+    @property
+    def type(self) -> ColumnType:
+        return ColumnType.WILDCARD
 
 
 @dataclass(eq=False)
@@ -868,6 +908,29 @@ class UnaryOp(Operation):
             return f"({ret})"
         return ret
 
+    @property
+    def type(self) -> ColumnType:
+        type_ = self.expr.type
+
+        def raise_unop_exception():
+            raise DJParseException(
+                "Incompatible type in unary operation "
+                f"{self}. Got {type} in {self}.",
+            )
+
+        if self.op == UnaryOpKind.Not:
+            if type_ == ColumnType.BOOL:
+                return ColumnType.BOOL
+            raise_unop_exception()
+        if self.op == UnaryOpKind.Exists:
+            if type == ColumnType.BOOL:
+                return ColumnType.BOOL
+            raise_unop_exception()
+
+        raise DJParseException(
+            f"Unary operation {self.op} not supported!"
+        )
+
 
 # pylint: disable=C0103
 class BinaryOpKind(DJEnum):
@@ -914,6 +977,70 @@ class BinaryOp(Operation):
     def compile(self, ctx: CompileContext):
         self.left.compile(ctx)
         self.right.compile(ctx)
+
+    @property
+    def type(self) -> ColumnType:
+        kind = self.op
+        left_type = self.left.type
+        right_type = self.right.type
+
+        def raise_binop_exception():
+            raise DJParseException(
+                "Incompatible types in binary operation "
+                f"{self}. Got left {left_type}, right {right_type}.",
+            )
+
+        numeric_types = {
+            type_: idx for idx, type_ in
+            enumerate([
+                ColumnType.DECIMAL, ColumnType.DOUBLE, ColumnType.FLOAT,
+                ColumnType.LONG, ColumnType.INT, ColumnType.SHORT,
+            ])
+        }
+
+        def resolve_numeric_types_binary_operations(left: ColumnType, right: ColumnType):
+            if left not in numeric_types or right not in numeric_types:
+                raise_binop_exception()
+            if left == right:
+                return left
+            if numeric_types[left] > numeric_types[right]:
+                return right
+            return left
+
+        BINOP_TYPE_COMBO_LOOKUP: Dict[  # pylint: disable=C0103
+            BinaryOpKind,
+            Callable[[ColumnType, ColumnType], ColumnType],
+        ] = {
+            BinaryOpKind.And: lambda left, right: ColumnType.BOOL,
+            BinaryOpKind.Or: lambda left, right: ColumnType.BOOL,
+            BinaryOpKind.Is: lambda left, right: ColumnType.BOOL,
+            BinaryOpKind.Eq: lambda left, right: ColumnType.BOOL,
+            BinaryOpKind.NotEq: lambda left, right: ColumnType.BOOL,
+            BinaryOpKind.Gt: lambda left, right: ColumnType.BOOL,
+            BinaryOpKind.Lt: lambda left, right: ColumnType.BOOL,
+            BinaryOpKind.GtEq: lambda left, right: ColumnType.BOOL,
+            BinaryOpKind.LtEq: lambda left, right: ColumnType.BOOL,
+            BinaryOpKind.BitwiseOr: lambda left, right: ColumnType.INT
+            if left == right == ColumnType.INT
+            else raise_binop_exception(),
+            BinaryOpKind.BitwiseAnd: lambda left, right: ColumnType.INT
+            if left == right == ColumnType.INT
+            else raise_binop_exception(),
+            BinaryOpKind.BitwiseXor: lambda left, right: ColumnType.INT
+            if left == right == ColumnType.INT
+            else raise_binop_exception(),
+            BinaryOpKind.Multiply: resolve_numeric_types_binary_operations,
+            BinaryOpKind.Divide: resolve_numeric_types_binary_operations,
+            BinaryOpKind.Plus: resolve_numeric_types_binary_operations,
+            BinaryOpKind.Minus: resolve_numeric_types_binary_operations,
+            BinaryOpKind.Modulo: lambda left, right: ColumnType.INT
+            if left == right == ColumnType.INT
+            else raise_binop_exception(),
+            BinaryOpKind.Like: lambda left, right: ColumnType.BOOL
+            if left == right == ColumnType.STR
+            else raise_binop_exception(),
+        }
+        return BINOP_TYPE_COMBO_LOOKUP[kind](left_type, right_type)
 
 
 @dataclass(eq=False)
@@ -998,6 +1125,14 @@ class Function(Named, Operation):
         for expr in self.args:
             expr.compile(ctx)
 
+    @property
+    def type(self) -> ColumnType:
+        name = self.name.name.upper()
+        dj_func = function_registry[name]
+        return dj_func.infer_type_from_types(
+            *(arg.type for arg in self.args)
+        )
+
 
 class Value(Expression):
     """
@@ -1013,6 +1148,10 @@ class Null(Value):
 
     def __str__(self) -> str:
         return "NULL"
+
+    @property
+    def type(self) -> ColumnType:
+        return ColumnType.NULL
 
 
 @dataclass(eq=False)
@@ -1045,6 +1184,28 @@ class Number(Value):
     def __str__(self) -> str:
         return str(self.value)
 
+    @property
+    def type(self) -> ColumnType:
+        """
+        Determine the type of the numeric expression.
+        """
+        # We won't assume that anyone wants SHORT by default
+        if isinstance(self.value, int):
+            if self.value <= -2147483648 or self.value >= 2147483647:
+                return ColumnType.LONG
+            return ColumnType.INT
+
+        # Arbitrary-precision floating point
+        if isinstance(self.value, decimal.Decimal):
+            return ColumnType.DECIMAL
+
+        # Double-precision floating point
+        if not (1.18e-38 <= abs(self.value) <= 3.4e38):
+            return ColumnType.DOUBLE
+
+        # Single-precision floating point
+        return ColumnType.FLOAT
+
 
 @dataclass(eq=False)
 class String(Value):
@@ -1057,6 +1218,10 @@ class String(Value):
     def __str__(self) -> str:
         return f"'{self.value}'"
 
+    @property
+    def type(self) -> ColumnType:
+        return ColumnType.STR
+
 
 @dataclass(eq=False)
 class Boolean(Value):
@@ -1068,6 +1233,10 @@ class Boolean(Value):
 
     def __str__(self) -> str:
         return str(self.value)
+
+    @property
+    def type(self) -> ColumnType:
+        return ColumnType.BOOL
 
 
 @dataclass(eq=False)
@@ -1141,6 +1310,18 @@ class Between(Predicate):
         self.low.compile(ctx)
         self.high.compile(ctx)
 
+    @property
+    def type(self) -> ColumnType:
+        expr_type = self.expr.type
+        low_type = self.low.type
+        high_type = self.high.type
+        if expr_type == low_type == high_type:
+            return ColumnType.BOOL
+        raise DJParseException(
+            f"BETWEEN expects all elements to have the same type got "
+            f"{expr_type} BETWEEN {low_type} AND {high_type} in {self}.",
+        )
+
 
 @dataclass(eq=False)
 class In(Predicate):
@@ -1201,6 +1382,15 @@ class Like(Predicate):
     def compile(self, ctx: CompileContext):
         self.expr.compile(ctx)
 
+    @property
+    def type(self) -> ColumnType:
+        expr_type = self.expr.type
+        if expr_type == ColumnType.STR:
+            return ColumnType.BOOL
+        raise DJParseException(
+            f"Incompatible type for {self}: {expr_type}. Expected STR",
+        )
+
 
 @dataclass(eq=False)
 class IsNull(Predicate):
@@ -1213,6 +1403,10 @@ class IsNull(Predicate):
     def __str__(self) -> str:
         not_ = "NOT " if self.negated else ""
         return f"{self.expr} IS {not_}NULL"
+
+    @property
+    def type(self) -> ColumnType:
+        return ColumnType.BOOL
 
 
 @dataclass(eq=False)
@@ -1228,6 +1422,10 @@ class IsBoolean(Predicate):
         not_ = "NOT " if self.negated else ""
         return f"{self.expr} IS {not_}{self.value}"
 
+    @property
+    def type(self) -> ColumnType:
+        return ColumnType.BOOL
+
 
 @dataclass(eq=False)
 class IsDistinctFrom(Predicate):
@@ -1241,6 +1439,10 @@ class IsDistinctFrom(Predicate):
     def __str__(self) -> str:
         not_ = "NOT " if self.negated else ""
         return f"{self.expr} IS {not_}DISTINCT FROM {self.right}"
+
+    @property
+    def type(self) -> ColumnType:
+        return ColumnType.BOOL
 
 
 @dataclass(eq=False)
@@ -1287,6 +1489,21 @@ class Case(Expression):
         for result in self.results:
             result.compile(ctx)
 
+    @property
+    def type(self) -> ColumnType:
+        result_types = [
+            res.type
+            for res in self.results + (
+                [self.else_result] if self.else_result else []
+            )
+            if res.type != "NULL"
+        ]
+        if not all(result_types[0] == res for res in result_types):
+            raise DJParseException(
+                f"Not all the same type in CASE! Found: {', '.join(result_types)}",
+            )
+        return result_types[0]
+
 
 @dataclass(eq=False)
 class Subscript(Expression):
@@ -1302,6 +1519,11 @@ class Subscript(Expression):
 
     def compile(self, ctx: CompileContext):
         self.expr.compile(ctx)
+
+    @property
+    def type(self) -> ColumnType:
+        type_ = self.expr.type
+        return type_.args[1]
 
 
 @dataclass(eq=False)
@@ -1581,6 +1803,15 @@ class Select(SelectExpression):
             return f"{select}{as_}{self.alias}"
         return select
 
+    @property
+    def type(self) -> ColumnType:
+        if len(self.projection) != 1:
+            raise DJParseException(
+                "Can only infer type of a SELECT when it "
+                f"has a single expression in its projection. In {self}.",
+            )
+        return self.projection[0].type
+
 
 @dataclass(eq=False)
 class SortItem(Node):
@@ -1705,3 +1936,7 @@ class Query(TableExpression):
                         deps[node].append(col.table)
 
         return deps, danglers
+
+    @property
+    def type(self) -> ColumnType:
+        return self.select.type
