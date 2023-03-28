@@ -28,7 +28,7 @@ DECIMAL_REGEX = re.compile(r"decimal\((\d+),\s*(\d+)\)")
 FIXED_PARSER = re.compile(rf"fixed\[(\d+)\]")
 
 
-class DataType(Singleton):
+class DataType:
     """Base type for all Data Types
 
     Example:
