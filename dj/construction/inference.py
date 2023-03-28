@@ -40,30 +40,18 @@ def _(expression: ast2.Column):
 
     # column is from a table expression we can look through
     if table_or_alias := expression.table:
-        if isinstance(table_or_alias, ast2.Alias):
-            table = table_or_alias.child
-        else:
-            table = table_or_alias
-        if isinstance(table, ast2.Table):
-            if table.dj_node:
-                for col in table.dj_node.columns:  # pragma: no cover
-                    if col.name == expression.name.name:
-                        expression.add_type(col.type)
-                        return col.type
-            else:
-                raise DJParseException(
-                    f"Cannot resolve type of column {expression}. "
-                    "column's table does not have a DJ Node.",
-                )
+        table = table_or_alias.child if isinstance(table_or_alias, ast2.Alias) else table_or_alias
+        columns = table.dj_node.columns if isinstance(table, ast2.Table) else table.columns
+        for col in columns:  # pragma: no cover
+            col_name = col.alias_or_name.name if isinstance(col, ast2.Alias) else col.name
+            if col_name == expression.name.name:
+                expression.add_type(col.type)
+                return col.type
         else:
             raise DJParseException(
                 f"Cannot resolve type of column {expression}. "
-                "DJ does not currently traverse subqueries for type information. "
-                "Consider extraction first.",
+                "column's table does not have a DJ Node.",
             )
-        # else:#if subquery
-        # currently don't even bother checking subqueries.
-        # the extract will have built it for us in crucial cases
     raise DJParseException(f"Cannot resolve type of column {expression}.")
 
 

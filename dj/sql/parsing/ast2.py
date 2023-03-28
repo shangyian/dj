@@ -649,10 +649,15 @@ class Column(Aliasable, Named, Expression):
                         else:
                             return False
                     else:
+                        try:
+                            if node.alias_or_name and node.alias_or_name.name == "bizarre":
+                                print(node)
+                        except Exception as e:
+                            print(e)
                         return node.add_ref_column(self)
             return False
 
-        found_sources = list(ctx.query.filter(check_col))
+        found_sources = list(query.filter(check_col))
         if len(found_sources) < 1:
             ctx.exception.errors.append(
                 DJErrorException(
@@ -1611,8 +1616,14 @@ class Query(TableExpression):
     def compile(self, ctx: CompileContext):
         if self.is_compiled():
             return
+        for cte in self.ctes:
+            cte.compile(ctx)
         if self.select.from_:
             self.select.from_.compile(ctx)
+            for idx, relation in enumerate(self.select.from_.relations):
+                if not relation.primary.alias:
+                    relation.primary.set_alias(f"sbq{idx}")
+
         for projection in self.select.projection:
             projection.compile(ctx)
         self._columns = self.select.projection[:]
@@ -1625,7 +1636,7 @@ class Query(TableExpression):
         you may want to deepcopy it first
         """
         for cte in self.ctes:
-            table = Table(cte.name, cte.namespace)
+            table = Table(name=cte.alias_or_name)
             self.replace(table, cte)
 
     def __str__(self) -> str:

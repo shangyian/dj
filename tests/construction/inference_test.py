@@ -1,4 +1,4 @@
-"""test inferring types"""
+"""Test type inference."""
 
 # pylint: disable=W0621,C0325
 import pytest
@@ -8,8 +8,7 @@ from sqlmodel import Session
 from dj.construction.inference import get_type_of_expression
 from dj.errors import DJException
 from dj.models.node import Node
-from dj.sql.parsing import ast, ast2
-from dj.sql.parsing.ast import BinaryOpKind
+from dj.sql.parsing import ast2
 from dj.sql.parsing.ast2 import CompileContext
 from dj.sql.parsing.backends.exceptions import DJParseException
 from dj.sql.parsing.backends.antlr4 import parse
