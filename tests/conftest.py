@@ -3,6 +3,7 @@ Fixtures for testing.
 """
 # pylint: disable=redefined-outer-name, invalid-name, W0611
 
+import re
 from typing import Collection, Iterator, List
 
 import pytest
@@ -147,6 +148,54 @@ def client_with_examples(client: TestClient) -> TestClient:
     for endpoint, json in EXAMPLES:
         post_and_raise_if_error(client=client, endpoint=endpoint, json=json)  # type: ignore
     return client
+
+
+def compare_parse_trees(tree1, tree2):
+    """
+    Recursively compare two ANTLR parse trees for equality.
+    """
+    # Check if the node types are the same
+    if type(tree1) != type(tree2):
+        return False
+
+    # Check if the node texts are the same
+    if tree1.getText() != tree2.getText():
+        return False
+
+    # Check if the number of child nodes is the same
+    if tree1.getChildCount() != tree2.getChildCount():
+        return False
+
+    # Recursively compare child nodes
+    for i in range(tree1.getChildCount()):
+        child1 = tree1.getChild(i)
+        child2 = tree2.getChild(i)
+        if not compare_parse_trees(child1, child2):
+            return False
+
+    # If all checks passed, the trees are equal
+    return True
+
+
+COMMENT = re.compile(r"(--.*)|(/\*[\s\S]*?\*/)")
+TRAILING_ZEROES = re.compile(r"(\d+\.\d*?[1-9])0+|\b(\d+)\.0+\b")
+DIFF_IGNORE = re.compile(r"[\';\s]+")
+
+
+def compare_query_strings(str1, str2):
+    """
+    Recursively compare two ANTLR parse trees for equality, ignoring certain elements.
+    """
+
+    str1 = DIFF_IGNORE.sub("", TRAILING_ZEROES.sub("", COMMENT.sub("", str1))).upper()
+    str2 = DIFF_IGNORE.sub("", TRAILING_ZEROES.sub("", COMMENT.sub("", str2))).upper()
+
+    return str1 == str2
+
+
+@pytest.fixture
+def compare_query_strings_fixture():
+    return compare_query_strings
 
 
 @pytest.fixture
