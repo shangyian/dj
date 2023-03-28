@@ -7,7 +7,7 @@ from sqlmodel import Session
 
 from dj.construction.inference import get_type_of_expression
 from dj.models.node import Node
-from dj.sql.parsing import ast
+from dj.sql.parsing import ast, ast2
 from dj.sql.parsing.ast import BinaryOpKind
 from dj.sql.parsing.backends.exceptions import DJParseException
 from dj.sql.parsing.backends.sqloxide import parse
@@ -25,21 +25,21 @@ def test_infer_column_with_table(construction_session: Session):
             ),
         ),
     )[0]
-    table = ast.Table(ast.Name("orders"), _dj_node=node.current)
+    table = ast2.Table(ast.Name("orders"), _dj_node=node.current)
     assert (
-        get_type_of_expression(ast.Column(ast.Name("id"), _table=table))
+        get_type_of_expression(ast2.Column(ast.Name("id"), _table=table))
         == ColumnType.INT
     )
     assert (
-        get_type_of_expression(ast.Column(ast.Name("user_id"), _table=table))
+        get_type_of_expression(ast2.Column(ast.Name("user_id"), _table=table))
         == ColumnType.INT
     )
     assert (
-        get_type_of_expression(ast.Column(ast.Name("order_date"), _table=table))
+        get_type_of_expression(ast2.Column(ast.Name("order_date"), _table=table))
         == ColumnType.DATE
     )
     assert (
-        get_type_of_expression(ast.Column(ast.Name("status"), _table=table))
+        get_type_of_expression(ast2.Column(ast.Name("status"), _table=table))
         == ColumnType.STR
     )
 
@@ -48,8 +48,15 @@ def test_infer_values():
     """
     Test inferring types from values directly
     """
-    assert get_type_of_expression(ast.String("foo")) == ColumnType.STR
-    assert get_type_of_expression(ast.Number(value=1.1)) == ColumnType.FLOAT
+    assert get_type_of_expression(ast2.String(value="foo")) == ColumnType.STR
+    assert get_type_of_expression(ast2.Number(value=10)) == ColumnType.INT
+    assert get_type_of_expression(ast2.Number(value=-10)) == ColumnType.INT
+    assert get_type_of_expression(ast2.Number(value=922337203685477)) == ColumnType.LONG
+    assert get_type_of_expression(ast2.Number(value=-922337203685477)) == ColumnType.LONG
+    assert get_type_of_expression(ast2.Number(value=3.4e39)) == ColumnType.DOUBLE
+    assert get_type_of_expression(ast2.Number(value=-3.4e39)) == ColumnType.DOUBLE
+    assert get_type_of_expression(ast2.Number(value=3.4e38)) == ColumnType.FLOAT
+    assert get_type_of_expression(ast2.Number(value=-3.4e38)) == ColumnType.FLOAT
 
 
 def test_raise_on_invalid_infer_binary_op():

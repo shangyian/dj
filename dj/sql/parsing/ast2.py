@@ -1,6 +1,7 @@
 # pylint: disable=R0401,C0302
 # pylint: skip-file
 # mypy: ignore-errors
+import decimal
 from abc import ABC, abstractmethod
 from copy import deepcopy
 from dataclasses import dataclass, field, fields
@@ -941,14 +942,25 @@ class Number(Value):
     Number value
     """
 
-    value: Union[float, int]
+    value: Union[float, int, decimal.Decimal]
 
     def __post_init__(self):
         super().__post_init__()
-        try:
-            self.value = int(self.value)
-        except ValueError:
-            self.value = float(self.value)
+
+        if (
+            not isinstance(self.value, float) and
+            not isinstance(self.value, int) and
+            not isinstance(self.value, decimal.Decimal)
+        ):
+            cast_exceptions = []
+            numeric_types = [int, float, decimal.Decimal]
+            for cast_type in numeric_types:
+                try:
+                    cast(self.value, cast_type)
+                except (ValueError, OverflowError) as exception:
+                    cast_exceptions.append(exception)
+            if len(cast_exceptions) >= len(numeric_types):
+                raise DJException(message="Not a valid number!")
 
     def __str__(self) -> str:
         return str(self.value)
@@ -1367,6 +1379,13 @@ class Cast(Expression):
 
     def __str__(self) -> str:
         return f"CAST({self.expression} AS {self.data_type})"
+
+    @property
+    def type(self) -> ColumnType:
+        """
+        Return the type of the expression
+        """
+        return ColumnType[self.data_type]
 
 
 @dataclass(eq=False)

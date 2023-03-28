@@ -68,6 +68,7 @@ PRIMITIVE_TYPES = {
     "TIMEDELTA",
     "NULL",
     "WILDCARD",
+    "SHORT",
 }
 
 ALIASES = {
