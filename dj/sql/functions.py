@@ -7,7 +7,7 @@ nodes. The functions are used to infer types.
 """
 import re
 # pylint: disable=unused-argument, missing-function-docstring, arguments-differ, too-many-return-statements
-from typing import ClassVar
+from typing import ClassVar, List, Union
 import abc
 import dj.sql.parsing.types as ct
 from dj.errors import DJInvalidInputException, DJError, ErrorCode
@@ -739,9 +739,13 @@ class Year(Function):
         return ct.TinyIntType()
 
 
-function_registry = {
-    re.sub(r'(?<!^)(?=[A-Z])', '_', cls.__name__).upper(): cls for cls in Function.__subclasses__()
-}
+function_registry = {}
+for cls in Function.__subclasses__():
+    name = cls.__name__
+    snake_cased = re.sub(r'(?<!^)(?=[A-Z])', '_', name)
+    function_registry[name.upper()] = cls
+    function_registry[snake_cased.upper()] = cls
+
 
 class Explode(TableFunction):
     """
@@ -756,10 +760,12 @@ class Explode(TableFunction):
             return arg.field_type
         if isinstance(arg, ct.MapType):
             return [arg.key, arg.value]
-        if isinstance(arg, ct.StructType):
-            return list(arg.fields)
         raise Exception(f"Invalid type for Explode {arg}.")
 
-table_function_registry = {
-    cls.__name__.upper(): cls for cls in TableFunction.__subclasses__()
-}
+
+table_function_registry = {}
+for cls in TableFunction.__subclasses__():
+    name = cls.__name__
+    snake_cased = re.sub(r'(?<!^)(?=[A-Z])', '_', name)
+    table_function_registry[name.upper()] = cls
+    table_function_registry[snake_cased.upper()] = cls
