@@ -5,7 +5,6 @@ import pytest
 from sqlalchemy import select
 from sqlmodel import Session
 
-from dj.construction.inference import get_type_of_expression
 from dj.errors import DJException
 from dj.models.node import Node
 from dj.sql.parsing import ast2
@@ -66,17 +65,15 @@ def test_raise_on_invalid_infer_binary_op():
     Test raising when trying to infer types from an invalid binary op
     """
     with pytest.raises(DJParseException) as exc_info:
-        get_type_of_expression(
-            ast2.BinaryOp(
-                op=ast2.BinaryOpKind.Modulo,
-                left=ast2.String(value="foo"),
-                right=ast2.String(value="bar"),
-            ),
-        )
+        ast2.BinaryOp(
+            op=ast2.BinaryOpKind.Modulo,
+            left=ast2.String(value="foo"),
+            right=ast2.String(value="bar"),
+        ).type
 
     assert (
         "Incompatible types in binary operation 'foo' % 'bar'. "
-        "Got left STR, right STR."
+        "Got left string, right string."
     ) in str(exc_info.value)
 
 
@@ -105,11 +102,11 @@ def test_infer_column_with_an_aliased_table(construction_session: Session):
         ),
         child=table,
     )
-    assert get_type_of_expression(ast2.Column(ast2.Name("id"), _table=alias)) == IntegerType()
-    assert get_type_of_expression(ast2.Column(ast2.Name("user_id"), _table=alias)) == IntegerType()
-    assert get_type_of_expression(ast2.Column(ast2.Name("order_date"), _table=alias)) == DateType()
-    assert get_type_of_expression(ast2.Column(ast2.Name("status"), _table=alias)) == StringType()
-    assert get_type_of_expression(ast2.Column(ast2.Name("_etl_loaded_at"), _table=alias)) == TimestampType()
+    assert ast2.Column(ast2.Name("id"), _table=alias).type == IntegerType()
+    assert ast2.Column(ast2.Name("user_id"), _table=alias).type == IntegerType()
+    assert ast2.Column(ast2.Name("order_date"), _table=alias).type == DateType()
+    assert ast2.Column(ast2.Name("status"), _table=alias).type == StringType()
+    assert ast2.Column(ast2.Name("_etl_loaded_at"), _table=alias).type == TimestampType()
 
 
 def test_raising_when_table_has_no_dj_node():
@@ -120,7 +117,7 @@ def test_raising_when_table_has_no_dj_node():
     col = ast2.Column(ast2.Name("status"), _table=table)
 
     with pytest.raises(DJParseException) as exc_info:
-        get_type_of_expression(col)
+        col.type
 
     assert (
         "Cannot resolve type of column `orders.status`: "
@@ -139,7 +136,7 @@ def test_raising_when_expression_parent_not_a_table():
     )  # intentionally adding a non-table AST node
 
     with pytest.raises(DJParseException) as exc_info:
-        get_type_of_expression(col)
+        col.type
 
     assert (
         "DJ does not currently traverse subqueries for type information. Consider extraction first."
@@ -153,7 +150,7 @@ def test_raising_when_select_has_multiple_expressions_in_projection():
     select = parse("select 1, 2").select
 
     with pytest.raises(DJParseException) as exc_info:
-        get_type_of_expression(select)
+        select.type
 
     assert ("single expression in its projection") in str(exc_info.value)
 
@@ -165,7 +162,7 @@ def test_raising_when_between_different_types():
     select = parse("select 1 between 'hello' and TRUE").select
 
     with pytest.raises(DJParseException) as exc_info:
-        get_type_of_expression(select)
+        select.type
 
     assert ("BETWEEN expects all elements to have the same type") in str(exc_info.value)
 
@@ -177,7 +174,7 @@ def test_raising_when_unop_bad_type():
     select = parse("select not 'hello'").select
 
     with pytest.raises(DJParseException) as exc_info:
-        get_type_of_expression(select)
+        select.type
 
     assert ("Incompatible type in unary operation") in str(exc_info.value)
 
@@ -189,7 +186,7 @@ def test_raising_when_expression_has_no_parent():
     col = ast2.Column(ast2.Name("status"), _table=None)
 
     with pytest.raises(DJParseException) as exc_info:
-        get_type_of_expression(col)
+        col.type
 
     assert "Cannot resolve type of column status." in str(exc_info.value)
 

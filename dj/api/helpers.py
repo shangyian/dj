@@ -11,7 +11,6 @@ from sqlmodel import Session, select
 
 from dj.construction.build import build_node
 from dj.construction.dj_query import build_dj_metric_query
-from dj.construction.inference import get_type_of_expression
 from dj.errors import DJError, DJException, DJInvalidInputException, ErrorCode
 from dj.models import AttributeType, Catalog, Column, Engine
 from dj.models.attribute import RESERVED_ATTRIBUTE_NAMESPACE
