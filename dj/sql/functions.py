@@ -28,6 +28,19 @@ class Function(abc.ABC):  # pylint: disable=too-few-public-methods
         """
         raise NotImplementedError("Subclass MUST implement infer_type")
 
+class TableFunction(abc.ABC):  # pylint: disable=too-few-public-methods
+    """
+    A DJ table-valued function.
+    """
+
+    @staticmethod
+    @abc.abstractmethod
+    def infer_type(*args: ct.ColumnType) -> List[ct.ColumnType]:
+        """
+        Infers the return type of the function based on the input type.
+        """
+        raise NotImplementedError("Subclass MUST implement infer_type")
+
 
 class Avg(Function):
     """
