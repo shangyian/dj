@@ -723,3 +723,24 @@ class Year(Function):
 function_registry = {
     cls.__name__.upper(): cls for cls in Function.__subclasses__()
 }
+
+class Explode(TableFunction):
+    """
+    Explode function is used to explode the specified array, 
+    nested array, or map column into multiple rows. 
+    The explode function will generate a new row for each 
+    element in the specified column. 
+    """
+    @staticmethod
+    def infer_type(arg) -> Union[ct.ColumnType, List[ct.ColumnType]]:
+        if isinstance(arg, ct.ListType):
+            return arg.field_type
+        if isinstance(arg, ct.MapType):
+            return [arg.key, arg.value]
+        if isinstance(arg, ct.StructType):
+            return list(arg.fields)
+        raise Exception(f"Invalid type for Explode {arg}.")
+
+table_function_registry = {
+    cls.__name__.upper(): cls for cls in TableFunction.__subclasses__()
+}

@@ -306,7 +306,7 @@ class MapType(ColumnType):
         )
     """
 
-    _instances: Dict[Tuple[int, ColumnType, int, ColumnType, bool], "MapType"] = {}
+    _instances: Dict[Tuple[ColumnType, ColumnType], "MapType"] = {}
 
     def __new__(
         cls,
@@ -333,11 +333,11 @@ class MapType(ColumnType):
             )
 
     @property
-    def key(self) -> NestedField:
+    def key(self) -> ColumnType:
         return self._key_field
 
     @property
-    def value(self) -> NestedField:
+    def value(self) -> ColumnType:
         return self._value_field
 
 
