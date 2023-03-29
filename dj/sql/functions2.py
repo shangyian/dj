@@ -10,6 +10,8 @@ nodes. The functions are used to infer types.
 from typing import ClassVar
 import abc
 import dj.sql.parsing.types as ct
+from dj.errors import DJInvalidInputException, DJError, ErrorCode
+
 
 class Function(abc.ABC):  # pylint: disable=too-few-public-methods
     """
@@ -91,6 +93,32 @@ class Count(Function):
         return ct.LongType()
 
 
+class Coalesce(Function):
+    """
+    Computes the average of the input column or expression.
+    """
+    is_aggregation = False
+
+    @staticmethod
+    def infer_type(*args) -> ct.ColumnType:
+        if not args:  # pragma: no cover
+            raise DJInvalidInputException(
+                message="Wrong number of arguments to function",
+                errors=[
+                    DJError(
+                        code=ErrorCode.INVALID_ARGUMENTS_TO_FUNCTION,
+                        message="You need to pass at least one argument to `COALESCE`.",
+                    ),
+                ],
+            )
+        for type_ in args:
+            if type_:
+                return type_
+        raise DJInvalidInputException(
+            message="There must be at least one non-NULL argument passed to COALESCE",
+        )
+
+
 class CurrentDate(Function):
     """
     Returns the current date.
@@ -125,6 +153,17 @@ class CurrentTimestamp(Function):
     @staticmethod
     def infer_type() -> ct.TimestampType:
         return ct.TimestampType()
+
+
+class Now(Function):
+    """
+    Returns the current timestamp.
+    """
+
+    @staticmethod
+    def infer_type() -> ct.TimestampType:
+        return ct.TimestampType()
+
 
 class DateAdd(Function):
     """
@@ -478,6 +517,7 @@ class StrToDate(Function):
     def infer_type(arg1, arg2) -> ct.DateType:
         return ct.DateType()
 
+
 class StrToTime(Function):
     """
     Converts a string in a specified format to a timestamp.
@@ -486,6 +526,7 @@ class StrToTime(Function):
     def infer_type(arg1, arg2) -> ct.TimestampType:
         return ct.TimestampType()
 
+
 class Sqrt(Function):
     """
     Computes the square root of a numeric column or expression.
@@ -493,6 +534,7 @@ class Sqrt(Function):
     @staticmethod
     def infer_type(arg) -> ct.DoubleType:
         return ct.DoubleType()
+
 
 class Stddev(Function):
     """
@@ -503,6 +545,7 @@ class Stddev(Function):
     @staticmethod
     def infer_type(arg) -> ct.DoubleType:
         return ct.DoubleType()
+
 
 class StddevPop(Function):
     """
@@ -672,6 +715,7 @@ class Year(Function):
     @staticmethod
     def infer_type(arg) -> ct.TinyIntType:
         return ct.TinyIntType()
+
 
 function_registry = {
     cls.__name__.upper(): cls for cls in Function.__subclasses__()
