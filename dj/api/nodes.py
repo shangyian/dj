@@ -31,7 +31,7 @@ from dj.errors import DJDoesNotExistException, DJException
 from dj.models import ColumnAttribute
 from dj.models.attribute import UniquenessScope
 from dj.models.base import generate_display_name
-from dj.models.column import Column, ColumnAttributeInput, ColumnType
+from dj.models.column import Column, ColumnAttributeInput
 from dj.models.node import (
     DEFAULT_DRAFT_VERSION,
     DEFAULT_PUBLISHED_VERSION,
@@ -54,9 +54,7 @@ from dj.models.node import (
     UpsertMaterializationConfig,
 )
 from dj.service_clients import QueryServiceClient
-from dj.sql.parsing.backends.antlr4 import parse, FIXED_PARSER, PRIMITIVE_TYPES, parse_rule
-from dj.sql.parsing.backends.exceptions import DJParseException
-from dj.sql.parsing.types import DECIMAL_REGEX, DecimalType, FixedType
+from dj.sql.parsing.backends.antlr4 import parse
 from dj.utils import Version, VersionUpgrade, get_query_service_client, get_session
 
 _logger = logging.getLogger(__name__)

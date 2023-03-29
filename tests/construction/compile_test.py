@@ -18,7 +18,6 @@ from dj.sql.parsing import ast2 as ast
 from dj.sql.parsing.ast2 import CompileContext
 from dj.sql.parsing.backends.antlr4 import parse
 from dj.sql.parsing.types import TimestampType, IntegerType, FloatType
-from dj.typing import ColumnType
 
 
 def test_get_table_node_is_none(construction_session: Session):
