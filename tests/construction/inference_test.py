@@ -12,6 +12,7 @@ from dj.sql.parsing import ast2
 from dj.sql.parsing.ast2 import CompileContext
 from dj.sql.parsing.backends.exceptions import DJParseException
 from dj.sql.parsing.backends.antlr4 import parse
+from dj.sql.parsing.types import BooleanType, IntegerType, DoubleType, FloatType, TimestampType, StringType
 from dj.typing import ColumnType
 
 
@@ -29,11 +30,11 @@ def test_infer_column_with_table(construction_session: Session):
     table = ast2.Table(ast2.Name("orders"), _dj_node=node.current)
     assert (
         get_type_of_expression(ast2.Column(ast2.Name("id"), _table=table))
-        == ColumnType.INT
+        == IntegerType()
     )
     assert (
         get_type_of_expression(ast2.Column(ast2.Name("user_id"), _table=table))
-        == ColumnType.INT
+        == IntegerType()
     )
     assert (
         get_type_of_expression(ast2.Column(ast2.Name("order_date"), _table=table))
@@ -41,7 +42,7 @@ def test_infer_column_with_table(construction_session: Session):
     )
     assert (
         get_type_of_expression(ast2.Column(ast2.Name("status"), _table=table))
-        == ColumnType.STR
+        == StringType()
     )
 
 
@@ -49,15 +50,15 @@ def test_infer_values():
     """
     Test inferring types from values directly
     """
-    assert get_type_of_expression(ast2.String(value="foo")) == ColumnType.STR
-    assert get_type_of_expression(ast2.Number(value=10)) == ColumnType.INT
-    assert get_type_of_expression(ast2.Number(value=-10)) == ColumnType.INT
+    assert get_type_of_expression(ast2.String(value="foo")) == StringType()
+    assert get_type_of_expression(ast2.Number(value=10)) == IntegerType()
+    assert get_type_of_expression(ast2.Number(value=-10)) == IntegerType()
     assert get_type_of_expression(ast2.Number(value=922337203685477)) == ColumnType.LONG
     assert get_type_of_expression(ast2.Number(value=-922337203685477)) == ColumnType.LONG
     assert get_type_of_expression(ast2.Number(value=3.4e39)) == ColumnType.DOUBLE
     assert get_type_of_expression(ast2.Number(value=-3.4e39)) == ColumnType.DOUBLE
-    assert get_type_of_expression(ast2.Number(value=3.4e38)) == ColumnType.FLOAT
-    assert get_type_of_expression(ast2.Number(value=-3.4e38)) == ColumnType.FLOAT
+    assert get_type_of_expression(ast2.Number(value=3.4e38)) == FloatType()
+    assert get_type_of_expression(ast2.Number(value=-3.4e38)) == FloatType()
 
 
 def test_raise_on_invalid_infer_binary_op():
@@ -104,11 +105,11 @@ def test_infer_column_with_an_aliased_table(construction_session: Session):
         ),
         child=table,
     )
-    assert get_type_of_expression(ast2.Column(ast2.Name("id"), _table=alias)) == ColumnType.INT
-    assert get_type_of_expression(ast2.Column(ast2.Name("user_id"), _table=alias)) == ColumnType.INT
+    assert get_type_of_expression(ast2.Column(ast2.Name("id"), _table=alias)) == IntegerType()
+    assert get_type_of_expression(ast2.Column(ast2.Name("user_id"), _table=alias)) == IntegerType()
     assert get_type_of_expression(ast2.Column(ast2.Name("order_date"), _table=alias)) == ColumnType.DATE
-    assert get_type_of_expression(ast2.Column(ast2.Name("status"), _table=alias)) == ColumnType.STR
-    assert get_type_of_expression(ast2.Column(ast2.Name("_etl_loaded_at"), _table=alias)) == ColumnType.TIMESTAMP
+    assert get_type_of_expression(ast2.Column(ast2.Name("status"), _table=alias)) == StringType()
+    assert get_type_of_expression(ast2.Column(ast2.Name("_etl_loaded_at"), _table=alias)) == TimestampType()
 
 
 def test_raising_when_table_has_no_dj_node():
@@ -212,11 +213,11 @@ def test_infer_map_subscripts(construction_session: Session):
     ctx = CompileContext(session=construction_session, query=query, exception=exc)
     query.compile(ctx)
     types = [
-        ColumnType.STR,
-        ColumnType.STR,
+        StringType(),
+        StringType(),
         ColumnType.MAP["str", ColumnType.MAP["str", "float"]],
         ColumnType.MAP["str", "float"],
-        ColumnType.FLOAT,
+        FloatType(),
     ]
     assert types == [exp.type for exp in query.select.projection]
 
@@ -289,42 +290,42 @@ def test_infer_types_complicated(construction_session: Session):
     ctx = CompileContext(session=construction_session, query=query, exception=exc)
     query.compile(ctx)
     types = [
-        ColumnType.INT,
-        ColumnType.TIMESTAMP,
-        # ColumnType.INT,
-        # ColumnType.INT,
-        # ColumnType.TIMESTAMP,
-        ColumnType.TIMESTAMP,
-        ColumnType.TIMESTAMP,
-        ColumnType.INT,
-        ColumnType.NULL,
-        ColumnType.NULL,
-        ColumnType.INT,
-        ColumnType.INT,
-        ColumnType.INT,
-        ColumnType.DECIMAL,
-        ColumnType.INT,
-        ColumnType.INT,
-        ColumnType.BOOL,
-        ColumnType.INT,
-        ColumnType.BOOL,
-        ColumnType.BOOL,
-        ColumnType.BOOL,
-        ColumnType.BOOL,
-        ColumnType.BOOL,
-        ColumnType.BOOL,
-        ColumnType.BOOL,
-        ColumnType.BOOL,
-        ColumnType.BOOL,
-        ColumnType.BOOL,
-        ColumnType.BOOL,
-        ColumnType.STR,
-        ColumnType.STR,
-        ColumnType.BOOL,
-        ColumnType.STR,
-        ColumnType.BOOL,
-        ColumnType.FLOAT,
-        ColumnType.INT,
+        IntegerType(),
+        TimestampType(),
+        # IntegerType(),
+        # IntegerType(),
+        # TimestampType(),
+        TimestampType(),
+        TimestampType(),
+        IntegerType(),
+        None,
+        None,
+        IntegerType(),
+        IntegerType(),
+        IntegerType(),
+        FloatType(),
+        IntegerType(),
+        IntegerType(),
+        BooleanType(),
+        IntegerType(),
+        BooleanType(),
+        BooleanType(),
+        BooleanType(),
+        BooleanType(),
+        BooleanType(),
+        BooleanType(),
+        BooleanType(),
+        BooleanType(),
+        BooleanType(),
+        BooleanType(),
+        BooleanType(),
+        StringType(),
+        StringType(),
+        BooleanType(),
+        StringType(),
+        BooleanType(),
+        FloatType(),
+        IntegerType(),
     ]
     assert types == [exp.type for exp in query.select.projection]
 

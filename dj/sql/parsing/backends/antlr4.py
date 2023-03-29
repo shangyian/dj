@@ -883,6 +883,7 @@ def _(ctx: sbp.CastContext) -> ast.Cast:
     expression = visit(ctx.expression())
     return ast.Cast(data_type=data_type, expression=expression)
 
+
 @visit.register
 def _(ctx: sbp.ExistsContext) -> ast.UnaryOp:
     expr = visit(ctx.query().queryTerm())

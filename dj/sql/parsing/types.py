@@ -11,9 +11,13 @@ Example:
             )
 """
 
-from typing import Dict, Optional, Tuple, ClassVar
+from typing import Dict, Optional, Tuple, ClassVar, TYPE_CHECKING, Any, Generator
 
-import dj.sql.parsing.ast2 as ast
+from pydantic import BaseModel
+from pydantic.class_validators import AnyCallable
+
+if TYPE_CHECKING:
+    import dj.sql.parsing.ast2 as ast
 import re
 
 DECIMAL_REGEX = re.compile(r"decimal\((\d+),\s*(\d+)\)")
@@ -33,9 +37,9 @@ class ColumnType:
 
     _initialized = False
 
-    def __init__(self, type_string: str, repr_string: str):
-        self._type_string = type_string
-        self._repr_string = repr_string
+    def __init__(self, type_string: str, repr_string: str = None):
+        self._type_string = type_string.lower()
+        self._repr_string = repr_string.lower() if repr_string else self._type_string
         self._initialized = True
 
     def __repr__(self):
@@ -44,9 +48,54 @@ class ColumnType:
     def __str__(self):
         return self._type_string
 
+    @classmethod
+    def __get_validators__(cls) -> Generator[AnyCallable, None, None]:
+        # one or more validators may be yielded which will be called in the
+        # order to validate the input, each validator will receive as an input
+        # the value returned from the previous validator
+        yield cls.validate
+
+    @classmethod
+    def validate(cls, v: Any) -> "ColumnType":
+        # When Pydantic is unable to determine the subtype
+        # In this case we'll help pydantic a bit by parsing the
+        # primitive type ourselves, or pointing it at the correct
+        # complex type by looking at the type field
+
+        if isinstance(v, str):
+            if v.startswith("decimal"):
+                return DecimalType.parse(v)
+            # elif v.startswith("fixed"):
+            #     return FixedType.parse(v)
+            else:
+                return PRIMITIVE_TYPES[v]
+        elif isinstance(v, dict):
+            if v.get("type") == "struct":
+                return StructType(**v)
+            elif v.get("type") == "list":
+                return ListType(**v)
+            elif v.get("type") == "map":
+                return MapType(**v)
+            else:
+                return NestedField(**v)
+        else:
+            return v
+
     @property
     def is_primitive(self) -> bool:
         return isinstance(self, PrimitiveType)
+
+    def __eq__(self, other: "ColumnType"):
+        """
+        Equality is dependent on the string representation of the column type.
+        """
+        return str(other) == str(self)
+
+    def __hash__(self):
+        """
+        Equality is dependent on the string representation of the column type.
+        """
+        return hash(str(self))
 
 
 class PrimitiveType(ColumnType):
@@ -134,7 +183,7 @@ class NestedField(ColumnType):
 
     def __new__(
         cls,
-        name: ast.Name,
+        name: "ast.Name",
         field_type: ColumnType,
         is_optional: bool = True,
         doc: Optional[str] = None,
@@ -244,6 +293,7 @@ class ListType(ColumnType):
                 f"array<{element_type}>",
                 f"ListType(element_type={repr(element_type)})",
             )
+
 
 class MapType(ColumnType):
     """A map type
@@ -504,3 +554,20 @@ class BinaryType(PrimitiveType, Singleton):
     def __init__(self):
         if not self._initialized:
             super().__init__("binary", "BinaryType()")
+
+
+# Define the primitive data types and their corresponding Python classes
+PRIMITIVE_TYPES: Dict[str, PrimitiveType] = {
+    "boolean": BooleanType(),
+    "int": IntegerType(),
+    "long": LongType(),
+    "float": FloatType(),
+    "double": DoubleType(),
+    "date": DateType(),
+    "time": TimeType(),
+    "timestamp": TimestampType(),
+    "timestamptz": TimestamptzType(),
+    "string": StringType(),
+    "uuid": UUIDType(),
+    "binary": BinaryType(),
+}

@@ -868,7 +868,7 @@ class Table(TableExpression, Named):
             )
             self.set_dj_node(dj_node)
             self._columns = [
-                Column(Name(col.name), _type=convert_type(col.type), _table=self)
+                Column(Name(col.name), _type=col.type, _table=self)
                 for col in dj_node.columns
             ]
         except DJErrorException as exc:
@@ -993,16 +993,16 @@ class BinaryOp(Operation):
         numeric_types = {
             type_: idx for idx, type_ in
             enumerate([
-                DecimalType, DoubleType, FloatType, LongType, IntegerType,
+                str(DoubleType()), str(FloatType()), str(LongType()), str(IntegerType()),
             ])
         }
 
         def resolve_numeric_types_binary_operations(left: ColumnType, right: ColumnType):
-            if type(left) not in numeric_types or type(right) not in numeric_types:
+            if str(left) not in numeric_types or str(right) not in numeric_types:
                 raise_binop_exception()
-            if left == right:
+            if str(left) == str(right):
                 return left
-            if numeric_types[type(left)] > numeric_types[type(right)]:
+            if numeric_types[str(left)] > numeric_types[str(right)]:
                 return right
             return left
 
@@ -1020,23 +1020,23 @@ class BinaryOp(Operation):
             BinaryOpKind.GtEq: lambda left, right: BooleanType(),
             BinaryOpKind.LtEq: lambda left, right: BooleanType(),
             BinaryOpKind.BitwiseOr: lambda left, right: IntegerType()
-            if isinstance(left, IntegerType) and isinstance(right, IntegerType)
+            if str(left) == str(IntegerType()) and str(right) == str(IntegerType())
             else raise_binop_exception(),
             BinaryOpKind.BitwiseAnd: lambda left, right: IntegerType()
-            if isinstance(left, IntegerType) and isinstance(right, IntegerType)
+            if str(left) == str(IntegerType()) and str(right) == str(IntegerType())
             else raise_binop_exception(),
             BinaryOpKind.BitwiseXor: lambda left, right: IntegerType()
-            if isinstance(left, IntegerType) and isinstance(right, IntegerType)
+            if str(left) == str(IntegerType()) and str(right) == str(IntegerType())
             else raise_binop_exception(),
             BinaryOpKind.Multiply: resolve_numeric_types_binary_operations,
             BinaryOpKind.Divide: resolve_numeric_types_binary_operations,
             BinaryOpKind.Plus: resolve_numeric_types_binary_operations,
             BinaryOpKind.Minus: resolve_numeric_types_binary_operations,
             BinaryOpKind.Modulo: lambda left, right: IntegerType()
-            if isinstance(left, IntegerType) and isinstance(right, IntegerType)
+            if str(left) == str(IntegerType()) and str(right) == str(IntegerType())
             else raise_binop_exception(),
             BinaryOpKind.Like: lambda left, right: BooleanType()
-            if isinstance(left, StringType) and isinstance(right, StringType)
+            if str(left) == str(IntegerType()) and str(right) == str(IntegerType())
             else raise_binop_exception(),
         }
         return BINOP_TYPE_COMBO_LOOKUP[kind](left_type, right_type)
@@ -1388,7 +1388,7 @@ class Like(Predicate):
     @property
     def type(self) -> ColumnType:
         expr_type = self.expr.type
-        if isinstance(expr_type, StringType):
+        if expr_type == StringType():
             return BooleanType()
         raise DJParseException(
             f"Incompatible type for {self}: {expr_type}. Expected STR",

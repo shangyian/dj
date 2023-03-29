@@ -9,7 +9,7 @@ from dj.construction.utils import amenable_name
 from dj.errors import DJException
 from dj.models.column import Column
 from dj.models.node import BuildCriteria, NodeRevision, NodeType
-from dj.sql.parsing import ast, parse
+from dj.sql.parsing.backends.antlr4 import ast, parse
 
 
 def _get_tables_from_select(select: ast.Select) -> Dict[NodeRevision, List[ast.Table]]:

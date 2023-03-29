@@ -29,7 +29,7 @@ class ColumnTypeDecorator(TypeDecorator):
     impl = Text
 
     def process_bind_param(self, value: ColumnType, dialect):
-        return value.value
+        return value.__str__()
 
     def process_result_value(self, value, dialect):
         return ColumnType(value, value)
@@ -45,7 +45,7 @@ class Column(BaseSQLModel, table=True):  # type: ignore
 
     id: Optional[int] = Field(default=None, primary_key=True)
     name: str
-    type: ColumnType = Field(sa_column=SqlaColumn(ColumnTypeDecorator, String, nullable=False))
+    type: ColumnType = Field(sa_column=SqlaColumn(ColumnTypeDecorator, nullable=False))
 
     dimension_id: Optional[int] = Field(default=None, foreign_key="node.id")
     dimension: "Node" = Relationship()
@@ -66,6 +66,9 @@ class Column(BaseSQLModel, table=True):  # type: ignore
 
     def __hash__(self) -> int:
         return hash(self.id)
+
+    class Config:
+        arbitrary_types_allowed = True
 
 
 class ColumnAttributeInput(BaseSQLModel):

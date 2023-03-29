@@ -4,7 +4,8 @@ Post requests for all example entities
 
 # pylint: disable=too-many-lines
 from dj.models import Column
-from dj.typing import ColumnType, QueryState
+from dj.sql.parsing.types import IntegerType, TimestampType, StringType
+from dj.typing import QueryState
 
 EXAMPLES = (  # type: ignore
     (
@@ -958,10 +959,10 @@ EXAMPLES = (  # type: ignore
 
 COLUMN_MAPPINGS = {
     "public.basic.comments": [
-        Column(name="id", type=ColumnType("INT")),
-        Column(name="user_id", type=ColumnType("INT")),
-        Column(name="timestamp", type=ColumnType("TIMESTAMP")),
-        Column(name="text", type=ColumnType("STR")),
+        Column(name="id", type=IntegerType()),
+        Column(name="user_id", type=IntegerType()),
+        Column(name="timestamp", type=TimestampType()),
+        Column(name="text", type=StringType()),
     ],
 }
 

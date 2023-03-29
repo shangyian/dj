@@ -19,7 +19,7 @@ should then look like this:
 
     @staticmethod
     def infer_type(argument: Union[Wildcard, int, Column]) -> ColumnType:
-        return ColumnType.INT
+        return IntegerType()
 
 For tranpilation:
 
@@ -52,7 +52,7 @@ from dj.errors import (
     ErrorCode,
 )
 from dj.models.column import Column
-from dj.typing import ColumnType
+from dj.sql.parsing.types import ColumnType, IntegerType, TimestampType, DoubleType, FloatType
 from dj.utils import get_issue_url
 
 if TYPE_CHECKING:
@@ -118,11 +118,11 @@ class Count(Function):
 
     @staticmethod
     def infer_type(argument: Union["Wildcard", Column, int]) -> ColumnType:  # type: ignore
-        return ColumnType.INT
+        return IntegerType()
 
     @staticmethod
     def infer_type_from_types(arg) -> ColumnType:  # type: ignore
-        return ColumnType.INT
+        return IntegerType()
 
     @staticmethod
     def get_sqla_function(  # type: ignore
@@ -184,11 +184,11 @@ class DateTrunc(Function):  # pragma: no cover
 
     @staticmethod
     def infer_type(resolution: str, column: Column) -> ColumnType:  # type: ignore
-        return ColumnType.TIMESTAMP
+        return TimestampType()
 
     @staticmethod
     def infer_type_from_types(*args) -> ColumnType:  # type: ignore
-        return ColumnType.TIMESTAMP
+        return TimestampType()
 
     # pylint: disable=too-many-branches
     @staticmethod
@@ -341,11 +341,11 @@ class Now(Function):
 
     @staticmethod
     def infer_type() -> ColumnType:  # type: ignore
-        return ColumnType.TIMESTAMP
+        return TimestampType()
 
     @staticmethod
     def infer_type_from_types() -> ColumnType:  # type: ignore
-        return ColumnType.TIMESTAMP
+        return TimestampType()
 
     @staticmethod
     def get_sqla_function(  # type: ignore
@@ -370,7 +370,7 @@ class Coalesce(Function):
         types: List[ColumnType] = [
             arg.type
             if isinstance(arg, Column)
-            else ColumnType(type(arg).__name__.upper())
+            else ColumnType(type(arg).__name__.lower())
             for arg in args
         ]
 
@@ -419,11 +419,10 @@ class Coalesce(Function):
                     ),
                 ],
             )
-
         for type_ in types:
-            if type_ != ColumnType.NULL:
+            if type_:
                 return type_
-        return ColumnType.NULL
+        return None
 
     @staticmethod
     def get_sqla_function(  # type: ignore
@@ -466,15 +465,15 @@ class Avg(Function):
 
     @staticmethod
     def infer_type(argument: Column) -> ColumnType:  # type: ignore
-        return ColumnType.FLOAT
+        return FloatType()
 
     @staticmethod
     def infer_type_from_types(type_: ColumnType) -> ColumnType:  # type: ignore
-        if type_ == ColumnType.FLOAT:
-            return ColumnType.FLOAT
-        if type_ == ColumnType.DOUBLE:
-            return ColumnType.DOUBLE
-        return ColumnType.DECIMAL
+        if type_ == FloatType():
+            return FloatType()
+        if type_ == DoubleType():
+            return DoubleType()
+        return FloatType()
 
     @staticmethod
     def get_sqla_function(  # type: ignore

@@ -54,7 +54,7 @@ from dj.models.node import (
     UpsertMaterializationConfig,
 )
 from dj.service_clients import QueryServiceClient
-from dj.sql.parsing import parse
+from dj.sql.parsing.backends.antlr4 import parse
 from dj.utils import Version, VersionUpgrade, get_query_service_client, get_session
 
 _logger = logging.getLogger(__name__)
@@ -469,7 +469,7 @@ def create_source_node(
         [
             Column(
                 name=column_name,
-                type=ColumnType[column_data["type"]],
+                type=ColumnType(column_data["type"], column_data["type"]),
             )
             for column_name, column_data in data.columns.items()
         ]
