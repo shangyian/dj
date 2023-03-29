@@ -10,7 +10,6 @@ Example:
 
 from typing import Dict, Optional, Tuple, ClassVar
 
-
 class Singleton:
     _instance = None
 
@@ -63,7 +62,7 @@ class FixedType(PrimitiveType):
 
     def __init__(self, length: int):
         if not self._initialized:
-            super().__init__(f"fixed[{length}]", f"FixedType(length={length})")
+            super().__init__(f"fixed({length})", f"FixedType(length={length})")
             self._length = length
 
     @property
@@ -116,19 +115,17 @@ class NestedField(ColumnType):
 
     def __new__(
         cls,
-        field_id: int,
         name: str,
         field_type: ColumnType,
         is_optional: bool = True,
         doc: Optional[str] = None,
     ):
-        key = (is_optional, field_id, name, field_type, doc)
+        key = (is_optional, name, field_type, doc)
         cls._instances[key] = cls._instances.get(key) or object.__new__(cls)
         return cls._instances[key]
 
     def __init__(
         self,
-        field_id: int,
         name: str,
         field_type: ColumnType,
         is_optional: bool = True,
@@ -138,15 +135,15 @@ class NestedField(ColumnType):
             docString = "" if doc is None else f", doc={repr(doc)}"
             super().__init__(
                 (
-                    f"{field_id}: {name}: {'optional' if is_optional else 'required'} {field_type}" ""
+                    f"{name}: {field_type}{' NOT NULL' if not is_optional else ''}" \
+                    + (""
                     if doc is None
-                    else f" ({doc})"
+                    else f" {doc}")
                 ),
-                f"NestedField(field_id={field_id}, name={repr(name)}, field_type={repr(field_type)}, is_optional={is_optional}"
+                f"NestedField(name={repr(name)}, field_type={repr(field_type)}, is_optional={is_optional}"
                 f"{docString})",
             )
             self._is_optional = is_optional
-            self._id = field_id
             self._name = name
             self._type = field_type
             self._doc = doc
@@ -158,10 +155,6 @@ class NestedField(ColumnType):
     @property
     def is_required(self) -> bool:
         return not self._is_optional
-
-    @property
-    def field_id(self) -> int:
-        return self._id
 
     @property
     def name(self) -> str:
@@ -209,7 +202,7 @@ class ListType(ColumnType):
     """A list type
 
     Example:
-        >>> ListType(element_id=3, element_type=StringType(), element_is_optional=True)
+        >>> ListType(element_type=StringType(), element_is_optional=True)
         ListType(element=NestedField(is_optional=True, field_id=3, name='element', field_type=StringType(), doc=None))
     """
 
@@ -217,37 +210,21 @@ class ListType(ColumnType):
 
     def __new__(
         cls,
-        element_id: int,
         element_type: ColumnType,
-        element_is_optional: bool = True,
     ):
-        key = (element_is_optional, element_id, element_type)
+        key = (element_type,)
         cls._instances[key] = cls._instances.get(key) or object.__new__(cls)
         return cls._instances[key]
 
     def __init__(
         self,
-        element_id: int,
         element_type: ColumnType,
-        element_is_optional: bool = True,
     ):
         if not self._initialized:
             super().__init__(
-                f"list<{element_type}>",
-                f"ListType(element_id={element_id}, element_type={repr(element_type)}, "
-                f"element_is_optional={element_is_optional})",
+                f"array<{element_type}>",
+                f"ListType(element_type={repr(element_type)})",
             )
-            self._element_field = NestedField(
-                name="element",
-                is_optional=element_is_optional,
-                field_id=element_id,
-                field_type=element_type,
-            )
-
-    @property
-    def element(self) -> NestedField:
-        return self._element_field
-
 
 class MapType(ColumnType):
     """A map type
@@ -264,36 +241,22 @@ class MapType(ColumnType):
 
     def __new__(
         cls,
-        key_id: int,
         key_type: ColumnType,
-        value_id: int,
         value_type: ColumnType,
-        value_is_optional: bool = True,
     ):
-        impl_key = (key_id, key_type, value_id, value_type, value_is_optional)
+        impl_key = (key_type, value_type)
         cls._instances[impl_key] = cls._instances.get(impl_key) or object.__new__(cls)
         return cls._instances[impl_key]
 
     def __init__(
         self,
-        key_id: int,
         key_type: ColumnType,
-        value_id: int,
         value_type: ColumnType,
-        value_is_optional: bool = True,
     ):
         if not self._initialized:
             super().__init__(
                 f"map<{key_type}, {value_type}>",
-                f"MapType(key_id={key_id}, key_type={repr(key_type)}, value_id={value_id}, value_type={repr(value_type)}, "
-                f"value_is_optional={value_is_optional})",
-            )
-            self._key_field = NestedField(name="key", field_id=key_id, field_type=key_type, is_optional=False)
-            self._value_field = NestedField(
-                name="value",
-                field_id=value_id,
-                field_type=value_type,
-                is_optional=value_is_optional,
+                f"MapType(key_type={repr(key_type)}, value_type={repr(value_type)})",
             )
 
     @property

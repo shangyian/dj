@@ -2,16 +2,17 @@
 # mypy: ignore-errors
 import inspect
 import logging
-from typing import List, Tuple, cast
+from typing import List, Tuple, cast, Dict
 
 import antlr4
 from antlr4 import InputStream, RecognitionException
 from antlr4.error.ErrorListener import ErrorListener
 from antlr4.error.Errors import ParseCancellationException
 from antlr4.error.ErrorStrategy import BailErrorStrategy
-
+import re
 from dj.sql.parsing import ast2 as ast
 from dj.sql.parsing.ast2 import UnaryOpKind
+import dj.sql.parsing.types as ct
 from dj.sql.parsing.backends.exceptions import DJParseException
 from dj.sql.parsing.backends.grammar.generated.SqlBaseLexer import SqlBaseLexer
 from dj.sql.parsing.backends.grammar.generated.SqlBaseParser import SqlBaseParser
@@ -136,7 +137,7 @@ def build_string_parser(string, strict_mode=False, early_bail=True):
     return parser
 
 
-def parse_sql(string, rule, converter=None, debug=False):
+def parse_sql(string, rule, converter = None , debug=False):
     tree = string_to_ast(string, rule, debug=debug)
     return converter(tree) if converter else tree
 
@@ -190,10 +191,10 @@ class Visitor:
             raise ValueError(
                 "No type annotation found for the first parameter of the visitor.",
             )
-        if type_ in self.registry:
-            raise ValueError(
-                f"A visitor is already registered for type {type_.__name__}.",
-            )
+        # if type_ in self.registry:
+        #     raise ValueError(
+        #         f"A visitor is already registered for type {type_.__name__}.",
+        #     )
         self.registry[type_] = func
         return func
 
@@ -882,20 +883,6 @@ def _(ctx: sbp.CastContext) -> ast.Cast:
     expression = visit(ctx.expression())
     return ast.Cast(data_type=data_type.name, expression=expression)
 
-
-@visit.register
-def _(ctx: sbp.PrimitiveDataTypeContext) -> ast.Value:
-    left_paren = ctx.LEFT_PAREN() or ""
-    right_paren = ctx.RIGHT_PAREN() or ""
-    ident = visit(ctx.identifier())
-    integer_values = (
-        ",".join(str(value) for value in ctx.INTEGER_VALUE())
-        if ctx.INTEGER_VALUE()
-        else ""
-    )
-    return ast.Name(f"{ident} {left_paren}{integer_values}{right_paren}")
-
-
 @visit.register
 def _(ctx: sbp.ExistsContext) -> ast.UnaryOp:
     expr = visit(ctx.query().queryTerm())
@@ -1005,3 +992,70 @@ def _(ctx: sbp.LambdaContext) -> ast.Function:
     return ast.Lambda(identifiers=identifier, expr=expr)
 
 
+DECIMAL_REGEX = re.compile(r"(?i)decimal\((?P<precision>\d+),\s*(?P<scale>\d+)\)")
+FIXED_PARSER = re.compile(rf"(?i)fixed\((?P<length>\d+)\)")
+
+# Define the primitive data types and their corresponding Python classes
+PRIMITIVE_TYPES: Dict[str, ct.PrimitiveType] = {
+    "bool": ct.BooleanType(),
+    "int": ct.IntegerType(),
+    "long": ct.LongType(),
+    "float": ct.FloatType(),
+    "double": ct.DoubleType(),
+    "date": ct.DateType(),
+    "time": ct.TimeType(),
+    "timestamp": ct.TimestampType(),
+    "timestamptz": ct.TimestamptzType(),
+    "string": ct.StringType(),
+    "uuid": ct.UUIDType(),
+    "byte": ct.BinaryType(),
+}
+
+
+@visit.register
+def _(ctx: sbp.PrimitiveDataTypeContext) -> ast.Value:
+    column_type = ctx.getText().strip()
+    decimal_match = DECIMAL_REGEX.match(column_type)
+    if decimal_match:
+        precision = int(decimal_match.group("precision"))
+        scale = int(decimal_match.group("scale"))
+        return ct.DecimalType(precision, scale)
+
+    fixed_match = FIXED_PARSER.match(column_type)
+    if fixed_match:
+        length = int(fixed_match.group("length"))
+        return ct.FixedType(length)
+
+    column_type=column_type.lower().strip("()")
+    try:
+        return PRIMITIVE_TYPES[column_type]
+    except KeyError as exc:
+        raise DJParseException(f"DJ does not recognize the type `{ctx.getText()}`.") from exc
+
+
+@visit.register
+def _(ctx: sbp.ComplexDataTypeContext) -> ct.ColumnType:
+    if ctx.ARRAY():
+        return ct.ListType(visit(ctx.dataType())[0])
+    if ctx.MAP():
+        return ct.MapType(*visit(ctx.dataType()))
+    if ctx.STRUCT():
+        if type_list:=ctx.complexColTypeList():
+            return ct.StructType(*visit(type_list))
+        else:
+            return ct.StructType()
+
+
+@visit.register
+def _(ctx: sbp.ComplexColTypeListContext) -> List[ct.NestedField]:
+    return visit(ctx.complexColType())
+
+@visit.register
+def _(ctx: sbp.ComplexColTypeContext) -> ct.NestedField:
+    name = visit(ctx.identifier())
+    type = visit(ctx.dataType())
+    optional = not ctx.NOT()
+    doc = None
+    if comment:=ctx.commentSpec():
+        doc=comment.getText()
+    return ct.NestedField(name, type, optional, doc)
