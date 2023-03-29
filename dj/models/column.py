@@ -32,7 +32,8 @@ class ColumnTypeDecorator(TypeDecorator):
         return value.__str__()
 
     def process_result_value(self, value, dialect):
-        return ColumnType(value, value)
+        from dj.sql.parsing.backends.antlr4 import parse_rule
+        return parse_rule(value, "dataType")
 
 
 class Column(BaseSQLModel, table=True):  # type: ignore

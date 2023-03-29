@@ -30,7 +30,7 @@ from dj.models.node import NodeType as DJNodeType
 from dj.sql.functions import function_registry
 from dj.sql.parsing.backends.exceptions import DJParseException
 from dj.sql.parsing.types import ColumnType, BooleanType, DecimalType, DoubleType, FloatType, LongType, IntegerType, \
-    StringType
+    StringType, MapType
 from dj.construction.utils import get_dj_node
 from dj.errors import DJError, ErrorCode, DJException, DJErrorException
 
@@ -1499,11 +1499,11 @@ class Case(Expression):
             for res in self.results + (
                 [self.else_result] if self.else_result else []
             )
-            if res.type != "NULL"
+            if res.type
         ]
         if not all(result_types[0] == res for res in result_types):
             raise DJParseException(
-                f"Not all the same type in CASE! Found: {', '.join(result_types)}",
+                f"Not all the same type in CASE! Found: {', '.join([str(type_) for type_ in result_types])}",
             )
         return result_types[0]
 
@@ -1526,7 +1526,7 @@ class Subscript(Expression):
     @property
     def type(self) -> ColumnType:
         type_ = self.expr.type
-        return type_.args[1]
+        return type_.value.type
 
 
 @dataclass(eq=False)

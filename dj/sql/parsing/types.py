@@ -65,8 +65,8 @@ class ColumnType:
         if isinstance(v, str):
             if v.startswith("decimal"):
                 return DecimalType.parse(v)
-            # elif v.startswith("fixed"):
-            #     return FixedType.parse(v)
+            elif v.startswith("fixed"):
+                return FixedType.parse(v)
             else:
                 return PRIMITIVE_TYPES[v]
         elif isinstance(v, dict):
@@ -325,7 +325,11 @@ class MapType(ColumnType):
         if not self._initialized:
             super().__init__(
                 f"map<{key_type}, {value_type}>",
-                f"MapType(key_type={repr(key_type)}, value_type={repr(value_type)})",
+            )
+            self._key_field = NestedField(name="key", field_type=key_type, is_optional=False)
+            self._value_field = NestedField(
+                name="value",
+                field_type=value_type,
             )
 
     @property

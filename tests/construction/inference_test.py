@@ -12,8 +12,8 @@ from dj.sql.parsing import ast2
 from dj.sql.parsing.ast2 import CompileContext
 from dj.sql.parsing.backends.exceptions import DJParseException
 from dj.sql.parsing.backends.antlr4 import parse
-from dj.sql.parsing.types import BooleanType, IntegerType, DoubleType, FloatType, TimestampType, StringType
-from dj.typing import ColumnType
+from dj.sql.parsing.types import BooleanType, IntegerType, DoubleType, FloatType, TimestampType, StringType, DateType, \
+    LongType, MapType
 
 
 def test_infer_column_with_table(construction_session: Session):
@@ -29,19 +29,19 @@ def test_infer_column_with_table(construction_session: Session):
     )[0]
     table = ast2.Table(ast2.Name("orders"), _dj_node=node.current)
     assert (
-        get_type_of_expression(ast2.Column(ast2.Name("id"), _table=table))
+        ast2.Column(ast2.Name("id"), _table=table).type
         == IntegerType()
     )
     assert (
-        get_type_of_expression(ast2.Column(ast2.Name("user_id"), _table=table))
+        ast2.Column(ast2.Name("user_id"), _table=table).type
         == IntegerType()
     )
     assert (
-        get_type_of_expression(ast2.Column(ast2.Name("order_date"), _table=table))
-        == ColumnType.DATE
+        ast2.Column(ast2.Name("order_date"), _table=table).type
+        == DateType()
     )
     assert (
-        get_type_of_expression(ast2.Column(ast2.Name("status"), _table=table))
+        ast2.Column(ast2.Name("status"), _table=table).type
         == StringType()
     )
 
@@ -50,15 +50,15 @@ def test_infer_values():
     """
     Test inferring types from values directly
     """
-    assert get_type_of_expression(ast2.String(value="foo")) == StringType()
-    assert get_type_of_expression(ast2.Number(value=10)) == IntegerType()
-    assert get_type_of_expression(ast2.Number(value=-10)) == IntegerType()
-    assert get_type_of_expression(ast2.Number(value=922337203685477)) == ColumnType.LONG
-    assert get_type_of_expression(ast2.Number(value=-922337203685477)) == ColumnType.LONG
-    assert get_type_of_expression(ast2.Number(value=3.4e39)) == ColumnType.DOUBLE
-    assert get_type_of_expression(ast2.Number(value=-3.4e39)) == ColumnType.DOUBLE
-    assert get_type_of_expression(ast2.Number(value=3.4e38)) == FloatType()
-    assert get_type_of_expression(ast2.Number(value=-3.4e38)) == FloatType()
+    assert ast2.String(value="foo").type == StringType()
+    assert ast2.Number(value=10).type == IntegerType()
+    assert ast2.Number(value=-10).type == IntegerType()
+    assert ast2.Number(value=922337203685477).type == LongType()
+    assert ast2.Number(value=-922337203685477).type == LongType()
+    assert ast2.Number(value=3.4e39).type == DoubleType()
+    assert ast2.Number(value=-3.4e39).type == DoubleType()
+    assert ast2.Number(value=3.4e38).type == FloatType()
+    assert ast2.Number(value=-3.4e38).type == FloatType()
 
 
 def test_raise_on_invalid_infer_binary_op():
@@ -107,7 +107,7 @@ def test_infer_column_with_an_aliased_table(construction_session: Session):
     )
     assert get_type_of_expression(ast2.Column(ast2.Name("id"), _table=alias)) == IntegerType()
     assert get_type_of_expression(ast2.Column(ast2.Name("user_id"), _table=alias)) == IntegerType()
-    assert get_type_of_expression(ast2.Column(ast2.Name("order_date"), _table=alias)) == ColumnType.DATE
+    assert get_type_of_expression(ast2.Column(ast2.Name("order_date"), _table=alias)) == DateType()
     assert get_type_of_expression(ast2.Column(ast2.Name("status"), _table=alias)) == StringType()
     assert get_type_of_expression(ast2.Column(ast2.Name("_etl_loaded_at"), _table=alias)) == TimestampType()
 
@@ -215,8 +215,8 @@ def test_infer_map_subscripts(construction_session: Session):
     types = [
         StringType(),
         StringType(),
-        ColumnType.MAP["str", ColumnType.MAP["str", "float"]],
-        ColumnType.MAP["str", "float"],
+        MapType(key_type=StringType(), value_type=MapType(key_type=StringType(), value_type=FloatType())),
+        MapType(key_type=StringType(), value_type=FloatType()),
         FloatType(),
     ]
     assert types == [exp.type for exp in query.select.projection]
@@ -348,4 +348,4 @@ def test_infer_bad_case_types(construction_session: Session):
             exp.type for exp in query.select.projection
         ]
 
-    assert str(excinfo.value) == "Not all the same type in CASE! Found: INT, STR"
+    assert str(excinfo.value) == "Not all the same type in CASE! Found: int, string"

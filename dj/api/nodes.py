@@ -54,7 +54,9 @@ from dj.models.node import (
     UpsertMaterializationConfig,
 )
 from dj.service_clients import QueryServiceClient
-from dj.sql.parsing.backends.antlr4 import parse
+from dj.sql.parsing.backends.antlr4 import parse, FIXED_PARSER, PRIMITIVE_TYPES, parse_rule
+from dj.sql.parsing.backends.exceptions import DJParseException
+from dj.sql.parsing.types import DECIMAL_REGEX, DecimalType, FixedType
 from dj.utils import Version, VersionUpgrade, get_query_service_client, get_session
 
 _logger = logging.getLogger(__name__)
@@ -449,6 +451,25 @@ def save_node(
     session.refresh(node.current)
 
 
+def derive_type(column_type: str) -> ColumnType:
+    decimal_match = DECIMAL_REGEX.match(column_type)
+    if decimal_match:
+        precision = int(decimal_match.group("precision"))
+        scale = int(decimal_match.group("scale"))
+        return DecimalType(precision, scale)
+
+    fixed_match = FIXED_PARSER.match(column_type)
+    if fixed_match:
+        length = int(fixed_match.group("length"))
+        return FixedType(length)
+
+    column_type=column_type.lower().strip("()")
+    try:
+        return PRIMITIVE_TYPES[column_type]
+    except KeyError as exc:
+        raise DJException(f"DJ does not recognize the type `{column_type}`.") from exc
+
+
 @router.post("/nodes/source/", response_model=NodeOutput, status_code=201)
 def create_source_node(
     data: CreateSourceNode,
@@ -469,7 +490,7 @@ def create_source_node(
         [
             Column(
                 name=column_name,
-                type=ColumnType(column_data["type"], column_data["type"]),
+                type=parse_rule(column_data["type"], "dataType"),
             )
             for column_name, column_data in data.columns.items()
         ]
