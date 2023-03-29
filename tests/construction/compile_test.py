@@ -7,10 +7,8 @@ import pytest
 from sqlmodel import Session
 
 from dj.construction.compile import compile_node
-from dj.construction.exceptions import CompoundBuildException
 from dj.construction.extract import (
     extract_dependencies_from_node,
-    extract_dependencies_from_query_ast,
 )
 from dj.construction.utils import make_name
 from dj.errors import DJException
@@ -22,20 +20,17 @@ from dj.sql.parsing.backends.antlr4 import parse
 from dj.typing import ColumnType
 
 
-# def test_get_table_node_is_none(construction_session: Session):
-#     """
-#     Test a nonexistent table node with compound exception ignore
-#     """
-#
-#     query = parse("select x from purchases")
-#     CompoundBuildException().reset()
-#     CompoundBuildException().set_raise(False)
-#     exc = DJException()
-#     ctx = CompileContext(session=construction_session, query=query, exception=exc)
-#     query.compile(ctx)
-#
-#     assert "No node `purchases`" in str(CompoundBuildException().errors)
-#     CompoundBuildException().reset()
+def test_get_table_node_is_none(construction_session: Session):
+    """
+    Test a nonexistent table node with compound exception ignore
+    """
+
+    query = parse("select x from purchases")
+    ctx = CompileContext(session=construction_session, query=query, exception=DJException())
+    query.compile(ctx)
+
+    assert "No node `purchases`" in str(ctx.exception.errors)
+
 
 
 @pytest.mark.parametrize(
