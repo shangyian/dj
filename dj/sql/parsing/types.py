@@ -101,6 +101,16 @@ class ColumnType:
 class PrimitiveType(ColumnType):
     """Base class for all Column Primitive Types"""
 
+class NullType(PrimitiveType, Singleton):
+    """A data type for NULL
+
+    Example:
+        >>> NullType()
+        NullType()
+    """
+    def __init__(self):
+        if not self._initialized:
+            super().__init__(f"NULL", f"NullType()")
 
 class FixedType(PrimitiveType):
     """A fixed data type.

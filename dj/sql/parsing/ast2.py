@@ -27,10 +27,10 @@ from sqlmodel import Session
 import dj
 from dj.models.node import NodeRevision as DJNode, NodeRevision, NodeType
 from dj.models.node import NodeType as DJNodeType
-from dj.sql.functions import function_registry
+from dj.sql.functions import function_registry, table_function_registry
 from dj.sql.parsing.backends.exceptions import DJParseException
 from dj.sql.parsing.types import ColumnType, BooleanType, DecimalType, DoubleType, FloatType, LongType, IntegerType, \
-    StringType, MapType
+    StringType, MapType, NullType
 from dj.construction.utils import get_dj_node
 from dj.errors import DJError, ErrorCode, DJException, DJErrorException
 
@@ -489,7 +489,7 @@ class Expression(Node):
     parenthesized: Optional[bool] = field(init=False, default=None)
 
     @property
-    def type(self) -> ColumnType:
+    def type(self) -> Union[ColumnType, List[ColumnType]]:
         """
         Return the type of the expression
         """
@@ -1150,7 +1150,7 @@ class Null(Value):
 
     @property
     def type(self) -> ColumnType:
-        return None
+        return NullType
 
 
 @dataclass(eq=False)
@@ -1613,6 +1613,14 @@ class FunctionTable(FunctionTableExpression):
         alias = f" AS {self.alias}" if self.alias else ""
         cols = f"({', '.join(str(col) for col in self.column_list)})"
         return f"{self.name}{alias}{cols}"
+
+    @property
+    def type(self) -> Union[List[ColumnType], ColumnType]:
+        name = self.name.name.upper()
+        dj_func = table_function_registry[name]
+        return dj_func.infer_type(
+            *(arg.type for arg in self.args)
+         
 
 
 @dataclass(eq=False)
