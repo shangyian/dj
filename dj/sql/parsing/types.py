@@ -309,7 +309,28 @@ class IntegerType(PrimitiveType, Singleton):
     def __init__(self):
         if not self._initialized:
             super().__init__("int", "IntegerType()")
+            
+class TinyIntType(PrimitiveType, Singleton):
+    """A TinyInt data type can be represented using an instance of this class. TinyInts are
+    8-bit signed integers.
 
+    Example:
+        >>> column_foo = TinyIntType()
+        >>> isinstance(column_foo, TinyIntType)
+        True
+
+    Attributes:
+        max (int): The maximum allowed value for TinyInts (returns `127`).
+        min (int): The minimum allowed value for TinyInts (returns `-128`).
+    """
+
+    max: ClassVar[int] = 127
+
+    min: ClassVar[int] = -128
+
+    def __init__(self):
+        if not self._initialized:
+            super().__init__("tinyint", "TinyIntType()")
 
 class LongType(PrimitiveType, Singleton):
     """A Long data type can be represented using an instance of this class. Longs are
