@@ -183,6 +183,29 @@ class DateSub(Function):
         return ct.DateType()
 
 
+class If(Function):
+    """
+    If statement
+
+    if(condition, result, else_result): if condition evaluates to true,
+    then returns result; otherwise returns else_result.
+    """
+    @staticmethod
+    def infer_type(*args) -> ct.ColumnType:
+        if len(args) != 3:
+            raise DJInvalidInputException(
+                message="Wrong number of arguments passed in, "
+                        "expecting: IF(condition, result, else_result)"
+            )
+
+        if args[1] != args[2]:
+            raise DJInvalidInputException(
+                message="The result and else result must match in type!"
+                        f"Got {args[1]} and {args[2]}"
+            )
+        return args[1]
+
+
 class DateDiff(Function):
     """
     Computes the difference in days between two dates.
