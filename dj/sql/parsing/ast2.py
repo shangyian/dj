@@ -1128,7 +1128,7 @@ class Function(Named, Operation):
     def type(self) -> ColumnType:
         name = self.name.name.upper()
         dj_func = function_registry[name]
-        return dj_func.infer_type_from_types(
+        return dj_func.infer_type(
             *(arg.type for arg in self.args)
         )
 

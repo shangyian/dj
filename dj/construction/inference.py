@@ -114,7 +114,7 @@ def _(expression: ast.Wildcard):  # pragma: no cover
 def _(expression: ast.Function):  # pragma: no cover
     name = expression.name.name.upper()
     dj_func = function_registry[name]
-    return dj_func.infer_type_from_types(
+    return dj_func.infer_type(
         *(get_type_of_expression(exp) for exp in expression.args)
     )
 

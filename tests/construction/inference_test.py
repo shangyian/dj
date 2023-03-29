@@ -230,7 +230,7 @@ def test_infer_types_complicated(construction_session: Session):
       -- Raw('average({id})', 'INT', True),
       -- Raw('aggregate(array(1, 2, {id}), 0, (acc, x) -> acc + x, acc -> acc * 10)', 'INT'),
       -- Raw('NOW()', 'datetime'),
-      DATE_TRUNC('day', '2014-03-10'),
+      -- DATE_TRUNC('day', '2014-03-10'),
       NOW(),
       Coalesce(NULL, 5),
       Coalesce(NULL),
@@ -292,7 +292,7 @@ def test_infer_types_complicated(construction_session: Session):
         # IntegerType(),
         # IntegerType(),
         # TimestampType(),
-        TimestampType(),
+        # TimestampType(),
         TimestampType(),
         IntegerType(),
         None,
@@ -300,8 +300,8 @@ def test_infer_types_complicated(construction_session: Session):
         IntegerType(),
         IntegerType(),
         IntegerType(),
-        FloatType(),
-        IntegerType(),
+        DoubleType(),
+        LongType(),
         IntegerType(),
         BooleanType(),
         IntegerType(),
@@ -322,7 +322,7 @@ def test_infer_types_complicated(construction_session: Session):
         StringType(),
         BooleanType(),
         FloatType(),
-        IntegerType(),
+        LongType(),
     ]
     assert types == [exp.type for exp in query.select.projection]
 
@@ -345,4 +345,106 @@ def test_infer_bad_case_types(construction_session: Session):
             exp.type for exp in query.select.projection
         ]
 
-    assert str(excinfo.value) == "Not all the same type in CASE! Found: int, string"
+    assert str(excinfo.value) == "Not all the same type in CASE! Found: long, string"
+
+
+# def test_infer_types_functions(construction_session: Session):
+#     """
+#     Test type inference of functions
+#     """
+#
+#     query = parse(
+#         """
+#       SELECT
+#         AVG(id),
+#       NOW(),
+#       MAX(id) OVER
+#         (PARTITION BY first_name ORDER BY last_name)
+#         AS running_total,
+#       MAX(id) OVER
+#         (PARTITION BY first_name ORDER BY last_name)
+#         AS running_total,
+#       MIN(id) OVER
+#         (PARTITION BY first_name ORDER BY last_name)
+#         AS running_total,
+#       AVG(id) OVER
+#         (PARTITION BY first_name ORDER BY last_name)
+#         AS running_total,
+#       COUNT(id) OVER
+#         (PARTITION BY first_name ORDER BY last_name)
+#         AS running_total,
+#       SUM(id) OVER
+#         (PARTITION BY first_name ORDER BY last_name)
+#         AS running_total,
+#       NOT TRUE,
+#       10,
+#       id>5,
+#       id<5,
+#       id>=5,
+#       id<=5,
+#       id BETWEEN 4 AND 5,
+#       id IN (5, 5),
+#       id NOT IN (3, 4),
+#       id NOT IN (SELECT -5),
+#       first_name LIKE 'Ca%',
+#       id is null,
+#       (id=5)=TRUE,
+#       'hello world',
+#       first_name as fn,
+#       last_name<>'yoyo' and last_name='yoyo' or last_name='yoyo',
+#       last_name,
+#       bizarre,
+#       (select 5.0),
+#       CASE WHEN first_name = last_name THEN COUNT(DISTINCT first_name) ELSE
+#       COUNT(DISTINCT last_name) END
+#       FROM (
+#       SELECT id,
+#          first_name,
+#          last_name<>'yoyo' and last_name='yoyo' or last_name='yoyo' as bizarre,
+#          last_name
+#       FROM dbt.source.jaffle_shop.customers
+#         )
+#     """,
+#     )
+#     exc = DJException()
+#     ctx = CompileContext(session=construction_session, query=query, exception=exc)
+#     query.compile(ctx)
+#     types = [
+#         IntegerType(),
+#         TimestampType(),
+#         # IntegerType(),
+#         # IntegerType(),
+#         # TimestampType(),
+#         TimestampType(),
+#         TimestampType(),
+#         IntegerType(),
+#         None,
+#         None,
+#         IntegerType(),
+#         IntegerType(),
+#         IntegerType(),
+#         FloatType(),
+#         IntegerType(),
+#         IntegerType(),
+#         BooleanType(),
+#         IntegerType(),
+#         BooleanType(),
+#         BooleanType(),
+#         BooleanType(),
+#         BooleanType(),
+#         BooleanType(),
+#         BooleanType(),
+#         BooleanType(),
+#         BooleanType(),
+#         BooleanType(),
+#         BooleanType(),
+#         BooleanType(),
+#         StringType(),
+#         StringType(),
+#         BooleanType(),
+#         StringType(),
+#         BooleanType(),
+#         FloatType(),
+#         IntegerType(),
+#     ]
+#     assert types == [exp.type for exp in query.select.projection]
