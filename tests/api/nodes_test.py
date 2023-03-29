@@ -474,7 +474,7 @@ class TestCreateOrUpdateNodes:
         )
         assert data["columns"] == [
             {"name": "country", "type": "string", "attributes": []},
-            {"name": "num_users", "type": "int", "attributes": []},
+            {"name": "num_users", "type": "long", "attributes": []},
         ]
 
         # Update the transform node with two minor changes
@@ -525,8 +525,8 @@ class TestCreateOrUpdateNodes:
         )
         assert data["columns"] == [
             {"name": "country", "type": "string", "attributes": []},
-            {"name": "num_users", "type": "int", "attributes": []},
-            {"name": "num_entries", "type": "int", "attributes": []},
+            {"name": "num_users", "type": "long", "attributes": []},
+            {"name": "num_entries", "type": "long", "attributes": []},
         ]
 
         # Verify that asking for revisions for a non-existent transform fails
@@ -546,16 +546,16 @@ class TestCreateOrUpdateNodes:
         assert {rev["version"]: rev["columns"] for rev in data} == {
             "v1.0": [
                 {"name": "country", "type": "string", "attributes": []},
-                {"name": "num_users", "type": "int", "attributes": []},
+                {"name": "num_users", "type": "long", "attributes": []},
             ],
             "v1.1": [
                 {"name": "country", "type": "string", "attributes": []},
-                {"name": "num_users", "type": "int", "attributes": []},
+                {"name": "num_users", "type": "long", "attributes": []},
             ],
             "v2.0": [
                 {"name": "country", "type": "string", "attributes": []},
-                {"name": "num_users", "type": "int", "attributes": []},
-                {"name": "num_entries", "type": "int", "attributes": []},
+                {"name": "num_users", "type": "long", "attributes": []},
+                {"name": "num_entries", "type": "long", "attributes": []},
             ],
         }
 
@@ -588,7 +588,7 @@ class TestCreateOrUpdateNodes:
         )
         assert data["columns"] == [
             {"name": "country", "type": "string", "attributes": []},
-            {"name": "user_cnt", "type": "int", "attributes": []},
+            {"name": "user_cnt", "type": "long", "attributes": []},
         ]
 
         # Test updating the dimension node with a new query
@@ -655,7 +655,7 @@ class TestCreateOrUpdateNodes:
         )
         assert data["columns"] == [
             {"name": "country", "type": "string", "attributes": []},
-            {"name": "user_cnt", "type": "int", "attributes": []},
+            {"name": "user_cnt", "type": "long", "attributes": []},
         ]
 
         response = client.patch(
