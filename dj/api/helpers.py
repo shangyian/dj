@@ -11,7 +11,6 @@ from sqlmodel import Session, select
 
 from dj.construction.build import build_node
 from dj.construction.dj_query import build_dj_metric_query
-from dj.construction.extract2 import extract_dependencies_from_compiled_query_ast
 from dj.construction.inference import get_type_of_expression
 from dj.errors import DJError, DJException, DJInvalidInputException, ErrorCode
 from dj.models import AttributeType, Catalog, Column, Engine
@@ -247,21 +246,14 @@ def validate_node_data(
         node = Node(name=data.name, type=data.type)
         validated_node = NodeRevision.parse_obj(data)
         validated_node.node = node
-
     validated_node.status = NodeStatus.VALID
-    # Try to parse the node's query and extract dependencies
 
-    query_ast = parse(validated_node.query)
-    exc = DJException()
-    ctx = ast.CompileContext(session=session, query=query_ast, exception=exc)
-    query_ast.compile(ctx=ctx)
+    # Try to parse the node's query and extract dependencies
     try:
-        (
-            dependencies_map,
-            missing_parents_map,
-        ) = extract_dependencies_from_compiled_query_ast(
-            query=query_ast,
-        )
+        query_ast = parse(validated_node.query)
+        exc = DJException()
+        ctx = ast.CompileContext(session=session, query=query_ast, exception=exc)
+        dependencies_map, missing_parents_map = query_ast.extract_dependencies(ctx)
     except ValueError as exc:
         raise DJException(message=str(exc)) from exc
 
