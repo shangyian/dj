@@ -1525,7 +1525,7 @@ class Subscript(Expression):
 
     @property
     def type(self) -> ColumnType:
-        type_ = self.expr.type
+        type_ = cast(MapType, self.expr.type)
         return type_.value.type
 
 

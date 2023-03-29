@@ -9,7 +9,7 @@ from dj.models.column import Column
 from dj.models.database import Database
 from dj.models.node import Node, NodeRevision, NodeType
 from dj.models.table import Table
-from dj.typing import ColumnType
+from dj.sql.parsing.types import StringType, IntegerType, FloatType
 
 
 def test_read_metrics(client_with_examples: TestClient) -> None:
@@ -39,26 +39,26 @@ def test_read_metric(session: Session, client: TestClient) -> None:
                 database=Database(name="test", URI="sqlite://"),
                 table="A",
                 columns=[
-                    Column(name="ds", type=ColumnType.STR),
-                    Column(name="user_id", type=ColumnType.INT),
-                    Column(name="foo", type=ColumnType.FLOAT),
+                    Column(name="ds", type=StringType()),
+                    Column(name="user_id", type=IntegerType()),
+                    Column(name="foo", type=FloatType()),
                 ],
             ),
         ],
         columns=[
             Column(
                 name="ds",
-                type=ColumnType.STR,
+                type=StringType(),
                 attributes=[ColumnAttribute(attribute_type=dimension_attribute)],
             ),
             Column(
                 name="user_id",
-                type=ColumnType.INT,
+                type=IntegerType(),
                 attributes=[ColumnAttribute(attribute_type=dimension_attribute)],
             ),
             Column(
                 name="foo",
-                type=ColumnType.FLOAT,
+                type=FloatType(),
                 attributes=[ColumnAttribute(attribute_type=dimension_attribute)],
             ),
         ],

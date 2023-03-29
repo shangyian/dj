@@ -451,25 +451,6 @@ def save_node(
     session.refresh(node.current)
 
 
-def derive_type(column_type: str) -> ColumnType:
-    decimal_match = DECIMAL_REGEX.match(column_type)
-    if decimal_match:
-        precision = int(decimal_match.group("precision"))
-        scale = int(decimal_match.group("scale"))
-        return DecimalType(precision, scale)
-
-    fixed_match = FIXED_PARSER.match(column_type)
-    if fixed_match:
-        length = int(fixed_match.group("length"))
-        return FixedType(length)
-
-    column_type=column_type.lower().strip("()")
-    try:
-        return PRIMITIVE_TYPES[column_type]
-    except KeyError as exc:
-        raise DJException(f"DJ does not recognize the type `{column_type}`.") from exc
-
-
 @router.post("/nodes/source/", response_model=NodeOutput, status_code=201)
 def create_source_node(
     data: CreateSourceNode,
@@ -490,7 +471,7 @@ def create_source_node(
         [
             Column(
                 name=column_name,
-                type=parse_rule(column_data["type"], "dataType"),
+                type=column_data["type"],
             )
             for column_name, column_data in data.columns.items()
         ]
