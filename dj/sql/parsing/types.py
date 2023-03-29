@@ -2,13 +2,17 @@
 
 Example:
     >>> StructType(
-            NestedField(True, 1, "required_field", StringType()),
-            NestedField(False, 2, "optional_field", IntegerType())
-    )
-
+                NestedField(
+                    name=Name(name='name', quote_style='', namespace=None), 
+                    field_type=StringType(), 
+                    is_optional=False, 
+                    doc="COMMENT'where someone lives'"
+                )
+            )
 """
 
 from typing import Dict, Optional, Tuple, ClassVar
+import dj.sql.parsing.ast2 as ast
 
 class Singleton:
     _instance = None
@@ -115,7 +119,7 @@ class NestedField(ColumnType):
 
     def __new__(
         cls,
-        name: str,
+        name: ast.Name,
         field_type: ColumnType,
         is_optional: bool = True,
         doc: Optional[str] = None,
