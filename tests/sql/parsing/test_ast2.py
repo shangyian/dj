@@ -22,6 +22,10 @@ def test_ast_compile_table(session, client_with_examples):
     ctx = ast.CompileContext(session=session, query=query, exception=exc)
     query.select.from_.relations[0].primary.compile(ctx)
     assert not exc.errors
+    
+    node = query.select.from_.relations[0].primary._dj_node
+    assert node
+    assert node.name == "hard_hats"
 
 
 def test_ast_compile_table_missing_node(session):
@@ -70,6 +74,10 @@ def test_ast_compile_query(session, client_with_examples):
     ctx = ast.CompileContext(session=session, query=query, exception=exc)
     query.compile(ctx)
     assert not exc.errors
+    
+    node = query.select.from_.relations[0].primary._dj_node
+    assert node
+    assert node.name == "hard_hats"
 
 
 def test_ast_compile_query_missing_columns(session, client_with_examples):
@@ -82,6 +90,10 @@ def test_ast_compile_query_missing_columns(session, client_with_examples):
     query.compile(ctx)
     assert "Column`column_foo` does not exist on any valid table." in exc.errors[0].message
     assert "Column`column_bar` does not exist on any valid table." in exc.errors[1].message
+    
+    node = query.select.from_.relations[0].primary._dj_node
+    assert node
+    assert node.name == "hard_hats"
 
 
 @pytest.mark.parametrize(
@@ -158,3 +170,7 @@ def test_ast_compile_having(session: Session, client_with_examples):
     ctx = ast.CompileContext(session=session, query=query, exception=exc)
     query.compile(ctx)
     assert not exc.errors
+    
+    node = query.select.from_.relations[0].primary._dj_node
+    assert node
+    assert node.name == "dbt.source.jaffle_shop.orders"
