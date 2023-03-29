@@ -1060,3 +1060,11 @@ def _(ctx: sbp.ComplexColTypeContext) -> ct.NestedField:
     if comment:=ctx.commentSpec():
         doc=comment.getText()
     return ct.NestedField(name, type, optional, doc)
+
+
+@visit.register
+def _(ctx: sbp.ExtractContext):
+    return ast.Extract(
+        field=visit(ctx.field),
+        source=visit(ctx.source),
+    )

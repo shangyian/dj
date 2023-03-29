@@ -12,7 +12,7 @@ from dj.sql.parsing.ast2 import CompileContext
 from dj.sql.parsing.backends.exceptions import DJParseException
 from dj.sql.parsing.backends.antlr4 import parse
 from dj.sql.parsing.types import BooleanType, IntegerType, DoubleType, FloatType, TimestampType, StringType, DateType, \
-    LongType, MapType
+    LongType, MapType, TimeType, DecimalType
 
 
 def test_infer_column_with_table(construction_session: Session):
@@ -348,103 +348,73 @@ def test_infer_bad_case_types(construction_session: Session):
     assert str(excinfo.value) == "Not all the same type in CASE! Found: long, string"
 
 
-# def test_infer_types_functions(construction_session: Session):
-#     """
-#     Test type inference of functions
-#     """
-#
-#     query = parse(
-#         """
-#       SELECT
-#         AVG(id),
-#       NOW(),
-#       MAX(id) OVER
-#         (PARTITION BY first_name ORDER BY last_name)
-#         AS running_total,
-#       MAX(id) OVER
-#         (PARTITION BY first_name ORDER BY last_name)
-#         AS running_total,
-#       MIN(id) OVER
-#         (PARTITION BY first_name ORDER BY last_name)
-#         AS running_total,
-#       AVG(id) OVER
-#         (PARTITION BY first_name ORDER BY last_name)
-#         AS running_total,
-#       COUNT(id) OVER
-#         (PARTITION BY first_name ORDER BY last_name)
-#         AS running_total,
-#       SUM(id) OVER
-#         (PARTITION BY first_name ORDER BY last_name)
-#         AS running_total,
-#       NOT TRUE,
-#       10,
-#       id>5,
-#       id<5,
-#       id>=5,
-#       id<=5,
-#       id BETWEEN 4 AND 5,
-#       id IN (5, 5),
-#       id NOT IN (3, 4),
-#       id NOT IN (SELECT -5),
-#       first_name LIKE 'Ca%',
-#       id is null,
-#       (id=5)=TRUE,
-#       'hello world',
-#       first_name as fn,
-#       last_name<>'yoyo' and last_name='yoyo' or last_name='yoyo',
-#       last_name,
-#       bizarre,
-#       (select 5.0),
-#       CASE WHEN first_name = last_name THEN COUNT(DISTINCT first_name) ELSE
-#       COUNT(DISTINCT last_name) END
-#       FROM (
-#       SELECT id,
-#          first_name,
-#          last_name<>'yoyo' and last_name='yoyo' or last_name='yoyo' as bizarre,
-#          last_name
-#       FROM dbt.source.jaffle_shop.customers
-#         )
-#     """,
-#     )
-#     exc = DJException()
-#     ctx = CompileContext(session=construction_session, query=query, exception=exc)
-#     query.compile(ctx)
-#     types = [
-#         IntegerType(),
-#         TimestampType(),
-#         # IntegerType(),
-#         # IntegerType(),
-#         # TimestampType(),
-#         TimestampType(),
-#         TimestampType(),
-#         IntegerType(),
-#         None,
-#         None,
-#         IntegerType(),
-#         IntegerType(),
-#         IntegerType(),
-#         FloatType(),
-#         IntegerType(),
-#         IntegerType(),
-#         BooleanType(),
-#         IntegerType(),
-#         BooleanType(),
-#         BooleanType(),
-#         BooleanType(),
-#         BooleanType(),
-#         BooleanType(),
-#         BooleanType(),
-#         BooleanType(),
-#         BooleanType(),
-#         BooleanType(),
-#         BooleanType(),
-#         BooleanType(),
-#         StringType(),
-#         StringType(),
-#         BooleanType(),
-#         StringType(),
-#         BooleanType(),
-#         FloatType(),
-#         IntegerType(),
-#     ]
-#     assert types == [exp.type for exp in query.select.projection]
+def test_infer_types_functions(construction_session: Session):
+    """
+    Test type inference of functions
+    """
+
+    query = parse(
+        """
+        SELECT
+          AVG(id) OVER
+           (PARTITION BY first_name ORDER BY last_name),
+          MIN(id) OVER
+            (PARTITION BY first_name ORDER BY last_name),
+          MAX(id) OVER
+            (PARTITION BY first_name ORDER BY last_name),
+          SUM(id) OVER
+            (PARTITION BY first_name ORDER BY last_name),
+          CEIL(id),
+          COUNT(id) OVER
+            (PARTITION BY first_name ORDER BY last_name),
+          COUNT(DISTINCT last_name),
+          COALESCE(5, NULL),
+          COALESCE(5, NULL),
+          CURRENT_DATE(),
+          CURRENT_DATETIME(),
+          CURRENT_TIME(),
+          CURRENT_TIMESTAMP(),
+          NOW(),
+          DATE_ADD('2020-01-01', 10),
+          DATE_SUB('2020-01-01', 10),
+          IF(1=2, 10, 20),
+          IF(1=2, 10, 20),
+          DATE_DIFF('2020-01-01', '2021-01-01'),
+          DATETIME_ADD('2020-01-01 00:00:00', 10),
+          DATETIME_SUB('2020-01-01 00:00:00', 10),
+          DATETIME_DIFF('2020-01-01 00:00:00', '2020-01-01 00:00:00'),
+          EXTRACT(YEAR FROM '2020-01-01 00:00:00'),
+          EXTRACT(SECOND FROM '2020-01-01 00:00:00')
+        FROM dbt.source.jaffle_shop.customers
+    """,
+    )
+    exc = DJException()
+    ctx = CompileContext(session=construction_session, query=query, exception=exc)
+    query.compile(ctx)
+    types = [
+        DoubleType(),
+        IntegerType(),
+        IntegerType(),
+        IntegerType(),
+        IntegerType(),
+        LongType(),
+        LongType(),
+        IntegerType(),
+        IntegerType(),
+        DateType(),
+        TimestampType(),
+        TimeType(),
+        TimestampType(),
+        TimestampType(),
+        DateType(),
+        DateType(),
+        IntegerType(),
+        IntegerType(),
+        IntegerType(),
+        TimestampType(),
+        TimestampType(),
+        IntegerType(),
+        IntegerType(),
+        DecimalType(precision=8, scale=6)
+    ]
+    assert types == [exp.type for exp in query.select.projection]

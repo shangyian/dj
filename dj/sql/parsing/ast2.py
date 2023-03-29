@@ -1730,6 +1730,30 @@ class Cast(Expression):
 
 
 @dataclass(eq=False)
+class Extract(Node):
+    """
+    An extract operation that extracts field from source
+    """
+
+    field: Name
+    source: Expression
+
+    def __str__(self) -> str:
+        return self.identifier()
+
+    def identifier(self, quotes: bool = True) -> str:
+        return (
+            f"EXTRACT({self.field.name} FROM {self.source}"
+        )
+
+    @property
+    def type(self) -> ColumnType:
+        if self.field.name == "SECOND":
+            return DecimalType(8, 6)
+        return IntegerType()
+
+
+@dataclass(eq=False)
 class SelectExpression(Aliasable, Expression):
     """
     An uninitializable Type for Select for use as a

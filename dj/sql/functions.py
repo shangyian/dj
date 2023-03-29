@@ -5,7 +5,7 @@ This file holds all the functions that we want to support in the SQL used to def
 nodes. The functions are used to infer types.
 
 """
-
+import re
 # pylint: disable=unused-argument, missing-function-docstring, arguments-differ, too-many-return-statements
 from typing import ClassVar
 import abc
@@ -121,6 +121,8 @@ class CurrentDate(Function):
     """
     Returns the current date.
     """
+    __name__ = "CURRENT_DATE"
+
     @staticmethod
     def infer_type() -> ct.DateType:
         return ct.DateType()
@@ -130,6 +132,7 @@ class CurrentDatetime(Function):
     """
     Returns the current date and time.
     """
+
     @staticmethod
     def infer_type() -> ct.TimestampType:
         return ct.TimestampType()
@@ -139,6 +142,7 @@ class CurrentTime(Function):
     """
     Returns the current time.
     """
+
     @staticmethod
     def infer_type() -> ct.TimeType:
         return ct.TimeType()
@@ -148,6 +152,7 @@ class CurrentTimestamp(Function):
     """
     Returns the current timestamp.
     """
+
     @staticmethod
     def infer_type() -> ct.TimestampType:
         return ct.TimestampType()
@@ -238,6 +243,7 @@ class DatetimeDiff(Function):
     @staticmethod
     def infer_type(*arg) -> ct.IntegerType:
         return ct.IntegerType()
+
 
 class Extract(Function):
     """
@@ -721,7 +727,7 @@ class Year(Function):
 
 
 function_registry = {
-    cls.__name__.upper(): cls for cls in Function.__subclasses__()
+    re.sub(r'(?<!^)(?=[A-Z])', '_', cls.__name__).upper(): cls for cls in Function.__subclasses__()
 }
 
 class Explode(TableFunction):
