@@ -3,16 +3,21 @@
 Example:
     >>> StructType(
                 NestedField(
-                    name=Name(name='name', quote_style='', namespace=None), 
-                    field_type=StringType(), 
-                    is_optional=False, 
+                    name=Name(name='name', quote_style='', namespace=None),
+                    field_type=StringType(),
+                    is_optional=False,
                     doc="COMMENT'where someone lives'"
                 )
             )
 """
 
 from typing import Dict, Optional, Tuple, ClassVar
+
 import dj.sql.parsing.ast2 as ast
+import re
+
+DECIMAL_REGEX = re.compile(r"decimal\((\d+),\s*(\d+)\)")
+
 
 class Singleton:
     _instance = None
@@ -107,6 +112,16 @@ class DecimalType(PrimitiveType):
     @property
     def scale(self) -> int:
         return self._scale
+
+    @staticmethod
+    def parse(str_repr: str) -> "DecimalType":
+        matches = DECIMAL_REGEX.search(str_repr)
+        if matches:
+            precision = int(matches.group(1))
+            scale = int(matches.group(2))
+            return DecimalType(precision, scale)
+        else:
+            raise ValueError(f"Could not parse {str_repr} into a DecimalType")
 
 
 class NestedField(ColumnType):

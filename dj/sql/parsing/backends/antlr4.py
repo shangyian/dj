@@ -881,7 +881,7 @@ def _(ctx: sbp.NullLiteralContext) -> ast.Null:
 def _(ctx: sbp.CastContext) -> ast.Cast:
     data_type = visit(ctx.dataType())
     expression = visit(ctx.expression())
-    return ast.Cast(data_type=data_type.name, expression=expression)
+    return ast.Cast(data_type=data_type, expression=expression)
 
 @visit.register
 def _(ctx: sbp.ExistsContext) -> ast.UnaryOp:

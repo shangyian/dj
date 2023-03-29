@@ -18,6 +18,7 @@ from sqlalchemy.types import Text, TypeDecorator
 from typing_extensions import Protocol
 
 from dj.errors import DJException
+from dj.sql.parsing.types import PrimitiveType
 
 
 class SQLADialect(Protocol):  # pylint: disable=too-few-public-methods
@@ -313,17 +314,6 @@ def parse_nested_type(expr: str) -> List:
     if stack:
         raise ColumnTypeError(f"Missing type definition for complex type! {expr}")
     return top
-
-
-# pylint: disable=W0223
-class ColumnTypeDecorator(TypeDecorator):
-    impl = Text
-
-    def process_bind_param(self, value: ColumnType, dialect):
-        return value.value
-
-    def process_result_value(self, value, dialect):
-        return ColumnType(value)
 
 
 # pylint: enable=W0223

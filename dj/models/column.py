@@ -3,11 +3,13 @@ Models for columns.
 """
 from typing import TYPE_CHECKING, List, Optional, Tuple, TypedDict
 
+from sqlalchemy import TypeDecorator, String
 from sqlalchemy.sql.schema import Column as SqlaColumn
 from sqlmodel import Field, Relationship
 
 from dj.models.base import BaseSQLModel
-from dj.typing import ColumnType, ColumnTypeDecorator
+from dj.sql.parsing.types import ColumnType
+from sqlalchemy.types import Text
 
 if TYPE_CHECKING:
     from dj.models.attribute import ColumnAttribute
@@ -23,6 +25,16 @@ class ColumnYAML(TypedDict, total=False):
     dimension: str
 
 
+class ColumnTypeDecorator(TypeDecorator):
+    impl = Text
+
+    def process_bind_param(self, value: ColumnType, dialect):
+        return value.value
+
+    def process_result_value(self, value, dialect):
+        return ColumnType(value, value)
+
+
 class Column(BaseSQLModel, table=True):  # type: ignore
     """
     A column.
@@ -33,7 +45,7 @@ class Column(BaseSQLModel, table=True):  # type: ignore
 
     id: Optional[int] = Field(default=None, primary_key=True)
     name: str
-    type: ColumnType = Field(sa_column=SqlaColumn(ColumnTypeDecorator, nullable=False))
+    type: ColumnType = Field(sa_column=SqlaColumn(ColumnTypeDecorator, String, nullable=False))
 
     dimension_id: Optional[int] = Field(default=None, foreign_key="node.id")
     dimension: "Node" = Relationship()
