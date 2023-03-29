@@ -679,7 +679,7 @@ def create_new_revision_from_existing(  # pylint: disable=too-many-locals
         columns=[
             Column(
                 name=column_name,
-                type=ColumnType[column_data["type"]],
+                type=column_data.get("type"),
                 dimension_column=column_data.get("dimension"),
             )
             for column_name, column_data in data.columns.items()

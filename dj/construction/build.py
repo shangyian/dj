@@ -9,6 +9,7 @@ from dj.construction.utils import amenable_name
 from dj.errors import DJException
 from dj.models.column import Column
 from dj.models.node import BuildCriteria, NodeRevision, NodeType
+from dj.sql.parsing.ast2 import CompileContext
 from dj.sql.parsing.backends.antlr4 import ast, parse
 
 
@@ -280,7 +281,7 @@ def build_node(  # pylint: disable=too-many-arguments
             return ast.Query(select=select)  # pragma: no cover
 
     if node.query:
-        query = parse(node.query, dialect)
+        query = parse(node.query)
     else:
         query = build_source_node_query(node)
 
@@ -318,6 +319,7 @@ def build_ast(  # pylint: disable=too-many-arguments
     """
     Determines the optimal way to build the query AST and does so
     """
-    query.compile(session)
+    context = CompileContext(session=session, exception=DJException(), query=query)
+    query.compile(context)
     query.build(session, build_criteria)
     return query

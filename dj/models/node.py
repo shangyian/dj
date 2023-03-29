@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from functools import partial
 from typing import Dict, List, Optional
 
-from pydantic import BaseModel, Extra
+from pydantic import BaseModel, Extra, root_validator
 from pydantic import Field as PydanticField
 from sqlalchemy import JSON, DateTime, String
 from sqlalchemy.sql.schema import Column as SqlaColumn
@@ -628,6 +628,14 @@ class ColumnOutput(SQLModel):
     name: str
     type: ColumnType
     attributes: List[AttributeOutput]
+
+    class Config:
+        validate_assignment = True
+
+    @root_validator()
+    def type_string(cls, values):
+        values["type"] = str(values.get("type"))
+        return values
 
 
 class TableOutput(SQLModel):

@@ -3,6 +3,7 @@ Models for columns.
 """
 from typing import TYPE_CHECKING, List, Optional, Tuple, TypedDict
 
+from pydantic import root_validator
 from sqlalchemy import TypeDecorator, String
 from sqlalchemy.sql.schema import Column as SqlaColumn
 from sqlmodel import Field, Relationship
@@ -70,6 +71,11 @@ class Column(BaseSQLModel, table=True):  # type: ignore
 
     class Config:
         arbitrary_types_allowed = True
+
+    @root_validator
+    def type_string(cls, values):
+        values["type"] = str(values.get("type"))
+        return values
 
 
 class ColumnAttributeInput(BaseSQLModel):

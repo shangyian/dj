@@ -27,7 +27,7 @@ from dj.models.node import (
     NodeType,
 )
 from dj.sql.parsing import ast2 as ast
-from dj.sql.parsing.backends.antlr4 import parse
+from dj.sql.parsing.backends.antlr4 import parse, SqlSyntaxError
 from dj.sql.parsing.backends.exceptions import DJParseException
 
 
@@ -254,7 +254,7 @@ def validate_node_data(
         exc = DJException()
         ctx = ast.CompileContext(session=session, query=query_ast, exception=exc)
         dependencies_map, missing_parents_map = query_ast.extract_dependencies(ctx)
-    except ValueError as exc:
+    except (ValueError, SqlSyntaxError) as exc:
         raise DJException(message=str(exc)) from exc
 
     # Only raise on missing parents if the node mode is set to published
@@ -279,7 +279,7 @@ def validate_node_data(
     type_inference_failed_columns = []
     for col in query_ast.select.projection:
         try:
-            column_type = get_type_of_expression(col)
+            column_type = col.type
             validated_node.columns.append(
                 Column(name=col.alias_or_name.name, type=column_type),  # type: ignore
             )
