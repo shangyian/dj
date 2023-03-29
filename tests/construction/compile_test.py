@@ -17,6 +17,7 @@ from dj.models.node import Node
 from dj.sql.parsing import ast2 as ast
 from dj.sql.parsing.ast2 import CompileContext
 from dj.sql.parsing.backends.antlr4 import parse
+from dj.sql.parsing.types import TimestampType, IntegerType, FloatType
 from dj.typing import ColumnType
 
 
@@ -97,9 +98,9 @@ def test_raising_on_extract_from_node_with_no_query(construction_session: Sessio
     node_foo = NodeRevision(
         name="foo",
         columns=[
-            Column(name="ds", type=ColumnType.TIMESTAMP),
-            Column(name="user_id", type=ColumnType.INT),
-            Column(name="foo", type=ColumnType.FLOAT),
+            Column(name="ds", type=TimestampType()),
+            Column(name="user_id", type=IntegerType()),
+            Column(name="foo", type=FloatType()),
         ],
     )
     with pytest.raises(DJException) as exc_info:

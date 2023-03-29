@@ -26,6 +26,7 @@ class Function(abc.ABC):  # pylint: disable=too-few-public-methods
         """
         raise NotImplementedError("Subclass MUST implement infer_type")
 
+
 class Avg(Function):
     """
     Computes the average of the input column or expression.

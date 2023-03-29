@@ -7,7 +7,7 @@ from decimal import Decimal
 from functools import singledispatch
 from typing import Callable, Dict
 
-from dj.sql.functions import function_registry
+from dj.sql.functions2 import function_registry
 from dj.sql.parsing import ast2 as ast
 from dj.sql.parsing.backends.exceptions import DJParseException
 from dj.typing import ColumnType
