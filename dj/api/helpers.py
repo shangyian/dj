@@ -280,7 +280,6 @@ def validate_node_data(
     for col in query_ast.select.projection:
         try:
             column_type = get_type_of_expression(col)
-            column_name = col.alias_or_name
             validated_node.columns.append(
                 Column(name=col.alias_or_name.name, type=column_type),  # type: ignore
             )
