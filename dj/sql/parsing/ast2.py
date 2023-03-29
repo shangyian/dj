@@ -1620,7 +1620,7 @@ class FunctionTable(FunctionTableExpression):
         dj_func = table_function_registry[name]
         return dj_func.infer_type(
             *(arg.type for arg in self.args)
-         
+        )
 
 
 @dataclass(eq=False)
@@ -1633,6 +1633,7 @@ class LateralView(Expression):
     func: FunctionTableExpression = field(default_factory=FunctionTableExpression)
     table: TableExpression = field(default_factory=TableExpression)
     columns: List[Column] = field(default_factory=list)
+    as_: Optional[bool] = None
 
     def __str__(self) -> str:
         parts = ["LATERAL VIEW"]
@@ -1641,7 +1642,8 @@ class LateralView(Expression):
         parts.append(f" {self.func}")
         parts.append(f" {self.table}")
         if self.columns:
-            parts.append(f" AS {', '.join(str(col) for col in self.columns)}")
+            as_ = " AS " if self.as_ else " "
+            parts.append(f"{as_}{', '.join(str(col) for col in self.columns)}")
         return "".join(parts)
 
 
