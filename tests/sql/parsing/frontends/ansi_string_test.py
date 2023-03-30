@@ -3,7 +3,7 @@ tests for DJ ast representation as sql string
 """
 import pytest
 
-from dj.sql.parsing import parse
+from dj.sql.parsing.backends.antlr4 import parse
 from dj.sql.parsing.ast import (
     Alias,
     Column,
