@@ -1,6 +1,7 @@
 # pylint: disable=R0401,C0302
 # pylint: skip-file
 # mypy: ignore-errors
+import collections
 import decimal
 from abc import ABC, abstractmethod
 from copy import deepcopy
@@ -24,7 +25,6 @@ from typing import (
 
 from sqlmodel import Session
 
-import dj
 from dj.models.node import NodeRevision as DJNode, NodeRevision, NodeType
 from dj.models.node import NodeType as DJNodeType
 from dj.sql.functions import function_registry, table_function_registry
@@ -654,6 +654,54 @@ class Column(Aliasable, Named, Expression):
     def is_compiled(self):
         return self.table is not None and self.expression is not None
 
+    def find_table_sources(self, initial: List["TableExpression"]) -> List["TableExpression"]:
+        """
+        Find all tables that this column could have originated from.
+        """
+        namespace = (
+            self.name.namespace.identifier(False) if self.name.namespace else ""
+        )  # a.x -> a
+        found = []
+
+        # Go through TableExpressions directly on the AST first and collect all
+        # possible origins for this column. There may be more than one if the column
+        # is not namespaced.
+        for table in initial:
+            for col in table.columns:
+                if isinstance(col, (Aliasable, Named)):
+                    if self.name.name == col.alias_or_name.identifier(False):
+                        if not namespace or namespace == str(table.alias_or_name):
+                            found.append(table)
+        if found:
+            return found
+
+        # If nothing was found in the initial AST, traverse through dimensions graph
+        # to find another table in DJ that could be its origin
+        to_process = collections.deque(initial)
+        while to_process:
+            current_table = to_process.pop()
+            for col in current_table.columns:
+                if isinstance(col, (Aliasable, Named)):
+                    if self.name.name == col.alias_or_name.identifier(False):
+                        if not namespace or namespace == str(current_table.alias_or_name):
+                            found.append(current_table)
+
+            # If the table has a DJ node, check to see if the DJ node has dimensions,
+            # which would link us to new nodes to search for this column in
+            if isinstance(current_table, Table) and current_table.dj_node:
+                for dj_col in current_table.dj_node.columns:
+                    if dj_col.dimension:
+                        new_table = Table(
+                            name=Name(dj_col.dimension.name),
+                            _dj_node=dj_col.dimension.current,
+                        )
+                        new_table._columns = [
+                            Column(name=Name(col.name), _table=new_table)
+                            for col in dj_col.dimension.current.columns
+                        ]
+                        to_process.append(new_table)
+        return found
+
     def compile(self, ctx: CompileContext):
         """
         Compile a column.
@@ -663,9 +711,6 @@ class Column(Aliasable, Named, Expression):
         if self.is_compiled():
             return
 
-        namespace = (
-            self.name.namespace.identifier(False) if self.name.namespace else ""
-        )  # a.x -> a
         query = self.get_nearest_parent_of_type(Query)  # the column's parent query
         # things we could check here:
         # - correlated queries: we could break out the check for tables into queries above and below the column
@@ -673,26 +718,9 @@ class Column(Aliasable, Named, Expression):
         # - a column without a namespace can still be unambiguous even if multiple tables have a column of that name in the overall
         #   and we would need to check the immediate FROM only first. Currently, this is not done.
 
-        def find_table_sources(node: Node) -> bool:
-            """
-            Find the tables that this column could come from.
-            """
-            if isinstance(node, TableExpression) and node.in_from():
-                if node is not query:
-                    # if the column has a namespace, the table identifier needs to match that
-                    if namespace and namespace != node.alias_or_name.identifier(False):
-                        return False
-                    if not node.columns:
-                        return False
-                    for col in node.columns:
-                        if isinstance(col, (Aliasable, Named)):
-                            if self.name.name == col.alias_or_name.identifier(False):
-                                return True
-            return False
-
         direct_tables = [relation.primary for relation in query.select.from_.relations]
         joins = [ext.right for relation in query.select.from_.relations for ext in relation.extensions]
-        found_sources = [node for node in direct_tables + joins if find_table_sources(node)]
+        found_sources = self.find_table_sources(direct_tables + joins)
 
         if len(found_sources) < 1:
             ctx.exception.errors.append(
@@ -1865,7 +1893,7 @@ class Query(TableExpression):
             self.select.from_.compile(ctx)
             for idx, relation in enumerate(self.select.from_.relations):
                 if not relation.primary.alias:
-                    relation.primary.set_alias(f"sbq{idx}")
+                    relation.primary.set_alias(Name(f"sbq{idx}"))
 
         self.select.compile(ctx)
         self._columns = self.select.projection[:]
