@@ -1955,13 +1955,6 @@ class Query(TableExpression):
                 danglers[name] = danglers.get(name, [])
                 danglers[name].append(table)
 
-        for col in self.find_all(Column):
-            if isinstance(col.table, Table):
-                if node := col.table.dj_node:  # pragma: no cover
-                    if node.type == NodeType.DIMENSION:
-                        deps[node] = deps.get(node, [])
-                        deps[node].append(col.table)
-
         return deps, danglers
 
     @property
