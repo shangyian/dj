@@ -7,6 +7,7 @@ from abc import ABC, abstractmethod
 from copy import deepcopy
 from dataclasses import dataclass, field, fields
 from enum import Enum
+from functools import reduce
 from itertools import chain, zip_longest
 from typing import (
     Any,
@@ -20,17 +21,17 @@ from typing import (
     Type,
     TypeVar,
     Union,
-    cast, Dict,
+    cast, Dict, DefaultDict,
 )
 
 from sqlmodel import Session
 
-from dj.models.node import NodeRevision as DJNode, NodeRevision, NodeType
+from dj.models.node import NodeRevision as DJNode, NodeRevision, NodeType, BuildCriteria
 from dj.models.node import NodeType as DJNodeType
 from dj.sql.functions import function_registry, table_function_registry
 from dj.sql.parsing.backends.exceptions import DJParseException
 from dj.sql.parsing.types import ColumnType, BooleanType, DecimalType, DoubleType, FloatType, LongType, IntegerType, \
-    StringType, MapType, NullType
+    StringType, MapType, NullType, WildcardType
 from dj.construction.utils import get_dj_node
 from dj.errors import DJError, ErrorCode, DJException, DJErrorException
 
@@ -525,7 +526,7 @@ class Name(Node):
     namespace: Optional["Name"] = None
 
     def __str__(self) -> str:
-        return self.identifier()
+        return self.identifier(False)
 
     def identifier(self, quotes: bool = True) -> str:
         quote_style = "" if not quotes else self.quote_style
@@ -651,13 +652,32 @@ class Column(Aliasable, Named, Expression):
         """
         return self._table
 
-    def is_compiled(self):
-        return self.table is not None and self.expression is not None
+    @property
+    def is_api_column(self) -> bool:
+        """
+        Is the column added from the api?
+        """
+        return self._api_column
 
-    def find_table_sources(self, initial: List["TableExpression"]) -> List["TableExpression"]:
+    def set_api_column(self, api_column: bool = False) -> "Column":
+        """
+        Set the api column flag
+        """
+        self._api_column = api_column
+        return self
+
+    def is_compiled(self):
+        return self.table is not None  # and self.expression is not None
+
+    def find_table_sources(self) -> List["TableExpression"]:
         """
         Find all tables that this column could have originated from.
         """
+        query = self.get_nearest_parent_of_type(Query)  # the column's parent query
+        from_tables = [relation.primary for relation in query.select.from_.relations]
+        join_tables = [ext.right for relation in query.select.from_.relations for ext in relation.extensions]
+        direct_tables = from_tables + join_tables
+
         namespace = (
             self.name.namespace.identifier(False) if self.name.namespace else ""
         )  # a.x -> a
@@ -666,18 +686,19 @@ class Column(Aliasable, Named, Expression):
         # Go through TableExpressions directly on the AST first and collect all
         # possible origins for this column. There may be more than one if the column
         # is not namespaced.
-        for table in initial:
+        for table in direct_tables:
             for col in table.columns:
                 if isinstance(col, (Aliasable, Named)):
                     if self.name.name == col.alias_or_name.identifier(False):
-                        if not namespace or namespace == str(table.alias_or_name):
+                        if not namespace or namespace == str(table.alias_or_name)\
+                                or table.name.identifier(False) == namespace:
                             found.append(table)
         if found:
             return found
 
         # If nothing was found in the initial AST, traverse through dimensions graph
         # to find another table in DJ that could be its origin
-        to_process = collections.deque(initial)
+        to_process = collections.deque(direct_tables)
         while to_process:
             current_table = to_process.pop()
             for col in current_table.columns:
@@ -706,22 +727,17 @@ class Column(Aliasable, Named, Expression):
         """
         Compile a column.
         Determines the table from which a column is from.
-        """
 
-        if self.is_compiled():
-            return
-
-        query = self.get_nearest_parent_of_type(Query)  # the column's parent query
+        TODO
         # things we could check here:
         # - correlated queries: we could break out the check for tables into queries above and below the column
         # - correlated subqueries must appear in a from clause
         # - a column without a namespace can still be unambiguous even if multiple tables have a column of that name in the overall
         #   and we would need to check the immediate FROM only first. Currently, this is not done.
-
-        direct_tables = [relation.primary for relation in query.select.from_.relations]
-        joins = [ext.right for relation in query.select.from_.relations for ext in relation.extensions]
-        found_sources = self.find_table_sources(direct_tables + joins)
-
+        """
+        if self.is_compiled():
+            return
+        found_sources = self.find_table_sources()
         if len(found_sources) < 1:
             ctx.exception.errors.append(
                 DJError(
@@ -743,12 +759,13 @@ class Column(Aliasable, Named, Expression):
         source_table = cast(TableExpression, found_sources[0])
         source_table.add_ref_column(column=self)
         self.add_table(source_table)
+        # self.add_expression(source_table)
 
     def __str__(self) -> str:
         as_ = " AS " if self.as_ else " "
         alias = "" if not self.alias else f"{as_}{self.alias}"
         if self.table is not None:
-            ret = f"{self.table}.{self.name.quote_style}{self.name}{self.name.quote_style}"
+            ret = f"{self.table}.{self.name.quote_style}{self.name.name}{self.name.quote_style}"
         else:
             ret = str(self.name)
         if self.parenthesized:
@@ -785,7 +802,7 @@ class Wildcard(Named, Expression):
 
     @property
     def type(self) -> ColumnType:
-        return None
+        return WildcardType()
 
 
 @dataclass(eq=False)
@@ -801,7 +818,7 @@ class TableExpression(Aliasable, Expression):
     _ref_columns: Set[Column] = field(init=False, repr=False, default_factory=set)
 
     @property
-    def columns(self) -> Set[Column]:
+    def columns(self) -> List[Expression]:
         """
         Return the columns referenced from this table
         """
@@ -822,9 +839,7 @@ class TableExpression(Aliasable, Expression):
         """
         if not self.is_compiled():
             return False
-            # raise DJParseException(
-            #     "Attempted to add ref column while table expression is not compiled."
-            # )
+
         for col in self._columns:
             if isinstance(col, (Aliasable, Named)):
                 if column.name.name == col.alias_or_name.identifier(False):
@@ -846,10 +861,6 @@ class TableExpression(Aliasable, Expression):
                 Select
             ) is self.get_nearest_parent_of_type(Select)
         return False
-
-
-# def convert_type(dj_storage_type: dj.typing.ColumnType, parsing_type: ColumnType):
-#     str(dj_storage_type)
 
 
 @dataclass(eq=False)
@@ -891,7 +902,7 @@ class Table(TableExpression, Named):
             dj_node = get_dj_node(
                 ctx.session,
                 ctx.exception,
-                self.identifier(),
+                self.identifier(quotes=False),
                 {DJNodeType.SOURCE, DJNodeType.TRANSFORM, DJNodeType.DIMENSION},
             )
             self.set_dj_node(dj_node)
@@ -971,6 +982,7 @@ class BinaryOpKind(DJEnum):
     Is = "IS"
     Eq = "="
     NotEq = "<>"
+    NotEquals = "!="
     Gt = ">"
     Lt = "<"
     GtEq = ">="
@@ -995,6 +1007,40 @@ class BinaryOp(Operation):
     op: BinaryOpKind
     left: Expression
     right: Expression
+
+    @classmethod
+    def And(  # pylint: disable=invalid-name,keyword-arg-before-vararg
+        cls,
+        left: Expression,
+        right: Optional[Expression] = None,
+        *rest: Expression,
+    ) -> Union["BinaryOp", Expression]:
+        """
+        Create a BinaryOp of kind BinaryOpKind.Eq rolling up all expressions
+        """
+        if right is None:  # pragma: no cover
+            return left
+        return reduce(
+            lambda left, right: BinaryOp(
+                BinaryOpKind.And,
+                left,
+                right,
+            ),
+            (left, right, *rest),
+        )
+
+    @classmethod
+    def Eq(  # pylint: disable=invalid-name
+        cls,
+        left: Expression,
+        right: Optional[Expression],
+    ) -> Union["BinaryOp", Expression]:
+        """
+        Create a BinaryOp of kind BinaryOpKind.Eq
+        """
+        if right is None:  # pragma: no cover
+            return left
+        return BinaryOp(BinaryOpKind.Eq, left, right)
 
     def __str__(self) -> str:
         ret = f"{self.left} {self.op.value} {self.right}"
@@ -1039,6 +1085,7 @@ class BinaryOp(Operation):
             BinaryOpKind.Is: lambda left, right: BooleanType(),
             BinaryOpKind.Eq: lambda left, right: BooleanType(),
             BinaryOpKind.NotEq: lambda left, right: BooleanType(),
+            BinaryOpKind.NotEquals: lambda left, right: BooleanType(),
             BinaryOpKind.Gt: lambda left, right: BooleanType(),
             BinaryOpKind.Lt: lambda left, right: BooleanType(),
             BinaryOpKind.GtEq: lambda left, right: BooleanType(),
@@ -1235,7 +1282,7 @@ class String(Value):
     value: str
 
     def __str__(self) -> str:
-        return f"'{self.value}'"
+        return self.value
 
     @property
     def type(self) -> ColumnType:
@@ -1762,6 +1809,17 @@ class SelectExpression(Aliasable, Expression):
     where: Optional[Expression] = None
     set_op: List[SetOp] = field(default_factory=list)
 
+    def add_aliases_to_unnamed_columns(self) -> None:
+        """
+        Add an alias to any unnamed columns in the projection (`_col<n>`)
+        """
+        for i, expression in enumerate(self.projection):
+            if not isinstance(expression, (Column, Alias)):
+                name = f"col{i}"
+                aliased = Alias(Name(name), child=expression)
+                # only replace those that are identical in memory
+                self.replace(expression, aliased, lambda a, b: id(a) == id(b))
+
 
 class Select(SelectExpression):
     """
@@ -1842,7 +1900,6 @@ class Select(SelectExpression):
 
         super().compile(ctx)
 
-
 @dataclass(eq=False)
 class SortItem(Node):
     """
@@ -1891,14 +1948,14 @@ class Query(TableExpression):
             cte.compile(ctx)
         if self.select.from_:
             self.select.from_.compile(ctx)
-            for idx, relation in enumerate(self.select.from_.relations):
-                if not relation.primary.alias:
-                    relation.primary.set_alias(Name(f"sbq{idx}"))
+            # for idx, relation in enumerate(self.select.from_.relations):
+            #     if not relation.primary.alias:
+            #         relation.primary.set_alias(Name(f"sbq{idx}"))
 
         self.select.compile(ctx)
         self._columns = self.select.projection[:]
 
-    def bake_ctes(self):
+    def bake_ctes(self) -> "Query":
         """
         Add ctes into the select and return the select
 
@@ -1908,6 +1965,7 @@ class Query(TableExpression):
         for cte in self.ctes:
             table = Table(name=cte.alias_or_name)
             self.replace(table, cte)
+        return self
 
     def __str__(self) -> str:
         is_cte = self.parent is not None and self.parent_key == "ctes"
@@ -1960,3 +2018,17 @@ class Query(TableExpression):
     @property
     def type(self) -> ColumnType:
         return self.select.type
+
+    def build(  # pylint: disable=R0913,C0415
+        self,
+        session: Session,
+        build_criteria: Optional[BuildCriteria] = None,
+    ):
+        """
+        Transforms a query ast by replacing dj node references with their asts
+        """
+        from dj.construction.build import _build_select_ast
+
+        self.bake_ctes()  # pylint: disable=W0212
+        _build_select_ast(session, self.select, build_criteria)
+        self.select.add_aliases_to_unnamed_columns()

@@ -72,7 +72,7 @@ def test_raise_on_invalid_infer_binary_op():
         ).type
 
     assert (
-        "Incompatible types in binary operation 'foo' % 'bar'. "
+        "Incompatible types in binary operation foo % bar. "
         "Got left string, right string."
     ) in str(exc_info.value)
 

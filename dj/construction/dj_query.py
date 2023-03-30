@@ -10,9 +10,8 @@ from dj.construction.build import build_ast
 from dj.construction.utils import amenable_name, get_dj_node, make_name
 from dj.errors import DJException
 from dj.models.node import NodeRevision, NodeType
-from dj.sql.parsing import ast
+from dj.sql.parsing.backends.antlr4 import ast, parse
 from dj.sql.parsing.backends.exceptions import DJParseException
-from dj.sql.parsing.backends.sqloxide import parse
 
 
 def try_get_dj_node(
@@ -33,7 +32,7 @@ def _resolve_metric_nodes(session, col):
     select accordingly
     """
     joins = []
-    col_name = make_name(col.namespace, col.name.name)
+    col_name = make_name(col.name)
     if metric_node := try_get_dj_node(
         session,
         col_name,
@@ -199,8 +198,8 @@ def build_dj_metric_query(  # pylint: disable=R0914,R0912
     """
     Build a dj query in SQL that may include dj metrics
     """
-    query_ast = parse(query, dialect)
-    select = query_ast.to_select()  # pylint: disable=W0212
+    query_ast = parse(query)
+    select = query_ast.select
     # we check all columns looking for metric nodes
     for col in select.find_all(ast.Column):
         _resolve_metric_nodes(session, col)

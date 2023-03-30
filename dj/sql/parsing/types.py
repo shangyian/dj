@@ -570,6 +570,22 @@ class BinaryType(PrimitiveType, Singleton):
             super().__init__("binary", "BinaryType()")
 
 
+class WildcardType(PrimitiveType, Singleton):
+    """A Wildcard datatype.
+
+    Example:
+        >>> column_foo = WildcardType()
+        >>> isinstance(column_foo, WildcardType)
+        True
+    """
+
+    def __init__(self):
+        if not self._initialized:
+            super().__init__("wildcard", "WildcardType()")
+
+
+
+
 # Define the primitive data types and their corresponding Python classes
 PRIMITIVE_TYPES: Dict[str, PrimitiveType] = {
     "boolean": BooleanType(),
