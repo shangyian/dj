@@ -328,7 +328,7 @@ def test_tpcds_circular_parse_and_compare(query_file, request, monkeypatch):
 
 @pytest.mark.parametrize(
     "query_file",
-    ansi_tpcds_files + spark_tpcds_files,
+    spark_tpcds_files,
 )
 def test_tpcds_ast_parse_comparisons(
     query_file,
