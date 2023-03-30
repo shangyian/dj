@@ -746,10 +746,10 @@ for cls in Function.__subclasses__():
     function_registry[name.upper()] = cls
     function_registry[snake_cased.upper()] = cls
 
-
+#https://spark.apache.org/docs/3.3.2/sql-ref-syntax-qry-select-tvf.html#content
 class Explode(TableFunction):
     """
-    Explode function is used to explode the specified array, 
+    The Explode function is used to explode the specified array, 
     nested array, or map column into multiple rows. 
     The explode function will generate a new row for each 
     element in the specified column. 
