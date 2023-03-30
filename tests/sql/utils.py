@@ -18,11 +18,15 @@ def query_to_string(query: Select) -> str:
     return str(query.compile(compile_kwargs={"literal_binds": True}))
 
 
-def compare_query_strings(str1, str2: str) -> bool:
+def compare_query_strings(str1: str, str2: str) -> bool:
     """
     compare two query strings
     """
-    return parse(sql(parse(str1))).compare(parse(sql(parse(str2))))
+    query1 = parse(str1)
+    query1.select.projection = sorted(query1.select.projection, key=lambda x: str(x.alias_or_name))
+    query2 = parse(str1)
+    query2.select.projection = sorted(query2.select.projection, key=lambda x: str(x.alias_or_name))
+    return query1.compare(query2)
 
 
 def read_query(name: str) -> str:

@@ -1,7 +1,7 @@
 """Functions to add to an ast DJ node queries"""
 import collections
 # pylint: disable=too-many-arguments,too-many-locals,too-many-nested-blocks,too-many-branches,R0401
-from typing import Dict, List, Optional, Union, cast, DefaultDict, Set
+from typing import Dict, List, Optional, Union, cast, DefaultDict, Set, Tuple
 
 from sqlmodel import Session
 
@@ -43,7 +43,11 @@ def _get_dim_cols_from_select(
     return dimension_columns
 
 
-def join_path(dimension_node: NodeRevision, nodes: Set[NodeRevision]):
+def join_path(
+    session: Session,
+    dimension_node: NodeRevision,
+    nodes: Set[NodeRevision]
+) -> Dict[Tuple[NodeRevision, NodeRevision], List[Column]]:
     """
     Assuming the two nodes are joinable, finds a join path between them.
     Needs all the intermediary join nodes or else it won't know how to do the join.
@@ -108,9 +112,11 @@ def join_tables_for_dimensions(
         for select in selects_map.values():
             initial_nodes = {table.dj_node for table in select.find_all(ast.Table) if table.dj_node}
             if dim_node not in initial_nodes:  # need to join dimension
-                node, paths = join_path(dim_node, initial_nodes)
-                join_info: Dict[NodeRevision, List[Column]] = paths
-                for (start_node, table_node), cols in join_info.items():
+                node, paths = join_path(session, dim_node, initial_nodes)
+                join_info: List[Tuple[NodeRevision], List[Column]] = sorted(
+                    paths.items(), key=lambda x: x[0][1].name
+                )
+                for (start_node, table_node), cols in join_info:
                     join_on = []
                     start_node_alias = amenable_name(start_node.name)
                     namespace = ast.Name(start_node.name.split(".")[:-1])

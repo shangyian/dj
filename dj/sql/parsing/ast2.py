@@ -1955,7 +1955,7 @@ class Query(TableExpression):
             #         relation.primary.set_alias(Name(f"sbq{idx}"))
 
         self.select.compile(ctx)
-        self._columns = self.select.projection[:]
+        self._columns = sorted(self.select.projection[:], key=lambda x: str(x.alias_or_name))
 
     def bake_ctes(self) -> "Query":
         """

@@ -50,7 +50,11 @@ class Column(BaseSQLModel, table=True):  # type: ignore
     type: ColumnType = Field(sa_column=SqlaColumn(ColumnTypeDecorator, nullable=False))
 
     dimension_id: Optional[int] = Field(default=None, foreign_key="node.id")
-    dimension: "Node" = Relationship()
+    dimension: "Node" = Relationship(
+        sa_relationship_kwargs={
+        "lazy": "joined",
+        }
+    )
     dimension_column: Optional[str] = None
 
     attributes: List["ColumnAttribute"] = Relationship(
