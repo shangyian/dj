@@ -1150,7 +1150,7 @@ class Null(Value):
 
     @property
     def type(self) -> ColumnType:
-        return NullType
+        return NullType()
 
 
 @dataclass(eq=False)

@@ -12,7 +12,7 @@ from dj.sql.parsing.ast2 import CompileContext
 from dj.sql.parsing.backends.exceptions import DJParseException
 from dj.sql.parsing.backends.antlr4 import parse
 from dj.sql.parsing.types import BooleanType, IntegerType, DoubleType, FloatType, TimestampType, StringType, DateType, \
-    LongType, MapType, TimeType, DecimalType
+    LongType, MapType, TimeType, DecimalType, NullType
 
 
 def test_infer_column_with_table(construction_session: Session):
@@ -295,8 +295,8 @@ def test_infer_types_complicated(construction_session: Session):
         # TimestampType(),
         TimestampType(),
         IntegerType(),
-        None,
-        None,
+        NullType(),
+        NullType(),
         IntegerType(),
         IntegerType(),
         IntegerType(),
