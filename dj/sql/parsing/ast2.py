@@ -978,7 +978,9 @@ class BinaryOpKind(DJEnum):
     """
 
     And = "AND"
+    LogicalAnd = "&&"
     Or = "OR"
+    LogicalOr = "||"
     Is = "IS"
     Eq = "="
     NotEq = "<>"
