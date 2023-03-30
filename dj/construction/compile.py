@@ -416,4 +416,6 @@ def compile_node(
     query_ast = parse(node.query)
     context = CompileContext(session=session, query=query_ast, exception=DJException())
     query_ast.compile(context)
+    if context.exception.errors:
+        raise context.exception
     return query_ast

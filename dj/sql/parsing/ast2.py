@@ -1799,6 +1799,21 @@ class Select(SelectExpression):
             )
         return self.projection[0].type
 
+    def compile(self, ctx: CompileContext):
+        if not self.group_by and self.having:
+            ctx.exception.errors.append(
+                DJError(
+                    code=ErrorCode.INVALID_SQL_QUERY,
+                    message=(
+                        "HAVING without a GROUP BY is not allowed. "
+                        "Did you want to use a WHERE clause instead?"
+                    ),
+                    context=str(self),
+                ),
+            )
+
+        super().compile(ctx)
+
 
 @dataclass(eq=False)
 class SortItem(Node):
@@ -1852,8 +1867,7 @@ class Query(TableExpression):
                 if not relation.primary.alias:
                     relation.primary.set_alias(f"sbq{idx}")
 
-        for exp in self.select.projection:
-            exp.compile(ctx)
+        self.select.compile(ctx)
         self._columns = self.select.projection[:]
 
     def bake_ctes(self):

@@ -203,7 +203,8 @@ def test_raise_on_having_without_a_groupby(construction_session: Session):
     )
 
     with pytest.raises(DJException) as exc_info:
-        compile_node(session=construction_session, node=node_a_rev)
+        query = compile_node(session=construction_session, node=node_a_rev)
+        query
 
     assert "HAVING without a GROUP BY is not allowed" in str(exc_info.value)
 
