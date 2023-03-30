@@ -765,7 +765,7 @@ class Column(Aliasable, Named, Expression):
         as_ = " AS " if self.as_ else " "
         alias = "" if not self.alias else f"{as_}{self.alias}"
         if self.table is not None:
-            ret = f"{self.table}.{self.name.quote_style}{self.name.name}{self.name.quote_style}"
+            ret = f"{self.table.alias_or_name.name}.{self.name.quote_style}{self.name.name}{self.name.quote_style}"
         else:
             ret = str(self.name)
         if self.parenthesized:

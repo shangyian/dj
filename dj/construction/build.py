@@ -85,14 +85,19 @@ def join_path(dimension_node: NodeRevision, nodes: Set[NodeRevision]):
     return None
 
 
-def _build_dimensions_on_select(
+def join_tables_for_dimensions(
     session: Session,
     dimension_columns: Dict[NodeRevision, List[ast.Column]],
     tables: DefaultDict[NodeRevision, List[ast.Table]],
     build_criteria: Optional[BuildCriteria] = None,
 ):
     """
-    Add all filter and agg dimensions to a select
+    Joins the tables necessary for a set of filter and group by dimensions
+    onto the select expression.
+    In some cases, the necessary tables will already be on the select and
+    no additional joins will be needed. However, if the tables are not in
+    the select, it will traverse through available linked tables (via dimension
+    nodes) and join them in.
     """
 
     for dim_node, dim_cols in dimension_columns.items():
@@ -151,10 +156,11 @@ def _build_dimensions_on_select(
                         ):  # no materialization - recurse to build dimension first  # pragma: no cover
                             join_query = parse(cast(str, table_node.query))
                             join_table = build_ast(session, join_query)
-
+                            join_table.parenthesized = True
                         join_ast = ast.Alias(  # type: ignore
                             ast.Name(table_node_alias),
                             child=join_table,
+                            as_=True,
                         )
                     if join_on:  # table had stuff to join
                         select.from_.relations[-1].extensions.append(  # pragma: no cover
@@ -197,7 +203,7 @@ def _build_tables_on_select(
 
 def dimension_columns_mapping(select: ast.SelectExpression) -> Dict[NodeRevision, List[ast.Column]]:
     """
-    Extract all dimension nodes referenced as columns
+    Extract all dimension nodes referenced by columns
     """
     dimension_nodes_to_columns: Dict[NodeRevision, List[ast.Column]] = {}
 
@@ -218,14 +224,14 @@ def _build_select_ast(
 ):
     """
     Transforms a select ast by replacing dj node references with their asts
+    # get all columns from filters + group bys
+    # some of them can be sourced directly from tables on the select, others cannot
+    # for the ones that cannot be sourced from the select, attempt to join them via dimension links
     """
-    # get all dimensions from filters + group bys
-    #
-    dimension_columns = dimension_columns_mapping(select)
+    # Get all tables directly on the select that have an attached DJ node
     tables = _get_tables_from_select(select)
-
-    _build_dimensions_on_select(session, dimension_columns, tables, build_criteria)
-
+    dimension_columns = dimension_columns_mapping(select)
+    join_tables_for_dimensions(session, dimension_columns, tables, build_criteria)
     _build_tables_on_select(session, select, tables, build_criteria)
 
 
