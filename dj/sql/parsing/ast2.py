@@ -77,6 +77,8 @@ class Node(ABC):
     parent: Optional["Node"] = None
     parent_key: Optional[str] = None
 
+    _is_compiled: bool = False
+
     def __post_init__(self):
         self.add_self_as_parent()
 
@@ -405,14 +407,18 @@ class Node(ABC):
 
     def compile(self, ctx: CompileContext):
         """
-        Compile a DJ Node
+        Compile a DJ Node. By default, we call compile on all immediate children of this node.
         """
+        for child in self.children:
+            if not child.is_compiled():
+                child.compile(ctx)
+                child._is_compiled = True
 
     def is_compiled(self) -> bool:
         """
         Checks whether a DJ AST Node is compiled
         """
-        return True
+        return self._is_compiled
 
 
 class DJEnum(Enum):
@@ -468,9 +474,6 @@ class Alias(Aliasable, Generic[AliasedType]):
 
     def is_aggregation(self) -> bool:
         return isinstance(self.child, Expression) and self.child.is_aggregation()
-
-    def compile(self, ctx: CompileContext):
-        self.child.compile(ctx)
 
     @property
     def type(self) -> ColumnType:
@@ -854,9 +857,6 @@ class Table(TableExpression, Named):
         return super().is_compiled() and (self.dj_node is not None)
 
     def compile(self, ctx: CompileContext):
-        if self.is_compiled():
-            return
-
         # things we can validate here:
         # - if the node is a dimension in a groupby, is it joinable?
         try:
@@ -973,10 +973,6 @@ class BinaryOp(Operation):
         if self.parenthesized:
             return f"({ret})"
         return ret
-
-    def compile(self, ctx: CompileContext):
-        self.left.compile(ctx)
-        self.right.compile(ctx)
 
     @property
     def type(self) -> ColumnType:
@@ -1119,10 +1115,6 @@ class Function(Named, Operation):
 
     def is_aggregation(self) -> bool:
         return function_registry[self.name.name.upper()].is_aggregation
-
-    def compile(self, ctx: CompileContext):
-        for expr in self.args:
-            expr.compile(ctx)
 
     @property
     def type(self) -> ColumnType:
@@ -1308,11 +1300,6 @@ class Between(Predicate):
             between = f"({between})"
         return between
 
-    def compile(self, ctx: CompileContext):
-        self.expr.compile(ctx)
-        self.low.compile(ctx)
-        self.high.compile(ctx)
-
     @property
     def type(self) -> ColumnType:
         expr_type = self.expr.type
@@ -1381,9 +1368,6 @@ class Like(Predicate):
         quantifier = f"{self.quantifier} " if self.quantifier else ""
         like_type = "LIKE" if self.case_sensitive else "ILIKE"
         return f"{not_}{self.expr} {like_type} {quantifier}{pattern}{escape_char}"
-
-    def compile(self, ctx: CompileContext):
-        self.expr.compile(ctx)
 
     @property
     def type(self) -> ColumnType:
@@ -1480,18 +1464,6 @@ class Case(Expression):
             self.else_result.is_aggregation() if self.else_result else True
         )
 
-    def compile(self, ctx: CompileContext):
-        if self.expr:
-            self.expr.compile(ctx)
-        for cond in self.conditions:
-            cond.compile(ctx)
-        if self.else_result:
-            self.else_result.compile(ctx)
-        if self.operand:
-            self.operand.compile(ctx)
-        for result in self.results:
-            result.compile(ctx)
-
     @property
     def type(self) -> ColumnType:
         result_types = [
@@ -1519,9 +1491,6 @@ class Subscript(Expression):
 
     def __str__(self) -> str:
         return f"{self.expr}[{self.index}]"
-
-    def compile(self, ctx: CompileContext):
-        self.expr.compile(ctx)
 
     @property
     def type(self) -> ColumnType:
@@ -1588,10 +1557,6 @@ class Join(Node):
         if self.criteria:
             parts.append(f" {self.criteria}")
         return "".join(parts)
-
-    def compile(self, ctx: CompileContext):
-        # TODO validate join conditions
-        self.right.compile(ctx)
 
 
 @dataclass(eq=False)
@@ -1663,11 +1628,6 @@ class Relation(Node):
             extensions = ""
         return f"{self.primary}{extensions}"
 
-    def compile(self, ctx: CompileContext):
-        self.primary.compile(ctx)
-        for ext in self.extensions:
-            ext.compile(ctx)
-
 
 @dataclass(eq=False)
 class From(Node):
@@ -1684,10 +1644,6 @@ class From(Node):
         for view in self.lateral_views:
             parts.append(f"\n{view}")
         return "".join(parts)
-
-    def compile(self, ctx: CompileContext):
-        for relation in self.relations:
-            relation.compile(ctx)
 
 
 @dataclass(eq=False)
@@ -1777,13 +1733,6 @@ class SelectExpression(Aliasable, Expression):
     having: Optional[Expression] = None
     where: Optional[Expression] = None
     set_op: List[SetOp] = field(default_factory=list)
-
-    def compile(self, ctx: CompileContext):
-        """
-        Compile a set operation
-        """
-        for expr in self.projection:
-            expr.compile(ctx)
 
 
 class Select(SelectExpression):
@@ -1895,8 +1844,6 @@ class Query(TableExpression):
     organization: Optional[Organization] = None
 
     def compile(self, ctx: CompileContext):
-        if self.is_compiled():
-            return
         for cte in self.ctes:
             cte.compile(ctx)
         if self.select.from_:
@@ -1905,8 +1852,8 @@ class Query(TableExpression):
                 if not relation.primary.alias:
                     relation.primary.set_alias(f"sbq{idx}")
 
-        for projection in self.select.projection:
-            projection.compile(ctx)
+        for exp in self.select.projection:
+            exp.compile(ctx)
         self._columns = self.select.projection[:]
 
     def bake_ctes(self):

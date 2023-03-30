@@ -125,9 +125,9 @@ class Coalesce(Function):
                 ],
             )
         for type_ in args:
-            if type_:
+            if type_ != ct.NullType():
                 return type_
-        return None
+        return ct.NullType()
 
 
 class CurrentDate(Function):
