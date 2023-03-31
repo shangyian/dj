@@ -504,7 +504,7 @@ def _(ctx: sbp.NamedExpressionContext):
     if alias := ctx.name:
         return expr.set_alias(visit(alias))
 
-    if col_names := ctx.identifierList:
+    if col_names := ctx.identifierList():
         if not isinstance(expr, ast.TableExpression):
             raise SqlSyntaxError(f"{ctx.start.line}:{ctx.start.column} Cannot use an identifier"
                                  "list as an alias on a non-Table Expression.")
