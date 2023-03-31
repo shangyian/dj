@@ -980,7 +980,6 @@ class BinaryOpKind(DJEnum):
     Plus = "+"
     Minus = "-"
     Modulo = "%"
-    Like = "LIKE"
 
 
 @dataclass(eq=False)
@@ -1644,16 +1643,35 @@ class FunctionTable(FunctionTableExpression):
 
     def __str__(self) -> str:
         alias = f" AS {self.alias}" if self.alias else ""
-        cols = f"({', '.join(str(col) for col in self.column_list)})"
-        return f"{self.name}{alias}{cols}"
+        cols = f"({', '.join(str(col) for col in self.column_list)})" if self.column_list else ""
+        args = f"({', '.join(str(col) for col in self.args)})" if self.args else ""
+        return f"{self.name}{args}{alias}{cols}"
 
     @property
     def type(self) -> Union[List[ColumnType], ColumnType]:
+        return self._type()
+    
+    def set_alias(self: TNode, alias: List[Column]) -> TNode:
+        self.column_list = alias
+        return self
+    
+    def _type(self, ctx: Optional[CompileContext]=None) -> Union[List[ColumnType], ColumnType]:
         name = self.name.name.upper()
         dj_func = table_function_registry[name]
-        return dj_func.infer_type(
-            *(arg.type for arg in self.args)
-        )
+        arg_types = []
+        for arg in self.args:
+            if ctx: arg.compile(ctx)
+            arg_types.append(arg.type)
+        return dj_func.infer_type(*arg_types)
+        
+    def compile(self, ctx):
+        if self.is_compiled():
+            return
+        #TODO: set self._columns
+        # if isinstance(self.parent, LateralView):
+        #     types = self._type(ctx)
+        #     if self.
+        
 
 
 @dataclass(eq=False)
@@ -1664,16 +1682,6 @@ class LateralView(Node):
 
     outer: bool = False
     func: FunctionTableExpression = field(default_factory=FunctionTableExpression)
-    table: TableExpression = field(default_factory=TableExpression)
-    columns: List[Column] = field(default_factory=list)
-    as_: Optional[bool] = None
-    
-    def set_as(self, as_: bool)->"LateralView":
-        """
-        Sets whether the lateral view is using AS
-        """
-        self.as_=as_
-        return self
         
     def __str__(self) -> str:
         parts = ["LATERAL VIEW"]

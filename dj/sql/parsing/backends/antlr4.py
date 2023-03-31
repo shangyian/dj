@@ -419,7 +419,6 @@ def _(ctx: sbp.QueryPrimaryContext):
 def _(ctx: sbp.RegularQuerySpecificationContext):
     quantifier, projection = visit(ctx.selectClause())
     from_ = visit(ctx.fromClause()) if ctx.fromClause() else None
-    import pdb; pdb.set_trace()
     laterals = visit(ctx.lateralView())
     group_by = visit(ctx.aggregationClause()) if ctx.aggregationClause() else []
     where = None
@@ -504,6 +503,14 @@ def _(ctx: sbp.NamedExpressionContext):
     expr = visit(ctx.expression())
     if alias := ctx.name:
         return expr.set_alias(visit(alias))
+
+    if col_names := ctx.identifierList:
+        if not isinstance(expr, ast.TableExpression):
+            raise SqlSyntaxError(f"{ctx.start.line}:{ctx.start.column} Cannot use an identifier"
+                                 "list as an alias on a non-Table Expression.")
+        expr.column_list = [ast.Column(name) for name in visit(col_names)]
+    if ctx.AS():
+        expr.set_as(True)
     return expr
 
 
@@ -662,9 +669,10 @@ def _(ctx: sbp.LateralViewContext):
     func_name = visit(ctx.qualifiedName())
     func_args = visit(ctx.expression())
     func = ast.FunctionTable(func_name, func_args)
-    table = ast.Table(visit(ctx.tblName))
-    columns = [ast.Column(name) for name in visit(ctx.colName)]
-    return ast.LateralView(outer, func, table, columns)
+    func.set_alias(visit(ctx.tblName))
+    func.column_list = [ast.Column(name) for name in visit(ctx.colName)]
+    if ctx.AS(): func.set_as(True)
+    return ast.LateralView(outer, func)
 
 
 @visit.register
