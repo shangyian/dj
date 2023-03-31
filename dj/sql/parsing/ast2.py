@@ -913,6 +913,9 @@ class UnaryOpKind(DJEnum):
     # Minus = "-"
     Exists = "EXISTS"
     Not = "NOT"
+    
+    def __str__(self):
+        return self.value
 
 
 @dataclass(eq=False)
