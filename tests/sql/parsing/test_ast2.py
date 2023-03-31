@@ -9,6 +9,7 @@ from sqlmodel import Session
 from dj.errors import DJException
 from dj.sql.parsing.backends.antlr4 import parse
 from dj.sql.parsing import ast2 as ast
+from dj.sql.parsing import types
 from dj.construction.utils import make_name
 
 def test_ast_compile_table(session, client_with_examples):
@@ -174,3 +175,38 @@ def test_ast_compile_having(session: Session, client_with_examples):
     node = query.select.from_.relations[0].primary._dj_node
     assert node
     assert node.name == "dbt.source.jaffle_shop.orders"
+
+
+def test_ast_compile_lateral_view_explode(session: Session):
+    """
+    Test lateral view explode
+    """
+
+    query = parse("""SELECT a, b, c, c_age, d_age
+    FROM (SELECT 1 as a, 2 as b, 3 as c) AS foo
+    LATERAL VIEW EXPLODE(ARRAY(30, 60)) c_age
+    LATERAL VIEW EXPLODE(ARRAY(40, 80)) d_age;;""")
+    exc = DJException()
+    ctx = ast.CompileContext(session=session, query=query, exception=exc)
+    query.compile(ctx)
+
+    assert query.columns[0].is_compiled()
+    assert query.columns[1].is_compiled()
+    assert query.columns[2].is_compiled()
+    assert query.columns[3].is_compiled()
+    assert query.columns[4].is_compiled()
+    assert query.columns[0].name == ast.Name(name="a", quote_style="", namespace=None)
+    assert query.columns[1].name == ast.Name(name="b", quote_style="", namespace=None)
+    assert query.columns[2].name == ast.Name(name="c", quote_style="", namespace=None)
+    assert query.columns[3].name == ast.Name(name="c_age", quote_style="", namespace=None)
+    assert query.columns[4].name == ast.Name(name="d_age", quote_style="", namespace=None)
+    assert isinstance(query.columns[0].type, types.IntegerType)
+    assert isinstance(query.columns[1].type, types.IntegerType)
+    assert isinstance(query.columns[2].type, types.IntegerType)
+    assert isinstance(query.columns[3].type, types.IntegerType)
+    assert isinstance(query.columns[4].type, types.IntegerType)
+    assert query.columns[0].table.alias_or_name == ast.Name(name="foo", quote_style="", namespace=None)
+    assert query.columns[1].table.alias_or_name == ast.Name(name="foo", quote_style="", namespace=None)
+    assert query.columns[2].table.alias_or_name == ast.Name(name="foo", quote_style="", namespace=None)
+    assert query.columns[3].table.alias_or_name == ast.Name(name="foo", quote_style="", namespace=None)
+    assert query.columns[4].table.alias_or_name == ast.Name(name="foo", quote_style="", namespace=None)
