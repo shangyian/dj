@@ -5,6 +5,7 @@ import os
 
 from sqlalchemy.sql import Select
 
+from dj.sql.parsing import ast2
 from dj.sql.parsing.backends.antlr4 import parse
 from dj.sql.parsing.frontends.string import sql
 
@@ -26,6 +27,10 @@ def compare_query_strings(str1: str, str2: str) -> bool:
     query1.select.projection = sorted(query1.select.projection, key=lambda x: str(x.alias_or_name))[:]
     query2 = parse(str2)
     query2.select.projection = sorted(query2.select.projection, key=lambda x: str(x.alias_or_name))[:]
+    for relation in query1.find_all(ast2.Relation):
+        relation.extensions = sorted(relation.extensions, key=lambda ext: str(ext.right.alias_or_name))
+    for relation in query2.find_all(ast2.Relation):
+        relation.extensions = sorted(relation.extensions, key=lambda ext: str(ext.right.alias_or_name))
     return parse(str(query1)).compare(parse(str(query2)))
 
 

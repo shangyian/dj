@@ -2034,5 +2034,3 @@ class Query(TableExpression):
 
         # Make the generated query deterministic
         self.select.projection = sorted(self.select.projection, key=lambda x: str(x.alias_or_name))[:]
-        # for relation in self.find_all(Relation):
-        #     relation.extensions = sorted(relation.extensions, key=lambda ext: str(ext.right.alias_or_name))
