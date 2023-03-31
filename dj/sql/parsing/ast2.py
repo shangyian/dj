@@ -644,10 +644,11 @@ class Column(Aliasable, Named, Expression):
         """
         Find all tables that this column could have originated from.
         """
-        query = self.get_nearest_parent_of_type(Query)  # the column's parent query
-        from_tables = [relation.primary for relation in query.select.from_.relations]
-        join_tables = [ext.right for relation in query.select.from_.relations for ext in relation.extensions]
-        direct_tables = from_tables + join_tables
+        query = cast(Query, self.get_nearest_parent_of_type(Query))  # the column's parent query
+        direct_tables = filter(lambda tbl: tbl.get_nearest_parent_of_type(Query) is query, query.find_all(TableExpression))
+        # from_tables = [relation.primary for relation in query.select.from_.relations]
+        # join_tables = [ext.right for relation in query.select.from_.relations for ext in relation.extensions]
+        # direct_tables = from_tables + join_tables
 
         namespace = (
             self.name.namespace.identifier(False) if self.name.namespace else ""
@@ -658,12 +659,10 @@ class Column(Aliasable, Named, Expression):
         # possible origins for this column. There may be more than one if the column
         # is not namespaced.
         for table in direct_tables:
-            for col in table.columns:
-                if isinstance(col, (Aliasable, Named)):
-                    if self.name.name == col.alias_or_name.identifier(False):
-                        if not namespace or namespace == str(table.alias_or_name)\
-                                or table.name.identifier(False) == namespace:
-                            found.append(table)
+            if not namespace or table.alias_or_name.identifier(False) == namespace:
+                if table.add_ref_column(self):
+                    found.append(table)
+                    
         if found:
             return found
 
@@ -706,6 +705,7 @@ class Column(Aliasable, Named, Expression):
         # - a column without a namespace can still be unambiguous even if multiple tables have a column of that name in the overall
         #   and we would need to check the immediate FROM only first. Currently, this is not done.
         """
+
         if self.is_compiled():
             return
         found_sources = self.find_table_sources()
