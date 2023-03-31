@@ -16,6 +16,7 @@ from dj.sql.parsing.backends.antlr4 import ast, parse
 def _get_tables_from_select(select: ast.SelectExpression) -> DefaultDict[NodeRevision, List[ast.Table]]:
     """
     Extract all tables (source, transform, dimensions)
+    directly on the select that have an attached DJ node
     """
     tables: DefaultDict[NodeRevision, List[ast.Table]] = collections.defaultdict(list)
 
@@ -117,18 +118,15 @@ def join_tables_for_dimensions(
             initial_nodes = {table.dj_node for table in select.find_all(ast.Table) if table.dj_node}
             if dim_node not in initial_nodes:  # need to join dimension
                 node, paths = join_path(dim_node, initial_nodes)
-                join_info: List[Tuple[NodeRevision], List[Column]] = sorted(
-                    paths.items(), key=lambda x: x[0][1].name
-                )
-                for (start_node, table_node), cols in join_info:
+                for (start_node, table_node), cols in paths.items():
                     join_on = []
-                    start_node_alias = amenable_name(start_node.name)
-                    namespace = ast.Name(start_node.name.split(".")[:-1])
+                    namespace = ast.Name(start_node.name.split(".")[:-1]) \
+                        if start_node.name.split(".")[:-1] else None
                     tables[start_node].append(
                         ast.Table(
                             ast.Name(
                                 start_node.name.split(".")[-1],
-                                namespace=namespace or None,
+                                namespace=namespace,
                             ),
                             _dj_node=start_node,
                         )
@@ -178,7 +176,7 @@ def join_tables_for_dimensions(
                                 'LEFT OUTER',
                                 join_ast,  # type: ignore
                                 ast.JoinCriteria(on=ast.BinaryOp.And(*join_on)),  # pylint: disable=E1120
-                            ),
+                            )
                         )
 
 
@@ -206,8 +204,10 @@ def _build_tables_on_select(
             ).select  # pylint: disable=W0212
 
         alias = amenable_name(node.node.name)
-        node_ast = ast.Alias(ast.Name(alias), child=node_table)  # type: ignore
+        node_ast = ast.Alias(ast.Name(alias), child=node_table, as_=True)  # type: ignore
         for tbl in tbls:
+            if tbl.alias_or_name.parent_key == "alias":
+                node_ast = ast.Alias(tbl.alias_or_name, child=node_table, as_=True)
             select.replace(tbl, node_ast)
 
 
@@ -238,7 +238,6 @@ def _build_select_ast(
     # some of them can be sourced directly from tables on the select, others cannot
     # for the ones that cannot be sourced from the select, attempt to join them via dimension links
     """
-    # Get all tables directly on the select that have an attached DJ node
     tables = _get_tables_from_select(select)
     dimension_columns = dimension_columns_mapping(select)
     join_tables_for_dimensions(session, dimension_columns, tables, build_criteria)

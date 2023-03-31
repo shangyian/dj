@@ -1819,18 +1819,6 @@ class SelectExpression(Aliasable, Expression):
     set_op: List[SetOp] = field(default_factory=list)
     lateral_views: List[LateralView] = field(default_factory=list)
 
-
-class Select(SelectExpression):
-    """
-    A single select statement type
-    """
-
-    def add_set_op(self, set_op: SetOp):
-        """
-        Add a set op such as UNION, UNION ALL or INTERSECT
-        """
-        self.set_op.append(set_op)
-
     def add_aliases_to_unnamed_columns(self) -> None:
         """
         Add an alias to any unnamed columns in the projection (`col{n}`)
@@ -1843,6 +1831,18 @@ class Select(SelectExpression):
             else:
                 projection.append(expression)
         self.projection = projection
+
+
+class Select(SelectExpression):
+    """
+    A single select statement type
+    """
+
+    def add_set_op(self, set_op: SetOp):
+        """
+        Add a set op such as UNION, UNION ALL or INTERSECT
+        """
+        self.set_op.append(set_op)
 
     def __str__(self) -> str:
         parts = ["SELECT "]
@@ -2031,3 +2031,8 @@ class Query(TableExpression):
         self.bake_ctes()  # pylint: disable=W0212
         _build_select_ast(session, self.select, build_criteria)
         self.select.add_aliases_to_unnamed_columns()
+
+        # Make the generated query deterministic
+        self.select.projection = sorted(self.select.projection, key=lambda x: str(x.alias_or_name))[:]
+        # for relation in self.find_all(Relation):
+        #     relation.extensions = sorted(relation.extensions, key=lambda ext: str(ext.right.alias_or_name))
