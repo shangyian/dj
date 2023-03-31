@@ -198,7 +198,11 @@ class NestedField(ColumnType):
         is_optional: bool = True,
         doc: Optional[str] = None,
     ):
-        key = (is_optional, name, field_type, doc)
+        if isinstance(name, str):
+            from dj.sql.parsing.ast2 import Name
+            name=Name(name)
+            
+        key = (is_optional, name.name, field_type, doc)
         cls._instances[key] = cls._instances.get(key) or object.__new__(cls)
         return cls._instances[key]
 
@@ -303,8 +307,15 @@ class ListType(ColumnType):
                 f"array<{element_type}>",
                 f"ListType(element_type={repr(element_type)})",
             )
-            self.element_type = element_type
+            
+            self._element_field = NestedField(
+                name="col",#type: ignore
+                field_type=element_type,
+            )
 
+    @property
+    def element(self) -> NestedField:
+        return self._element_field
 
 class MapType(ColumnType):
     """A map type
@@ -337,18 +348,17 @@ class MapType(ColumnType):
             super().__init__(
                 f"map<{key_type}, {value_type}>",
             )
-            self._key_field = NestedField(name="key", field_type=key_type, is_optional=False)
-            self._value_field = NestedField(
-                name="value",
-                field_type=value_type,
-            )
+            self._key_field = NestedField(name="key", #type: ignore
+                                          field_type=key_type)
+            self._value_field = NestedField(name="value",#type: ignore
+                                            field_type=value_type)
 
     @property
-    def key(self) -> ColumnType:
+    def key(self) -> NestedField:
         return self._key_field
 
     @property
-    def value(self) -> ColumnType:
+    def value(self) -> NestedField:
         return self._value_field
 
 

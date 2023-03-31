@@ -30,7 +30,7 @@ from dj.models.node import NodeRevision as DJNode, NodeRevision, NodeType, Build
 from dj.models.node import NodeType as DJNodeType
 from dj.sql.functions import function_registry, table_function_registry
 from dj.sql.parsing.backends.exceptions import DJParseException
-from dj.sql.parsing.types import ColumnType, BooleanType, DecimalType, DoubleType, FloatType, LongType, IntegerType, \
+from dj.sql.parsing.types import ColumnType, BooleanType, DecimalType, DoubleType, FloatType, LongType, IntegerType, NestedField, \
     StringType, MapType, NullType, WildcardType
 from dj.construction.utils import get_dj_node
 from dj.errors import DJError, ErrorCode, DJException, DJErrorException
@@ -1650,8 +1650,8 @@ class FunctionTable(FunctionTableExpression):
     def set_alias(self: TNode, alias: List[Column]) -> TNode:
         self.column_list = alias
         return self
-    
-    def _type(self, ctx: Optional[CompileContext]=None) -> List[ColumnType]:
+
+    def _type(self, ctx: Optional[CompileContext]=None) -> List[NestedField]:
         name = self.name.name.upper()
         dj_func = table_function_registry[name]
         arg_types = []
@@ -1665,21 +1665,23 @@ class FunctionTable(FunctionTableExpression):
             return
         types = self._type(ctx)
         for type, col in zip_longest(types, self.column_list):
-            if type is None or col is None:
-                ctx.exception.errors.append(
-                    DJError(
-                        code=ErrorCode.INVALID_SQL_QUERY,
-                        message=(
-                            "Found different number of columns than types"
-                            f" in {self}."
+            if self.column_list:
+                if (type is None) or (col is None):
+                    ctx.exception.errors.append(
+                        DJError(
+                            code=ErrorCode.INVALID_SQL_QUERY,
+                            message=(
+                                "Found different number of columns than types"
+                                f" in {self}."
+                            ),
+                            context=str(self),
                         ),
-                        context=str(self),
-                    ),
-                )
-            col.add_type(type)
-        self._columns = self.column_list[:]
+                    break
+            else:
+                col = Column(type.name)
+                
+            col.add_type(type.type)
         
-
 
 @dataclass(eq=False)
 class LateralView(Node):

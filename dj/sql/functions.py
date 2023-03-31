@@ -35,7 +35,7 @@ class TableFunction(abc.ABC):  # pylint: disable=too-few-public-methods
 
     @staticmethod
     @abc.abstractmethod
-    def infer_type(*args: ct.ColumnType) -> List[ct.ColumnType]:
+    def infer_type(*args: ct.ColumnType) -> List[ct.NestedField]:
         """
         Infers the return type of the function based on the input type.
         """
@@ -766,9 +766,9 @@ class Explode(TableFunction):
     element in the specified column. 
     """
     @staticmethod
-    def infer_type(arg) -> List[ct.ColumnType]:
+    def infer_type(arg) -> List[ct.NestedField]:
         if isinstance(arg, ct.ListType):
-            return [arg.element_type]
+            return [arg.element]
         if isinstance(arg, ct.MapType):
             return [arg.key, arg.value]
         raise Exception(f"Invalid type for Explode {arg}.")
