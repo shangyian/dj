@@ -1642,10 +1642,11 @@ class FunctionTable(FunctionTableExpression):
     """
 
     def __str__(self) -> str:
-        alias = f" AS {self.alias}" if self.alias else ""
+        alias = f" {self.alias}" if self.alias else ""
+        as_=" AS " if self.as_ else ""
         cols = f"({', '.join(str(col) for col in self.column_list)})" if self.column_list else ""
         args = f"({', '.join(str(col) for col in self.args)})" if self.args else ""
-        return f"{self.name}{args}{alias}{cols}"
+        return f"{self.name}{args}{alias}{as_}{cols}"
 
     @property
     def type(self) -> Union[List[ColumnType], ColumnType]:
