@@ -4,6 +4,7 @@ testing ast Nodes and their methods
 
 import pytest
 
+from fastapi.testclient import TestClient
 from sqlmodel import Session
 
 from dj.errors import DJException
@@ -283,3 +284,55 @@ def test_ast_compile_lateral_view_explode3(session: Session):
     assert query.columns[2].table.alias_or_name == ast.Name(name="foo", quote_style="", namespace=None)
     assert query.columns[3].table.alias_or_name == ast.Name(name="foo", quote_style="", namespace=None)
     assert query.columns[4].table.alias_or_name == ast.Name(name="foo", quote_style="", namespace=None)
+
+
+def test_ast_compile_lateral_view_explode4(session: Session, client: TestClient):
+    """
+    Test lateral view explode
+    """
+    response = client.post("/catalogs/", json={"name": "default"})
+    assert response.ok
+    response = client.post("/nodes/source/", json={
+            "columns": {
+                "a": {"type": "int"},
+            },
+            "description": "Placeholder source node",
+            "mode": "published",
+            "name": "a",
+            "catalog": "default",
+            "schema_": "a",
+            "table": "a",
+        }
+    )
+    assert response.ok
+    response = client.post("/nodes/transform/", json={
+            "description": "A projection with an array",
+            "query": "SELECT ARRAY(30, 60) as foo_array FROM a",
+            "mode": "published",
+            "name": "foo_array_example",
+        }
+    )
+    assert response.ok
+
+    query = parse("""
+        SELECT foo_array, a, b
+        FROM foo_array_example
+        LATERAL VIEW EXPLODE(foo_array) AS a
+        LATERAL VIEW EXPLODE(foo_array) AS b;
+    """)
+    exc = DJException()
+    ctx = ast.CompileContext(session=session, query=query, exception=exc)
+    query.compile(ctx)
+
+    assert query.columns[0].is_compiled()
+    assert query.columns[1].is_compiled()
+    assert query.columns[2].is_compiled()
+    assert query.columns[0].name == ast.Name(name="foo_array", quote_style="", namespace=None)
+    assert query.columns[1].name == ast.Name(name="a", quote_style="", namespace=None)
+    assert query.columns[2].name == ast.Name(name="b", quote_style="", namespace=None)
+    assert isinstance(query.columns[0].type, types.IntegerType)
+    assert isinstance(query.columns[1].type, types.IntegerType)
+    assert isinstance(query.columns[2].type, types.IntegerType)
+    assert query.columns[0].table.alias_or_name == ast.Name(name="foo_array_example", quote_style="", namespace=None)
+    assert query.columns[1].table.alias_or_name == ast.Name(name="foo_array_example", quote_style="", namespace=None)
+    assert query.columns[2].table.alias_or_name == ast.Name(name="foo_array_example", quote_style="", namespace=None)
