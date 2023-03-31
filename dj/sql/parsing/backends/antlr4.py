@@ -668,7 +668,7 @@ def _(ctx: sbp.LateralViewContext):
     outer = bool(ctx.OUTER())
     func_name = visit(ctx.qualifiedName())
     func_args = visit(ctx.expression())
-    func = ast.FunctionTable(func_name, func_args)
+    func = ast.FunctionTable(func_name, args=func_args)
     func.set_alias(visit(ctx.tblName))
     func.column_list = [ast.Column(name) for name in visit(ctx.colName)]
     if ctx.AS(): func.set_as(True)

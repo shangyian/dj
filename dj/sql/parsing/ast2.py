@@ -1644,9 +1644,11 @@ class FunctionTable(FunctionTableExpression):
     def __str__(self) -> str:
         alias = f" {self.alias}" if self.alias else ""
         as_=" AS " if self.as_ else ""
-        cols = f"({', '.join(str(col) for col in self.column_list)})" if self.column_list else ""
-        args = f"({', '.join(str(col) for col in self.args)})" if self.args else ""
-        return f"{self.name}{args}{alias}{as_}{cols}"
+        cols = f"{', '.join(str(col) for col in self.column_list)}" if self.column_list else ""
+        if len(self.column_list)>1:
+            cols=f"({cols})"
+        args_str = f"({', '.join(str(col) for col in self.args)})" if self.args else ""
+        return f"{self.name}{args_str}{alias}{as_}{cols}"
     
     def set_alias(self: TNode, alias: List[Column]) -> TNode:
         self.column_list = alias
@@ -1685,10 +1687,6 @@ class LateralView(Node):
         if self.outer:
             parts.append(" OUTER")
         parts.append(f" {self.func}")
-        parts.append(f" {self.table}")
-        if self.columns:
-            as_ = " AS " if self.as_ else " "
-            parts.append(f"{as_}{', '.join(str(col) for col in self.columns)}")
         return "".join(parts)
 
 
