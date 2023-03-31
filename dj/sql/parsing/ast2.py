@@ -592,35 +592,6 @@ class Column(Aliasable, Named, Expression):
             self.add_type(self.expression.type)
             return self.expression.type
 
-        # Look through a table expression for this column and return its type if found
-        if table_or_alias := self.table:
-            table = table_or_alias.child if isinstance(table_or_alias, Alias) else table_or_alias
-            if isinstance(table, Table):
-                if not table.dj_node:
-                    raise DJParseException(
-                        f"Cannot resolve type of column `{table.name}.{self.name.name}`: "
-                        f"the column's table does not have a DJ Node."
-                    )
-            columns = []
-            if isinstance(table, Table):
-                columns = table.dj_node.columns
-            if isinstance(table, Query):
-                columns = table.columns
-            for col in columns:
-                col_name = col.alias_or_name.name \
-                    if isinstance(col, Alias) else col.name.name \
-                    if isinstance(col.name, Name) \
-                    else col.name
-                if col_name == self.name.name:
-                    self.add_type(col.type)
-                    return col.type
-            else:
-                raise DJParseException(
-                    f"DJ does not currently traverse subqueries for type "
-                    f"information. Consider extraction first.",
-                )
-        raise DJParseException(f"Cannot resolve type of column {self}.")
-
     def add_type(self, type_: ColumnType) -> "Column":
         """
         Add a referenced type
@@ -667,7 +638,7 @@ class Column(Aliasable, Named, Expression):
         return self
 
     def is_compiled(self):
-        return self.table is not None  # and self.expression is not None
+        return self.table is not None and self.type is not None
 
     def find_table_sources(self) -> List["TableExpression"]:
         """
@@ -841,10 +812,22 @@ class TableExpression(Aliasable, Expression):
             return False
 
         for col in self._columns:
-            if isinstance(col, (Aliasable, Named)):
+            if not isinstance(col, (Aliasable, Named)): continue
+            col_name = col.alias_or_name.identifier(False)
+            # check that the column was listed if there is a list of columns
+            column_listed = True
+            if self.column_list:
+                column_listed = False
+                for listed_col in self.column_list:
+                    if col_name == listed_col.alias_or_name.identifier(False):
+                        column_listed= True
+                        break
+                if not column_listed: continue
+            
                 if column.name.name == col.alias_or_name.identifier(False):
                     self._ref_columns.add(column)
                     column.add_table(self)
+                    column.add_expression(col)
                     return True
         return False
 
@@ -1182,6 +1165,14 @@ class Function(Named, Operation):
     quantifier: str = ""
     over: Optional[Over] = None
 
+    def __new__(cls, name: Name, args: List[Expression], quantifier: str = "", over: Optional[Over] = None):
+        # Check if function is a table-valued function
+        if not quantifier and over is None and name.name.upper() in table_function_registry:
+            return FunctionTable(name, args = args)
+
+        # If not, create a new Function object
+        return super().__new__(cls)
+    
     def __str__(self) -> str:
         over = f" {self.over}" if self.over else ""
 
@@ -1666,7 +1657,7 @@ class FunctionTable(FunctionTableExpression):
 
 
 @dataclass(eq=False)
-class LateralView(Expression):
+class LateralView(Node):
     """
     Represents a lateral view expression
     """
@@ -1676,7 +1667,14 @@ class LateralView(Expression):
     table: TableExpression = field(default_factory=TableExpression)
     columns: List[Column] = field(default_factory=list)
     as_: Optional[bool] = None
-
+    
+    def set_as(self, as_: bool)->"LateralView":
+        """
+        Sets whether the lateral view is using AS
+        """
+        self.as_=as_
+        return self
+        
     def __str__(self) -> str:
         parts = ["LATERAL VIEW"]
         if self.outer:
@@ -1713,13 +1711,11 @@ class From(Node):
     """
 
     relations: List[Relation] = field(default_factory=list)
-    lateral_views: List[LateralView] = field(default_factory=list)
 
     def __str__(self) -> str:
         parts = ["FROM "]
         parts += ",\n".join([str(r) for r in self.relations])
-        for view in self.lateral_views:
-            parts.append(f"\n{view}")
+
         return "".join(parts)
 
 
@@ -1810,17 +1806,7 @@ class SelectExpression(Aliasable, Expression):
     having: Optional[Expression] = None
     where: Optional[Expression] = None
     set_op: List[SetOp] = field(default_factory=list)
-
-    def add_aliases_to_unnamed_columns(self) -> None:
-        """
-        Add an alias to any unnamed columns in the projection (`_col<n>`)
-        """
-        for i, expression in enumerate(self.projection):
-            if not isinstance(expression, (Column, Alias)):
-                name = f"col{i}"
-                aliased = Alias(Name(name), child=expression)
-                # only replace those that are identical in memory
-                self.replace(expression, aliased, lambda a, b: id(a) == id(b))
+    lateral_views: List[LateralView] = field(default_factory=list)
 
 
 class Select(SelectExpression):
@@ -1842,7 +1828,6 @@ class Select(SelectExpression):
         for i, expression in enumerate(self.projection):
             if not isinstance(expression, Aliasable):
                 name = f"col{i}"
-                # only replace those that are identical in memory
                 projection.append(expression.set_alias(Name(name)))
             else:
                 projection.append(expression)
@@ -1855,13 +1840,14 @@ class Select(SelectExpression):
         parts.append(",\n\t".join(str(exp) for exp in self.projection))
         if self.from_ is not None:
             parts.extend(("\n", str(self.from_), "\n"))
+        for view in self.lateral_views:
+            parts.append(f"\n{view}")
         if self.where is not None:
             parts.extend(("WHERE ", str(self.where), "\n"))
         if self.group_by:
             parts.extend(("GROUP BY ", ", ".join(str(exp) for exp in self.group_by)))
         if self.having is not None:
             parts.extend(("HAVING ", str(self.having), "\n"))
-
         select = " ".join(parts).strip()
 
         # Add set operations

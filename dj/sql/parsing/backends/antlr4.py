@@ -419,6 +419,8 @@ def _(ctx: sbp.QueryPrimaryContext):
 def _(ctx: sbp.RegularQuerySpecificationContext):
     quantifier, projection = visit(ctx.selectClause())
     from_ = visit(ctx.fromClause()) if ctx.fromClause() else None
+    import pdb; pdb.set_trace()
+    laterals = visit(ctx.lateralView())
     group_by = visit(ctx.aggregationClause()) if ctx.aggregationClause() else []
     where = None
     if where_clause := ctx.whereClause():
@@ -426,14 +428,19 @@ def _(ctx: sbp.RegularQuerySpecificationContext):
     having = None
     if having_clause := ctx.havingClause():
         having = visit(having_clause)
-    return ast.Select(
+    select = ast.Select(
         quantifier=quantifier,
         projection=projection,
         from_=from_,
+        lateral_views=laterals,
         where=where,
         group_by=group_by,
         having=having,
     )
+    if from_ and from_.laterals:
+        select.lateral_views+=from_.laterals
+        del from_.laterals
+    return select
 
 
 @visit.register
@@ -739,7 +746,9 @@ def _(ctx: sbp.FromClauseContext):
     laterals = visit(ctx.lateralView())
     if ctx.pivotClause() or ctx.unpivotClause():
         return
-    return ast.From(relations, laterals)
+    from_ = ast.From(relations)
+    from_.laterals = laterals
+    return from_
 
 
 @visit.register
