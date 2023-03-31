@@ -1028,6 +1028,7 @@ PRIMITIVE_TYPES: Dict[str, ct.PrimitiveType] = {
     "uuid": ct.UUIDType(),
     "byte": ct.BinaryType(),
     "none": ct.NullType(),
+    "null": ct.NullType(),
 }
 
 
