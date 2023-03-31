@@ -1647,10 +1647,6 @@ class FunctionTable(FunctionTableExpression):
         cols = f"({', '.join(str(col) for col in self.column_list)})" if self.column_list else ""
         args = f"({', '.join(str(col) for col in self.args)})" if self.args else ""
         return f"{self.name}{args}{alias}{as_}{cols}"
-
-    @property
-    def type(self) -> Union[List[ColumnType], ColumnType]:
-        return self._type()
     
     def set_alias(self: TNode, alias: List[Column]) -> TNode:
         self.column_list = alias
