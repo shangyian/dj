@@ -721,6 +721,17 @@ class VariancePop(Function):
         return ct.DoubleType()
 
 
+class Array(Function):
+    """
+    Returns an array of constants
+    """
+
+    @staticmethod
+    def infer_type(*elements) -> ct.ListType:
+        element_type = elements[0] if elements else ct.NullType()
+        return ct.ListType(element_type=element_type)
+
+
 class Week(Function):
     """
     Returns the week number of the year of the input date value.
@@ -757,7 +768,7 @@ class Explode(TableFunction):
     @staticmethod
     def infer_type(arg) -> List[ct.ColumnType]:
         if isinstance(arg, ct.ListType):
-            return [arg.field_type]
+            return [arg.element_type]
         if isinstance(arg, ct.MapType):
             return [arg.key, arg.value]
         raise Exception(f"Invalid type for Explode {arg}.")

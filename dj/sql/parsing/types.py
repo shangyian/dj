@@ -303,6 +303,7 @@ class ListType(ColumnType):
                 f"array<{element_type}>",
                 f"ListType(element_type={repr(element_type)})",
             )
+            self.element_type = element_type
 
 
 class MapType(ColumnType):
