@@ -464,9 +464,9 @@ def _(ctx: sbp.GroupByClauseContext):
 def _(ctx: sbp.GroupingAnalyticsContext):
     grouping_set = visit(ctx.groupingSet())
     if ctx.ROLLUP():
-        return ast.Function("ROLLUP", args=grouping_set)
+        return ast.Function(ast.Name(name="ROLLUP"), args=grouping_set)
     if ctx.CUBE():
-        return ast.Function("CUBE", args=grouping_set)
+        return ast.Function(ast.Name(name="CUBE"), args=grouping_set)
     return grouping_set
 
 
