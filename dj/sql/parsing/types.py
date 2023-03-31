@@ -13,7 +13,7 @@ Example:
 
 from typing import Dict, Optional, Tuple, ClassVar, TYPE_CHECKING, Any, Generator
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Extra
 from pydantic.class_validators import AnyCallable
 
 if TYPE_CHECKING:
@@ -32,12 +32,18 @@ class Singleton:
         return cls._instance
 
 
-class ColumnType:
+class ColumnType(BaseModel):
     """Base type for all Column Types"""
 
     _initialized = False
 
-    def __init__(self, type_string: str, repr_string: str = None):
+    class Config:
+        extra = Extra.allow
+        arbitrary_types_allowed = True
+        underscore_attrs_are_private = False
+
+    def __init__(self, type_string: str, repr_string: str = None, *args, **kwargs):
+        super().__init__(*args, **kwargs)
         self._type_string = type_string.lower()
         self._repr_string = repr_string.lower() if repr_string else self._type_string
         self._initialized = True
@@ -372,8 +378,8 @@ class BooleanType(PrimitiveType, Singleton):
     """
 
     def __init__(self):
-        if not self._initialized:
-            super().__init__("boolean", "BooleanType()")
+        #if not self._initialized:
+        super().__init__("boolean", "BooleanType()")
 
 
 class IntegerType(PrimitiveType, Singleton):

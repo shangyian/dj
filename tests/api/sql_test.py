@@ -6,7 +6,6 @@ from starlette.testclient import TestClient
 from dj.models import Column, Database, Node
 from dj.models.node import NodeRevision, NodeType
 from dj.sql.parsing.types import StringType
-from dj.typing import ColumnType
 from tests.sql.utils import compare_query_strings
 
 
@@ -155,7 +154,6 @@ def test_sql(
                 m.contact_title,
                 m.local_region,
                 m.municipality_id,
-                m.phone,
                 m.state_id,
                 mmt.municipality_type_id,
                 mt.municipality_type_desc 
@@ -256,7 +254,6 @@ def test_sql(
                 m.municipality_id,
                 mmt.municipality_type_id,
                 mt.municipality_type_desc,
-                m.phone,
                 m.state_id
               FROM roads.municipality AS m
               LEFT  JOIN roads.municipality_municipality_type AS mmt ON m.municipality_id = mmt.municipality_id
@@ -310,7 +307,6 @@ def test_sql(
              FROM roads.hard_hats AS hard_hats
             ) AS hard_hat ON repair_order.hard_hat_id = hard_hat.hard_hat_id
              GROUP BY  hard_hat.city
-
             """,
         ),
     ],

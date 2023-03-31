@@ -9,4 +9,3 @@ RUN pip install https://github.com/rogerbinns/apsw/releases/download/3.38.1-r1/a
 
 RUN pip install jupyter nb-black
 EXPOSE 8000
-EXPOSE 8001

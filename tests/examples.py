@@ -390,7 +390,6 @@ EXAMPLES = (  # type: ignore
                         contact_name,
                         contact_title,
                         local_region,
-                        phone,
                         state_id,
                         mmt.municipality_type_id,
                         mt.municipality_type_desc
