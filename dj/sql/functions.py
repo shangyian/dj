@@ -755,9 +755,9 @@ class Explode(TableFunction):
     element in the specified column. 
     """
     @staticmethod
-    def infer_type(arg) -> Union[ct.ColumnType, List[ct.ColumnType]]:
+    def infer_type(arg) -> List[ct.ColumnType]:
         if isinstance(arg, ct.ListType):
-            return arg.field_type
+            return [arg.field_type]
         if isinstance(arg, ct.MapType):
             return [arg.key, arg.value]
         raise Exception(f"Invalid type for Explode {arg}.")

@@ -25,7 +25,7 @@ from typing import (
 )
 
 from sqlmodel import Session
-
+from itertools import zip_longest
 from dj.models.node import NodeRevision as DJNode, NodeRevision, NodeType, BuildCriteria
 from dj.models.node import NodeType as DJNodeType
 from dj.sql.functions import function_registry, table_function_registry
@@ -1654,7 +1654,7 @@ class FunctionTable(FunctionTableExpression):
         self.column_list = alias
         return self
     
-    def _type(self, ctx: Optional[CompileContext]=None) -> Union[List[ColumnType], ColumnType]:
+    def _type(self, ctx: Optional[CompileContext]=None) -> List[ColumnType]:
         name = self.name.name.upper()
         dj_func = table_function_registry[name]
         arg_types = []
@@ -1666,10 +1666,21 @@ class FunctionTable(FunctionTableExpression):
     def compile(self, ctx):
         if self.is_compiled():
             return
-        #TODO: set self._columns
-        # if isinstance(self.parent, LateralView):
-        #     types = self._type(ctx)
-        #     if self.
+        types = self._type(ctx)
+        for type, col in zip_longest(types, self.column_list):
+            if type is None or col is None:
+                ctx.exception.errors.append(
+                    DJError(
+                        code=ErrorCode.INVALID_SQL_QUERY,
+                        message=(
+                            "Found different number of columns than types"
+                            f" in {self}."
+                        ),
+                        context=str(self),
+                    ),
+                )
+            col.add_type(type)
+        self._columns = self.column_list[:]
         
 
 
