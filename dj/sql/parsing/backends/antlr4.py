@@ -997,7 +997,7 @@ def _(ctx: sbp.TrimContext) -> ast.Function:
     trailing = "TRAILING " if ctx.TRAILING() else ""
     from_ = "FROM " if ctx.FROM() else ""
     return ast.Function(
-        "TRIM",
+        ast.Name("TRIM"),
         [visit(ctx.srcStr)],
         f"{both or leading or trailing}{from_}",
     )
@@ -1027,6 +1027,7 @@ PRIMITIVE_TYPES: Dict[str, ct.PrimitiveType] = {
     "string": ct.StringType(),
     "uuid": ct.UUIDType(),
     "byte": ct.BinaryType(),
+    "none": ct.NullType(),
 }
 
 

@@ -1090,9 +1090,6 @@ class BinaryOp(Operation):
             BinaryOpKind.Modulo: lambda left, right: IntegerType()
             if str(left) == str(IntegerType()) and str(right) == str(IntegerType())
             else raise_binop_exception(),
-            BinaryOpKind.Like: lambda left, right: BooleanType()
-            if str(left) == str(IntegerType()) and str(right) == str(IntegerType())
-            else raise_binop_exception(),
         }
         return BINOP_TYPE_COMBO_LOOKUP[kind](left_type, right_type)
 
@@ -1167,7 +1164,7 @@ class Function(Named, Operation):
     def __new__(cls, name: Name, args: List[Expression], quantifier: str = "", over: Optional[Over] = None):
         # Check if function is a table-valued function
         if not quantifier and over is None and name.name.upper() in table_function_registry:
-            return FunctionTable(name, args = args)
+            return FunctionTable(name, args=args)
 
         # If not, create a new Function object
         return super().__new__(cls)

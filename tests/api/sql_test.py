@@ -329,7 +329,7 @@ def test_sql_with_filters(
     client_with_examples: TestClient,
 ):
     """
-    Test ``GET /sqk/{node_name}/`` with various filters and dimensions.
+    Test ``GET /sql/{node_name}/`` with various filters and dimensions.
     """
     response = client_with_examples.get(
         f"/sql/{node_name}/",

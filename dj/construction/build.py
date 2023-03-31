@@ -276,7 +276,7 @@ def add_filters_and_dimensions_to_query_ast(
             query.select.group_by += temp_select.group_by  # type:ignore
             projection_addition += list(temp_select.find_all(ast.Column))
     query.select.projection += [
-        col.set_api_column(True).copy() for col in set(projection_addition)
+        col for col in set(projection_addition)
     ]
 
     # Cannot select for columns that aren't in GROUP BY and aren't aggregations
