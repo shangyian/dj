@@ -1675,7 +1675,7 @@ class FunctionTable(FunctionTableExpression):
                                 f" in {self}."
                             ),
                             context=str(self),
-                        ),
+                        ))
                     break
             else:
                 col = Column(type.name)
