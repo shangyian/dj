@@ -23,10 +23,10 @@ def compare_query_strings(str1: str, str2: str) -> bool:
     compare two query strings
     """
     query1 = parse(str1)
-    query1.select.projection = sorted(query1.select.projection, key=lambda x: str(x.alias_or_name))
-    query2 = parse(str1)
-    query2.select.projection = sorted(query2.select.projection, key=lambda x: str(x.alias_or_name))
-    return query1.compare(query2)
+    query1.select.projection = sorted(query1.select.projection, key=lambda x: str(x.alias_or_name))[:]
+    query2 = parse(str2)
+    query2.select.projection = sorted(query2.select.projection, key=lambda x: str(x.alias_or_name))[:]
+    return parse(str(query1)).compare(parse(str(query2)))
 
 
 def read_query(name: str) -> str:

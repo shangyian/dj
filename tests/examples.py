@@ -540,7 +540,7 @@ EXAMPLES = (  # type: ignore
     ),
     (
         (
-            "/nodes/repair_order/columns/repair_order_id/"
+            "/nodes/repair_order/columns/hard_hat_id/"
             "?dimension=hard_hat&dimension_column=hard_hat_id"
         ),
         {},

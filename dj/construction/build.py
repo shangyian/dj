@@ -44,32 +44,36 @@ def _get_dim_cols_from_select(
 
 
 def join_path(
-    session: Session,
     dimension_node: NodeRevision,
-    nodes: Set[NodeRevision]
+    initial_nodes: Set[NodeRevision]
 ) -> Dict[Tuple[NodeRevision, NodeRevision], List[Column]]:
     """
-    Assuming the two nodes are joinable, finds a join path between them.
-    Needs all the intermediary join nodes or else it won't know how to do the join.
+    For a dimension node, we want to find a possible join path between it
+    and any of the nodes that are directly referenced in the original query. If
+    no join path exists, returns an empty dict.
     """
     processed = set()
 
     to_process = collections.deque([])
-    join_info: Dict[NodeRevision, List[Column]] = {}
-    to_process.extend([(node, join_info.copy()) for node in nodes])
+    # mapping of node to join -> a list of join columns
+    join_info: Dict[Tuple[NodeRevision], List[Column]] = {}
+    to_process.extend([(node, join_info.copy()) for node in initial_nodes])
 
     while to_process:
         current_node, path = to_process.popleft()
         processed.add(current_node)
         dimensions_to_columns = collections.defaultdict(list)
 
+        # From the columns on the current node, find the next layer of
+        # dimension nodes that can be joined in
         for col in current_node.columns:
             if col.dimension:
                 dimensions_to_columns[col.dimension.current].append(col)
+
+        # Go through all potential dimensions and their join columns
         for joinable_dim, join_cols in dimensions_to_columns.items():
-            # print("joinable_dim", joinable_dim.name, [c.name for c in join_cols])
-            next_path = {**path, **{(current_node, joinable_dim): join_cols}}
-            next_item = (joinable_dim, next_path)
+            next_join_path = {**path, **{(current_node, joinable_dim): join_cols}}
+            full_join_path = (joinable_dim, next_join_path)
             if joinable_dim == dimension_node:
                 for col in join_cols:
                     if col.dimension_column is None and not any(
@@ -81,11 +85,11 @@ def join_path(
                             f" specify a dimension column, but {dimension_node.name} "
                             f"does not have the default key `id`.",
                         )
-                return next_item
+                return full_join_path
             if joinable_dim not in processed:
-                to_process.append(next_item)
+                to_process.append(full_join_path)
                 for parent in joinable_dim.parents:
-                    to_process.append((parent.current, next_path))
+                    to_process.append((parent.current, next_join_path))
     return None
 
 
@@ -112,7 +116,7 @@ def join_tables_for_dimensions(
         for select in selects_map.values():
             initial_nodes = {table.dj_node for table in select.find_all(ast.Table) if table.dj_node}
             if dim_node not in initial_nodes:  # need to join dimension
-                node, paths = join_path(session, dim_node, initial_nodes)
+                node, paths = join_path(dim_node, initial_nodes)
                 join_info: List[Tuple[NodeRevision], List[Column]] = sorted(
                     paths.items(), key=lambda x: x[0][1].name
                 )
@@ -124,7 +128,7 @@ def join_tables_for_dimensions(
                         ast.Table(
                             ast.Name(
                                 start_node.name.split(".")[-1],
-                                namespace=namespace,
+                                namespace=namespace or None,
                             ),
                             _dj_node=start_node,
                         )
