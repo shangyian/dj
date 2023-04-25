@@ -1,0 +1,68 @@
+name: Release
+on:
+  workflow_dispatch:
+    inputs:
+      library:
+        type: choice
+        description: Which library to bump
+        required: true
+        options:
+          - server
+          - client
+      bump:
+        type: choice
+        description: Poetry version bump rule
+        required: true
+        options:
+          - major
+          - minor
+          - patch
+          - prepatch
+          - preminor
+          - premajor
+          - prerelease
+
+jobs:
+  publish:
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: [3.8, 3.9, 3.10]
+        poetry-version: [1.4.2]
+        os: [ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions/setup-python@v2
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install poetry
+        uses: abatilo/actions-poetry@v2.0.0
+        with:
+          poetry-version: ${{ matrix.poetry-version }}
+
+      - name: Configure Git
+        run: |
+          git config user.name "GitHub Actions Bot"
+          git config user.email "<>"
+
+      - name: Bump release version with poetry and tag
+        run: |
+          poetry version ${{ github.event.inputs.bump }}
+          export NEW_VERSION=v$(poetry version -s)
+          export LIBRARY=${{ github.event.inputs.library }}
+          git commit -am "Bumping $LIBRARY to version $NEW_VERSION"
+          git tag -a $NEW_VERSION -m $NEW_VERSION
+
+      - name: Push results
+        # See https://www.wearecogworks.com/blog/quick-guide-to-running-sub-workflows-with-github-actions/
+        run: |
+          git push "https://$GITHUB_ACTOR:${{ secrets.DEPLOY_TOKEN }}@github.com/$GITHUB_REPOSITORY.git"
+          git push "https://$GITHUB_ACTOR:${{ secrets.DEPLOY_TOKEN }}@github.com/$GITHUB_REPOSITORY.git" --tags
+
+      - name: Publish
+        env:
+          PYPI_TOKEN: ${{ secrets.PYPI_TOKEN }}
+        run: |
+          poetry config pypi-token.pypi $PYPI_TOKEN
+          poetry publish --build
