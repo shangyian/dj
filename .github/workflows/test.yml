@@ -43,4 +43,5 @@ jobs:
 
       - name: Test DJ ${{ matrix.library }} with pytest
         run: |
-          poetry run pytest --cov-fail-under=100 --cov=dj -vv tests/ --doctest-modules dj --without-integration --without-slow-integration
+          export module=${{ matrix.library == 'server' && 'dj' || 'datajunction' }}
+          poetry run pytest --cov-fail-under=100 --cov=$module -vv tests/ --doctest-modules $module --without-integration --without-slow-integration
