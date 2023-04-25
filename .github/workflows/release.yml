@@ -60,12 +60,11 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.REPO_SCOPED_TOKEN }}
 
       - name: Create release
-        # See https://www.wearecogworks.com/blog/quick-guide-to-running-sub-workflows-with-github-actions/
+        env:
+          GH_TOKEN: ${{ secrets.REPO_SCOPED_TOKEN }}
         run: |
           export VERSION=$(poetry version -s)
           gh release create $VERSION --generate-notes
-        env:
-          GH_TOKEN: ${{ secrets.REPO_SCOPED_TOKEN }}
 
       - name: Publish to pypi
         env:
