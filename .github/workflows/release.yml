@@ -31,6 +31,9 @@ jobs:
         poetry-version: ['1.4.2']
         os: ['ubuntu-latest']
     runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: ${{ github.event.inputs.library == 'server' && '.' || './client/python' }}
     steps:
       - uses: actions/checkout@v2
       - name: Set up Python ${{ matrix.python-version }}
