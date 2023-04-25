@@ -39,5 +39,5 @@ jobs:
     - name: Test DJ client with pytest
       run: |
         pip install -e ../../
-        pre-commit run --all-files
-        pytest --cov-fail-under=100 --cov=datajunction -vv tests/ --doctest-modules datajunction --without-integration --without-slow-integration
+        poetry run pre-commit run --all-files
+        poetry run pytest --cov-fail-under=100 --cov=datajunction -vv tests/ --doctest-modules datajunction --without-integration --without-slow-integration
