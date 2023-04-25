@@ -61,13 +61,13 @@ jobs:
           git push origin $NEW_VERSION
         env:
           GITHUB_TOKEN: ${{ secrets.REPO_SCOPED_TOKEN }}
-
-      - name: Create release
-        env:
-          GH_TOKEN: ${{ secrets.REPO_SCOPED_TOKEN }}
-        run: |
-          export VERSION=$(poetry version -s)
-          gh release create $VERSION --generate-notes
+#
+#      - name: Create release
+#        env:
+#          GH_TOKEN: ${{ secrets.REPO_SCOPED_TOKEN }}
+#        run: |
+#          export VERSION=$(poetry version -s)
+#          gh release create $VERSION --generate-notes
 
       - name: Publish to pypi
         env:
