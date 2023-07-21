@@ -100,11 +100,9 @@ ENV/
 .mypy_cache/
 
 *.sqlite
-*.db
+dj.db
+djqs.db
 *.swp
-
-# https://pypi.org/project/python-dotenv/
-.env
 
 # VS Code
 .vscode
@@ -115,3 +113,4 @@ ENV/
 # MacOS
 .DS_Store
 .pdm-python
+.pdm.toml

@@ -7,7 +7,30 @@ metrics and the data models behind them using **SQL**, serving as a **semantic l
 on top of a physical data warehouse. By leveraging this metadata, DJ can enable efficient
 retrieval of metrics data across different dimensions and filters.
 
+[Documentation](http://datajunction.io)
+
 ![DataJunction](docs/static/datajunction-illustration.png)
+
+## Getting Started
+
+To launch the DataJunction UI with a minimal DataJunction backend, start the default docker compose environment.
+
+```sh
+docker compose up
+```
+
+If you'd like to launch the full suite of services, including open-source implementations of the DataJunction query service and
+DataJunction reflection service specifications, use the `demo` profile.
+
+```sh
+docker compose --profile demo up
+```
+
+DJUI: [http://localhost:3000/](http://localhost:3000/)  
+DJ Swagger Docs: [http://localhost:8000/docs](http://localhost:8000/docs)  
+DJQS Swagger Docs: [http://localhost:8001/docs](http://localhost:8001/docs)  
+Jaeger UI: [http://localhost:16686/search](http://localhost:16686/search)  
+Jupyter Lab: [http://localhost:8181](http://localhost:8181)  
 
 ## How does this work?
 
@@ -19,7 +42,3 @@ metrics logic, and even selections of metrics, dimensions, and filters (**cube n
 By parsing each node's SQL into an AST and through dimensional links between columns,
 DJ can infer a graph of dependencies between nodes, which allows it to find the
 appropriate join paths between nodes to generate queries for metrics.
-
-## Getting started
-
-While all the functionality above currently works, DJ is still not ready for production use. Only a very small number of functions are supported, and we are still working towards a 0.1 release. If you are interested in helping take a look at the `issues marked with the "good first issue" label <https://github.com/DataJunction/dj/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22>`_.

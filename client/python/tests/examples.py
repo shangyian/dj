@@ -1,6 +1,13 @@
 """
 Roads database examples loaded into DJ test session
 """
+import uuid
+from typing import Dict, Union
+
+from datajunction_server.errors import DJException, DJQueryServiceClientException
+from datajunction_server.models.query import QueryWithResults
+from datajunction_server.typing import QueryState
+
 # pylint: disable=too-many-lines
 
 EXAMPLES = (  # type: ignore
@@ -392,13 +399,13 @@ EXAMPLES = (  # type: ignore
             "description": "Municipality dimension",
             "query": """
                         SELECT
-                        m.municipality_id,
+                        m.municipality_id AS municipality_id,
                         contact_name,
                         contact_title,
                         local_region,
                         state_id,
-                        mmt.municipality_type_id,
-                        mt.municipality_type_desc
+                        mmt.municipality_type_id AS municipality_type_id,
+                        mt.municipality_type_desc AS municipality_type_desc
                         FROM default.municipality AS m
                         LEFT JOIN default.municipality_municipality_type AS mmt
                         ON m.municipality_id = mmt.municipality_id
@@ -918,13 +925,13 @@ EXAMPLES = (  # type: ignore
             "description": "Municipality dimension",
             "query": """
                         SELECT
-                        m.municipality_id,
+                        m.municipality_id AS municipality_id,
                         contact_name,
                         contact_title,
                         local_region,
                         state_id,
-                        mmt.municipality_type_id,
-                        mt.municipality_type_desc
+                        mmt.municipality_type_id AS municipality_type_id,
+                        mt.municipality_type_desc AS municipality_type_desc
                         FROM foo.bar.municipality AS m
                         LEFT JOIN foo.bar.municipality_municipality_type AS mmt
                         ON m.municipality_id = mmt.municipality_id
@@ -1069,3 +1076,85 @@ EXAMPLES = (  # type: ignore
         {},
     ),
 )
+
+QUERY_DATA_MAPPINGS: Dict[str, Union[DJException, QueryWithResults]] = {
+    """
+    WITHm0_default_DOT_avg_repair_priceAS(SELECTdefault_DOT_hard_hat.city,\t
+    avg(default_DOT_repair_order_details.price)ASdefault_DOT_avg_repair_priceFROM
+    roads.repair_order_detailsASdefault_DOT_repair_order_detailsLEFTOUTERJOIN
+    (SELECTdefault_DOT_repair_orders.dispatcher_id,\tdefault_DOT_repair_orders.hard_hat_id,
+    \tdefault_DOT_repair_orders.municipality_id,\tdefault_DOT_repair_orders.repair_order_id
+    FROMroads.repair_ordersASdefault_DOT_repair_orders)ASdefault_DOT_repair_orderON
+    default_DOT_repair_order_details.repair_order_id=default_DOT_repair_order.repair_order_id
+    LEFTOUTERJOIN(SELECTdefault_DOT_hard_hats.city,\tdefault_DOT_hard_hats.hard_hat_id,\t
+    default_DOT_hard_hats.stateFROMroads.hard_hatsASdefault_DOT_hard_hats)AS
+    default_DOT_hard_hatONdefault_DOT_repair_order.hard_hat_id=default_DOT_hard_hat.
+    hard_hat_idGROUPBYdefault_DOT_hard_hat.city)SELECTm0_default_DOT_avg_repair_price.
+    default_DOT_avg_repair_price,\tm0_default_DOT_avg_repair_price.cityFROM
+    m0_default_DOT_avg_repair_price
+    """.strip()
+    .replace('"', "")
+    .replace("\n", "")
+    .replace(" ", ""): QueryWithResults(
+        **{
+            "id": uuid.UUID("bd98d6be-e2d2-413e-94c7-96d9411ddee2"),
+            "submitted_query": "...",
+            "state": QueryState.FINISHED,
+            "results": [
+                {
+                    "columns": [
+                        {"name": "default_DOT_avg_repair_price", "type": "float"},
+                        {"name": "default_DOT_hard_hat_city", "type": "str"},
+                    ],
+                    "rows": [
+                        (1.0, "Foo"),
+                        (2.0, "Bar"),
+                    ],
+                    "sql": "",
+                },
+            ],
+            "errors": [],
+        }
+    ),
+    """WITHm0_default_DOT_avg_repair_priceAS(SELECTdefault_DOT_hard_hat.state,\t
+    avg(default_DOT_repair_order_details.price)ASdefault_DOT_avg_repair_priceFROM
+    roads.repair_order_detailsASdefault_DOT_repair_order_detailsLEFTOUTERJOIN
+    (SELECTdefault_DOT_repair_orders.dispatcher_id,\tdefault_DOT_repair_orders.hard_hat_id,
+    \tdefault_DOT_repair_orders.municipality_id,\tdefault_DOT_repair_orders.repair_order_id
+    FROMroads.repair_ordersASdefault_DOT_repair_orders)ASdefault_DOT_repair_order
+    ONdefault_DOT_repair_order_details.repair_order_id=default_DOT_repair_order.repair_order_id
+    LEFTOUTERJOIN(SELECTdefault_DOT_hard_hats.hard_hat_id,\tdefault_DOT_hard_hats.state
+    FROMroads.hard_hatsASdefault_DOT_hard_hats)ASdefault_DOT_hard_hatON
+    default_DOT_repair_order.hard_hat_id=default_DOT_hard_hat.hard_hat_idGROUPBY
+    default_DOT_hard_hat.state)SELECTm0_default_DOT_avg_repair_price.default_DOT_avg_repair_price,
+    \tm0_default_DOT_avg_repair_price.stateFROMm0_default_DOT_avg_repair_price""".strip()
+    .replace('"', "")
+    .replace("\n", "")
+    .replace(" ", ""): QueryWithResults(
+        **{
+            "id": uuid.UUID("bd98d6be-e2d2-413e-94c7-96d9411ddee2"),
+            "submitted_query": "...",
+            "state": QueryState.FINISHED,
+            "results": [],
+            "errors": [],
+        }
+    ),
+    """WITHm0_default_DOT_avg_repair_priceAS(SELECTdefault_DOT_hard_hat.postal_code,
+    \tavg(default_DOT_repair_order_details.price)ASdefault_DOT_avg_repair_priceFROM
+    roads.repair_order_detailsASdefault_DOT_repair_order_detailsLEFTOUTERJOIN
+    (SELECTdefault_DOT_repair_orders.dispatcher_id,\tdefault_DOT_repair_orders.hard_hat_id,
+    \tdefault_DOT_repair_orders.municipality_id,\tdefault_DOT_repair_orders.repair_order_id
+    FROMroads.repair_ordersASdefault_DOT_repair_orders)ASdefault_DOT_repair_orderON
+    default_DOT_repair_order_details.repair_order_id=default_DOT_repair_order.repair_order_id
+    LEFTOUTERJOIN(SELECTdefault_DOT_hard_hats.hard_hat_id,\tdefault_DOT_hard_hats.postal_code,
+    \tdefault_DOT_hard_hats.stateFROMroads.hard_hatsASdefault_DOT_hard_hats)ASdefault_DOT_hard_hat
+    ONdefault_DOT_repair_order.hard_hat_id=default_DOT_hard_hat.hard_hat_idGROUPBY
+    default_DOT_hard_hat.postal_code)SELECTm0_default_DOT_avg_repair_price.
+    default_DOT_avg_repair_price,\tm0_default_DOT_avg_repair_price.postal_code
+    FROMm0_default_DOT_avg_repair_price""".strip()
+    .replace('"', "")
+    .replace("\n", "")
+    .replace(" ", ""): (
+        DJQueryServiceClientException("Error response from query service")
+    ),
+}

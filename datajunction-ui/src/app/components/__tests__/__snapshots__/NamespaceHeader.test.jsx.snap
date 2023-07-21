@@ -1,0 +1,47 @@
+// Jest Snapshot v1, https://goo.gl/fbAQLP
+
+exports[`<NamespaceHeader /> should render and match the snapshot 1`] = `
+<ol
+  className="breadcrumb breadcrumb-chevron p-3 bg-body-tertiary rounded-3"
+>
+  <li
+    className="breadcrumb-item"
+  >
+    <a
+      href="/"
+    >
+      <HorizontalHierarchyIcon />
+    </a>
+  </li>
+  <li
+    className="breadcrumb-item"
+  >
+    <a
+      className="link-body-emphasis"
+      href="/namespaces/shared"
+    >
+      shared
+    </a>
+  </li>
+  <li
+    className="breadcrumb-item"
+  >
+    <a
+      className="link-body-emphasis"
+      href="/namespaces/shared.dimensions"
+    >
+      dimensions
+    </a>
+  </li>
+  <li
+    className="breadcrumb-item"
+  >
+    <a
+      className="link-body-emphasis"
+      href="/namespaces/shared.dimensions.accounts"
+    >
+      accounts
+    </a>
+  </li>
+</ol>
+`;
