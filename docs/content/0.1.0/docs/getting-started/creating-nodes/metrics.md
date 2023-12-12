@@ -1,8 +1,7 @@
 ---
 weight: 20
+title: "Metrics"
 ---
-
-# Metrics
 
 Metric nodes represent an aggregation of a measure defined as a single expression in a query that selects from
 a single source, transform, or dimension node.
@@ -33,12 +32,16 @@ curl -X POST http://localhost:8000/nodes/metric/ \
 {{< tab "python" >}}
 
 ```py
-metric = dj.new_metric(
+from datajunction import DJBuilder, NodeMode
+dj = DJBuilder(DJ_URL)
+
+metric = dj.create_metric(
     name="default.num_repair_orders",
     description="Number of repair orders",
     query="SELECT count(repair_order_id) FROM repair_orders",
+    mode=NodeMode.PUBLISHED,  # for draft nodes, use `mode=NodeMode.DRAFT`
 )
-metric.save(NodeMode.PUBLISHED)
+print(metric.name)
 ```
 {{< /tab >}}
 {{< tab "javascript" >}}

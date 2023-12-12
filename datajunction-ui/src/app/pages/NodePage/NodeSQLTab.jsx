@@ -3,7 +3,6 @@ import Select from 'react-select';
 import DJClientContext from '../../providers/djclient';
 import { Light as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { foundation } from 'react-syntax-highlighter/src/styles/hljs';
-import { format } from 'sql-formatter';
 
 const NodeSQLTab = djNode => {
   const djClient = useContext(DJClientContext).DataJunctionAPI;
@@ -27,16 +26,6 @@ const NodeSQLTab = djNode => {
         label: dim.name + ` (${dim.type})`,
       }))
     : [''];
-
-  // const options = [
-  //   { value: '>=', label: '>=' },
-  //   { value: '<=', label: '<=' },
-  //   { value: '>', label: '>' },
-  //   { value: '<', label: '<' },
-  //   { value: '=', label: '=' },
-  //   { value: '!=', label: '!=' },
-  //   { value: 'IN', label: 'IN' },
-  // ];
 
   const handleSubmit = event => {
     event.preventDefault();
@@ -82,14 +71,7 @@ const NodeSQLTab = djNode => {
         >
           <h6 className="mb-0 w-100">Query</h6>
           <SyntaxHighlighter language="sql" style={foundation}>
-            {format(query, {
-              language: 'spark',
-              tabWidth: 2,
-              keywordCase: 'upper',
-              denseOperators: true,
-              logicalOperatorNewline: 'before',
-              expressionWidth: 10,
-            })}
+            {query}
           </SyntaxHighlighter>
         </div>
       </div>

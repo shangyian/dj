@@ -81,7 +81,7 @@ repos:
 #  - id: reorder-python-imports
 #    args: [--application-directories=.:src]
 - repo: https://github.com/hadialqattan/pycln
-  rev: v1.1.0 # Possible releases: https://github.com/hadialqattan/pycln/tags
+  rev: v2.1.7 # Possible releases: https://github.com/hadialqattan/pycln/tags
   hooks:
   - id: pycln
     args: [--config=pyproject.toml]
@@ -94,3 +94,7 @@ repos:
     language: system
     types: [python]
     exclude: ^templates/
+- repo: https://github.com/pdm-project/pdm
+  rev: 2.6.1
+  hooks:
+    - id: pdm-lock-check

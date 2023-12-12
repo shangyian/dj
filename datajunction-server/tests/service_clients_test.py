@@ -9,8 +9,12 @@ from requests import Request
 
 from datajunction_server.errors import DJQueryServiceClientException
 from datajunction_server.models import Engine
-from datajunction_server.models.materialization import GenericMaterializationInput
-from datajunction_server.models.node import NodeType
+from datajunction_server.models.materialization import (
+    GenericMaterializationInput,
+    MaterializationStrategy,
+)
+from datajunction_server.models.node_type import NodeType
+from datajunction_server.models.partition import PartitionBackfill
 from datajunction_server.models.query import QueryCreate
 from datajunction_server.service_clients import (
     QueryServiceClient,
@@ -208,7 +212,9 @@ class TestQueryServiceClient:  # pylint: disable=too-few-public-methods
         )
 
         query_service_client = QueryServiceClient(uri=self.endpoint)
-        query_service_client.get_query("ef209eef-c31a-4089-aae6-833259a08e22")
+        query_service_client.get_query(
+            "ef209eef-c31a-4089-aae6-833259a08e22",
+        )
 
         mock_request.assert_called_with(
             "/queries/ef209eef-c31a-4089-aae6-833259a08e22/",
@@ -234,6 +240,8 @@ class TestQueryServiceClient:  # pylint: disable=too-few-public-methods
         query_service_client.materialize(
             GenericMaterializationInput(
                 name="default",
+                job="SparkSqlMaterializationJob",
+                strategy=MaterializationStrategy.FULL,
                 node_name="default.hard_hat",
                 node_version="v1",
                 node_type=NodeType.DIMENSION,
@@ -242,6 +250,7 @@ class TestQueryServiceClient:  # pylint: disable=too-few-public-methods
                 spark_conf={},
                 upstream_tables=["default.hard_hats"],
                 partitions=[],
+                columns=[],
             ),
         )
 
@@ -249,6 +258,8 @@ class TestQueryServiceClient:  # pylint: disable=too-few-public-methods
             "/materialization/",
             json={
                 "name": "default",
+                "job": "SparkSqlMaterializationJob",
+                "strategy": "full",
                 "node_name": "default.hard_hat",
                 "node_version": "v1",
                 "node_type": "dimension",
@@ -257,6 +268,40 @@ class TestQueryServiceClient:  # pylint: disable=too-few-public-methods
                 "schedule": "0 * * * *",
                 "spark_conf": {},
                 "upstream_tables": ["default.hard_hats"],
+                "columns": [],
+            },
+        )
+
+    def test_query_service_client_deactivate_materialization(
+        self,
+        mocker: MockerFixture,
+    ) -> None:
+        """
+        Test deactivate materialization from a query service client.
+        """
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "urls": ["http://fake.url/job"],
+            "output_tables": ["common.a", "common.b"],
+        }
+
+        mock_request = mocker.patch(
+            "datajunction_server.service_clients.RequestsSessionWithEndpoint.delete",
+            return_value=mock_response,
+        )
+
+        query_service_client = QueryServiceClient(uri=self.endpoint)
+        query_service_client.deactivate_materialization(
+            node_name="default.hard_hat",
+            materialization_name="default",
+        )
+
+        mock_request.assert_called_with(
+            "/materialization/",
+            params={
+                "node_name": "default.hard_hat",
+                "materialization_name": "default",
             },
         )
 
@@ -279,7 +324,9 @@ class TestQueryServiceClient:  # pylint: disable=too-few-public-methods
         query_service_client = QueryServiceClient(uri=self.endpoint)
 
         with pytest.raises(DJQueryServiceClientException) as exc_info:
-            query_service_client.get_query("ef209eef-c31a-4089-aae6-833259a08e22")
+            query_service_client.get_query(
+                "ef209eef-c31a-4089-aae6-833259a08e22",
+            )
         assert "Error response from query service" in str(exc_info.value)
         query_create = QueryCreate(
             catalog_name="hive",
@@ -313,6 +360,8 @@ class TestQueryServiceClient:  # pylint: disable=too-few-public-methods
         response = query_service_client.materialize(
             GenericMaterializationInput(
                 name="default",
+                job="SparkSqlMaterializationJob",
+                strategy=MaterializationStrategy.FULL,
                 node_name="default.hard_hat",
                 node_version="v1",
                 node_type=NodeType.DIMENSION,
@@ -321,12 +370,15 @@ class TestQueryServiceClient:  # pylint: disable=too-few-public-methods
                 spark_conf={},
                 upstream_tables=["default.hard_hats"],
                 partitions=[],
+                columns=[],
             ),
         )
         mock_request.assert_called_with(
             "/materialization/",
             json={
                 "name": "default",
+                "job": "SparkSqlMaterializationJob",
+                "strategy": "full",
                 "node_name": "default.hard_hat",
                 "node_version": "v1",
                 "node_type": "dimension",
@@ -335,6 +387,7 @@ class TestQueryServiceClient:  # pylint: disable=too-few-public-methods
                 "upstream_tables": ["default.hard_hats"],
                 "spark_conf": {},
                 "partitions": [],
+                "columns": [],
             },
         )
         assert response == {
@@ -395,5 +448,35 @@ class TestQueryServiceClient:  # pylint: disable=too-few-public-methods
         )
         assert response == {
             "urls": [],
+            "output_tables": [],
+        }
+
+    def test_run_backfill(self, mocker: MockerFixture) -> None:
+        """
+        Test get materialization info with errors
+        """
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "urls": ["http://fake.url/job"],
+            "output_tables": [],
+        }
+
+        mocker.patch(
+            "datajunction_server.service_clients.RequestsSessionWithEndpoint.post",
+            return_value=mock_response,
+        )
+
+        query_service_client = QueryServiceClient(uri=self.endpoint)
+        response = query_service_client.run_backfill(
+            node_name="default.hard_hat",
+            backfill=PartitionBackfill(
+                column_name="hire_date",
+                range=["20230101", "20230201"],
+            ),
+            materialization_name="default",
+        )
+        assert response == {
+            "urls": ["http://fake.url/job"],
             "output_tables": [],
         }

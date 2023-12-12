@@ -9,7 +9,7 @@ from sqlalchemy.sql.schema import Column as SqlaColumn
 from sqlmodel import Field, Relationship
 
 from datajunction_server.models.base import BaseSQLModel
-from datajunction_server.models.node import NodeType
+from datajunction_server.models.node_type import NodeType
 
 if TYPE_CHECKING:
     from datajunction_server.models import Column
@@ -18,13 +18,20 @@ if TYPE_CHECKING:
 RESERVED_ATTRIBUTE_NAMESPACE = "system"
 
 
-class MutableAttributeTypeFields(BaseSQLModel):
+class AttributeTypeIdentifier(BaseSQLModel):
+    """
+    Fields that can be used to identify an attribute type.
+    """
+
+    namespace: str = "system"
+    name: str = Field(sa_column=SqlaColumn("name", String))
+
+
+class MutableAttributeTypeFields(AttributeTypeIdentifier):
     """
     Fields on attribute types that users can set.
     """
 
-    namespace: str
-    name: str = Field(sa_column=SqlaColumn("name", String))
     description: str
     allowed_node_types: List[NodeType] = Field(sa_column=SqlaColumn(JSON))
 

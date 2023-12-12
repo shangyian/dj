@@ -4,12 +4,16 @@ import { DataJunctionAPI } from '../../services/DJService';
 import DJClientContext from '../../providers/djclient';
 import { Light as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { foundation } from 'react-syntax-highlighter/src/styles/hljs';
-import { format } from 'sql-formatter';
 import Select from 'react-select';
 import QueryInfo from '../../components/QueryInfo';
+import 'react-querybuilder/dist/query-builder.scss';
+import QueryBuilder, { formatQuery } from 'react-querybuilder';
+import 'styles/styles.scss';
 
 export function SQLBuilderPage() {
+  const DEFAULT_NUM_ROWS = 100;
   const djClient = useContext(DJClientContext).DataJunctionAPI;
+  const validator = ruleType => !!ruleType.value;
   const [stagedMetrics, setStagedMetrics] = useState([]);
   const [metrics, setMetrics] = useState([]);
   const [commonDimensionsList, setCommonDimensionsList] = useState([]);
@@ -17,12 +21,13 @@ export function SQLBuilderPage() {
   const [stagedDimensions, setStagedDimensions] = useState([]);
   const [selectedMetrics, setSelectedMetrics] = useState([]);
   const [query, setQuery] = useState('');
-  const [submittedQueryInfo, setSubmittedQueryInfo] = useState(null);
+  const [fields, setFields] = useState([]);
+  const [filters, setFilters] = useState({ combinator: 'and', rules: [] });
+  const [queryInfo, setQueryInfo] = useState({});
   const [data, setData] = useState(null);
   const [loadingData, setLoadingData] = useState(false);
   const [viewData, setViewData] = useState(false);
-  const [showHelp, setShowHelp] = useState(true);
-  const [showNumRows, setShowNumRows] = useState(100);
+  const [showNumRows, setShowNumRows] = useState(DEFAULT_NUM_ROWS);
   const [displayedRows, setDisplayedRows] = useState(<></>);
   const numRowsOptions = [
     {
@@ -46,20 +51,43 @@ export function SQLBuilderPage() {
   // Get data for the current selection of metrics and dimensions
   const getData = () => {
     setLoadingData(true);
+    setQueryInfo({});
     const fetchData = async () => {
-      setData(null);
-      const queryInfo = await djClient.data(
-        selectedMetrics,
-        selectedDimensions,
-      );
-      setLoadingData(false);
-      setSubmittedQueryInfo(queryInfo);
-      queryInfo.numRows = 0;
-      if (queryInfo.results && queryInfo.results?.length) {
-        setData(queryInfo.results);
-        queryInfo.numRows = queryInfo.results[0].rows.length;
-        setViewData(true);
-        setShowNumRows(10);
+      if (process.env.REACT_USE_SSE) {
+        const sse = await djClient.stream(
+          selectedMetrics,
+          selectedDimensions,
+          formatQuery(filters, { format: 'sql', parseNumbers: true }),
+        );
+        sse.onmessage = e => {
+          const messageData = JSON.parse(JSON.parse(e.data));
+          setQueryInfo(messageData);
+          if (messageData.results) {
+            setLoadingData(false);
+            setData(messageData.results);
+            messageData.numRows = messageData.results?.length
+              ? messageData.results[0].rows.length
+              : [];
+            setViewData(true);
+            setShowNumRows(DEFAULT_NUM_ROWS);
+          }
+        };
+        sse.onerror = () => sse.close();
+      } else {
+        const response = await djClient.data(
+          selectedMetrics,
+          selectedDimensions,
+        );
+        setQueryInfo(response);
+        if (response.results) {
+          setLoadingData(false);
+          setData(response.results);
+          response.numRows = response.results?.length
+            ? response.results[0].rows.length
+            : [];
+          setViewData(true);
+          setShowNumRows(DEFAULT_NUM_ROWS);
+        }
       }
     };
     fetchData().catch(console.error);
@@ -69,25 +97,7 @@ export function SQLBuilderPage() {
     setQuery('');
     setData(null);
     setViewData(false);
-  };
-  const handleMetricSelect = event => {
-    const metrics = event.map(m => m.value);
-    resetView();
-    setStagedMetrics(metrics);
-  };
-
-  const handleMetricSelectorClose = () => {
-    setSelectedMetrics(stagedMetrics);
-  };
-
-  const handleDimensionSelect = event => {
-    const dimensions = event.map(d => d.value);
-    resetView();
-    setStagedDimensions(dimensions);
-  };
-
-  const handleDimensionSelectorClose = () => {
-    setSelectedDimensions(stagedDimensions);
+    setQueryInfo({});
   };
 
   // Get metrics
@@ -98,6 +108,24 @@ export function SQLBuilderPage() {
     };
     fetchData().catch(console.error);
   }, [djClient, djClient.metrics]);
+
+  const attributeToFormInput = dimension => {
+    const attribute = {
+      name: dimension.name,
+      label: `${dimension.name} (via ${dimension.path.join(' ▶ ')})`,
+      placeholder: `from ${dimension.path}`,
+      defaultOperator: '=',
+      validator,
+    };
+    if (dimension.type === 'bool') {
+      attribute.valueEditorType = 'checkbox';
+    }
+    if (dimension.type === 'timestamp') {
+      attribute.inputType = 'datetime-local';
+      attribute.defaultOperator = 'between';
+    }
+    return [dimension.name, attribute];
+  };
 
   // Get common dimensions
   useEffect(() => {
@@ -113,8 +141,15 @@ export function SQLBuilderPage() {
             path: d.path.join(' ▶ '),
           })),
         );
+        const uniqueFields = Object.fromEntries(
+          new Map(
+            commonDimensions.map(dimension => attributeToFormInput(dimension)),
+          ),
+        );
+        setFields(Object.keys(uniqueFields).map(f => uniqueFields[f]));
       } else {
         setCommonDimensionsList([]);
+        setFields([]);
       }
     };
     fetchData().catch(console.error);
@@ -123,23 +158,28 @@ export function SQLBuilderPage() {
   // Get SQL
   useEffect(() => {
     const fetchData = async () => {
-      if (selectedMetrics.length && selectedDimensions.length) {
-        const query = await djClient.sqls(selectedMetrics, selectedDimensions);
-        setShowHelp(false);
-        setQuery(query.sql);
+      if (
+        selectedMetrics.length > 0 &&
+        (selectedDimensions.length > 0 || filters.rules.length > 0)
+      ) {
+        const result = await djClient.sqls(
+          selectedMetrics,
+          selectedDimensions,
+          formatQuery(filters, { format: 'sql', parseNumbers: true }),
+        );
+        setQuery(result.sql);
       } else {
         resetView();
-        setShowHelp(true);
       }
     };
     fetchData().catch(console.error);
-  }, [selectedMetrics, selectedDimensions, djClient]);
+  }, [djClient, filters, selectedDimensions, selectedMetrics]);
 
   // Set number of rows to display
   useEffect(() => {
     if (data) {
       setDisplayedRows(
-        data[0].rows.slice(0, showNumRows).map((rowData, index) => (
+        data[0]?.rows.slice(0, showNumRows).map((rowData, index) => (
           <tr key={`data-row:${index}`}>
             {rowData.map(rowValue => (
               <td key={rowValue}>{rowValue}</td>
@@ -164,35 +204,63 @@ export function SQLBuilderPage() {
         <div className="card">
           <div className="card-header">
             <h4>Metrics</h4>
-            <Select
-              name="metrics"
-              options={metrics}
-              noOptionsMessage={() => 'No metrics found.'}
-              placeholder={`${metrics.length} Available Metrics`}
-              isMulti
-              isClearable
-              closeMenuOnSelect={false}
-              onChange={handleMetricSelect}
-              onMenuClose={handleMetricSelectorClose}
-            />
+            <span data-testid="select-metrics">
+              <Select
+                name="metrics"
+                options={metrics}
+                isDisabled={
+                  !!(selectedMetrics.length && selectedDimensions.length)
+                }
+                noOptionsMessage={() => 'No metrics found.'}
+                placeholder={`${metrics.length} Available Metrics`}
+                isMulti
+                isClearable
+                closeMenuOnSelect={false}
+                onChange={e => {
+                  setSelectedDimensions([]);
+                  resetView();
+                  setStagedMetrics(e.map(m => m.value));
+                  setSelectedMetrics(stagedMetrics);
+                }}
+                onMenuClose={() => {
+                  resetView();
+                  setSelectedDimensions([]);
+                  setSelectedMetrics(stagedMetrics);
+                }}
+              />
+            </span>
             <h4>Group By</h4>
-            <Select
-              name="dimensions"
-              formatOptionLabel={formatOptionLabel}
-              options={commonDimensionsList}
-              noOptionsMessage={() =>
-                'No shared dimensions found. Try selecting different metrics.'
-              }
-              placeholder={`${commonDimensionsList.length} Shared Dimensions`}
-              isMulti
-              isClearable
-              closeMenuOnSelect={false}
-              onChange={handleDimensionSelect}
-              onMenuClose={handleDimensionSelectorClose}
+            <span data-testid="select-dimensions">
+              <Select
+                name="dimensions"
+                formatOptionLabel={formatOptionLabel}
+                options={commonDimensionsList}
+                noOptionsMessage={() =>
+                  'No shared dimensions found. Try selecting different metrics.'
+                }
+                placeholder={`${commonDimensionsList.length} Shared Dimensions`}
+                isMulti
+                isClearable
+                closeMenuOnSelect={false}
+                onChange={e => {
+                  resetView();
+                  setStagedDimensions(e.map(d => d.value));
+                  setSelectedDimensions(stagedDimensions);
+                }}
+                onMenuClose={() => {
+                  setSelectedDimensions(stagedDimensions);
+                }}
+              />
+            </span>
+            <h4>Filter By</h4>
+            <QueryBuilder
+              fields={fields}
+              query={filters}
+              onQueryChange={q => setFilters(q)}
             />
           </div>
           <div className="card-header">
-            {showHelp ? (
+            {!viewData && !query ? (
               <div className="card-light-shadow">
                 <h6>Using the SQL Builder</h6>
                 <p>
@@ -231,11 +299,23 @@ export function SQLBuilderPage() {
             {query ? (
               <>
                 {loadingData ? (
-                  <span className="button-3 executing-button">
+                  <span
+                    className="button-3 executing-button"
+                    onClick={getData}
+                    role="button"
+                    aria-label="RunQuery"
+                    aria-hidden="false"
+                  >
                     {'Running Query'}
                   </span>
                 ) : (
-                  <span className="button-3 execute-button" onClick={getData}>
+                  <span
+                    className="button-3 execute-button"
+                    onClick={getData}
+                    role="button"
+                    aria-label="RunQuery"
+                    aria-hidden="false"
+                  >
                     {'Run Query'}
                   </span>
                 )}
@@ -272,18 +352,11 @@ export function SQLBuilderPage() {
             ) : (
               <></>
             )}
-            {submittedQueryInfo ? <QueryInfo {...submittedQueryInfo} /> : <></>}
+            {queryInfo && queryInfo.id ? <QueryInfo {...queryInfo} /> : <></>}
             <div>
               {query && !viewData ? (
                 <SyntaxHighlighter language="sql" style={foundation}>
-                  {format(query, {
-                    language: 'spark',
-                    tabWidth: 2,
-                    keywordCase: 'upper',
-                    denseOperators: true,
-                    logicalOperatorNewline: 'before',
-                    expressionWidth: 10,
-                  })}
+                  {query}
                 </SyntaxHighlighter>
               ) : (
                 ''
@@ -294,7 +367,7 @@ export function SQLBuilderPage() {
                 <table className="card-inner-table table">
                   <thead className="fs-7 fw-bold text-gray-400 border-bottom-0">
                     <tr>
-                      {data[0].columns.map(columnName => (
+                      {data[0]?.columns.map(columnName => (
                         <th key={columnName.name}>{columnName.name}</th>
                       ))}
                     </tr>

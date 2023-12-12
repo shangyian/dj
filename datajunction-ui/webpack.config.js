@@ -2,6 +2,8 @@ const webpack = require('webpack');
 const dotenv = require('dotenv').config();
 const path = require('path');
 const HtmlWebpackPlugin = require('html-webpack-plugin');
+const MiniCssExtractPlugin = require('mini-css-extract-plugin');
+
 require('dotenv').config({ path: './.env' });
 
 var babelOptions = {
@@ -31,7 +33,7 @@ module.exports = {
     },
   },
   resolve: {
-    extensions: ['.js', '.jsx', '.json', '.ts', '.tsx'],
+    extensions: ['.js', '.jsx', '.json', '.ts', '.tsx', '.scss'],
     modules: ['src', 'node_modules'],
     fallback: {
       path: false,
@@ -73,6 +75,10 @@ module.exports = {
         use: ['style-loader', 'css-loader'],
       },
       {
+        test: /\.(s(a|c)ss)$/,
+        use: [MiniCssExtractPlugin.loader, 'css-loader', 'sass-loader'],
+      },
+      {
         test: /\.js$/,
         exclude: /node_modules/,
         use: [
@@ -99,9 +105,14 @@ module.exports = {
   plugins: [
     new HtmlWebpackPlugin({
       template: path.resolve(__dirname, 'public', 'index.html'),
+      favicon: path.resolve(__dirname, 'public', 'favicon.ico'),
     }),
     new webpack.DefinePlugin({
       'process.env': JSON.stringify(process.env),
+    }),
+    new MiniCssExtractPlugin({
+      filename: '[name].css', // isDevelopment ? '[name].css' : '[name].[hash].css',
+      chunkFilename: '[id].css', // isDevelopment ? '[id].css' : '[id].[hash].css'
     }),
   ],
 };

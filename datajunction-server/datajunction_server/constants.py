@@ -15,3 +15,9 @@ DEFAULT_DIMENSION_COLUMN = "id"
 # used by the SQLAlchemy client
 QUERY_EXECUTE_TIMEOUT = timedelta(seconds=60)
 GET_COLUMNS_TIMEOUT = timedelta(seconds=60)
+
+AUTH_COOKIE = "__dj"
+LOGGED_IN_FLAG_COOKIE = "__djlif"
+
+# Maximum amount of nodes to return for requests to list all nodes
+NODE_LIST_MAX = 1000

@@ -477,9 +477,10 @@ def test_infer_types_array_map(construction_session: Session):
     exc = DJException()
     ctx = CompileContext(session=construction_session, exception=exc)
     query.compile(ctx)
-    with pytest.raises(DJParseException) as exc_info:
-        query.select.projection[0].type  # type: ignore  # pylint: disable=pointless-statement
-    assert "Different number of keys and values for MAP" in str(exc_info)
+    assert query.select.projection[0].type == MapType(  # type: ignore
+        key_type=IntegerType(),
+        value_type=StringType(),
+    )
 
     query = parse(
         """
@@ -562,7 +563,7 @@ def test_infer_types_exp(construction_session: Session):
         DoubleType(),
         DoubleType(),
         DoubleType(),
-        FloatType(),
+        IntegerType(),
         FloatType(),
         DoubleType(),
         DecimalType(precision=9, scale=6),
@@ -632,8 +633,8 @@ def test_infer_types_datetime(construction_session: Session):
           DATE_SUB('2020-01-01', 10),
           DATE_SUB(CURRENT_DATE(), 10),
 
-          DATE_DIFF('2020-01-01', '2021-01-01'),
-          DATE_DIFF(CURRENT_DATE(), CURRENT_DATE()),
+          DATEDIFF('2020-01-01', '2021-01-01'),
+          DATEDIFF(CURRENT_DATE(), CURRENT_DATE()),
 
 
           EXTRACT(YEAR FROM '2020-01-01 00:00:00'),

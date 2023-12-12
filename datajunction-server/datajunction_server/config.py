@@ -1,16 +1,19 @@
 """
-Configuration for the metric repository.
+Configuration for the datajunction server.
 """
 import urllib.parse
 from datetime import timedelta
 from pathlib import Path
-from typing import List, Optional
+from typing import TYPE_CHECKING, List, Optional
 
 from cachelib.base import BaseCache
 from cachelib.file import FileSystemCache
 from cachelib.redis import RedisCache
 from celery import Celery
 from pydantic import BaseSettings
+
+if TYPE_CHECKING:
+    from datajunction_server.models.access import AccessControl
 
 
 class Settings(
@@ -53,6 +56,40 @@ class Settings(
 
     # The namespace where source nodes for registered tables should exist
     source_node_namespace: Optional[str] = "source"
+
+    # This specifies what the DJ_LOGICAL_TIMESTAMP() macro should be replaced with.
+    # This defaults to an Airflow compatible value, but other examples include:
+    #   ${dj_logical_timestamp}
+    #   {{ dj_logical_timestamp }}
+    #   $dj_logical_timestamp
+    dj_logical_timestamp_format: Optional[str] = "${dj_logical_timestamp}"
+
+    # DJ UI host, used for OAuth redirection
+    frontend_host: Optional[str] = "http://localhost:3000"
+
+    # Library to use when transpiling SQL to other dialects
+    sql_transpilation_library: Optional[str] = None
+
+    # DJ secret, used to encrypt passwords and JSON web tokens
+    secret: Optional[str] = None
+
+    # GitHub OAuth application client ID
+    github_oauth_client_id: Optional[str] = None
+
+    # GitHub OAuth application client secret
+    github_oauth_client_secret: Optional[str] = None
+
+    # Google OAuth application client ID
+    google_oauth_client_id: Optional[str] = None
+
+    # Google OAuth application client secret
+    google_oauth_client_secret: Optional[str] = None
+
+    # Google OAuth application client secret file
+    google_oauth_client_secret_file: Optional[str] = None
+
+    # Interval in seconds with which to expire caching of any indexes
+    index_cache_expire = 60
 
     @property
     def celery(self) -> Celery:

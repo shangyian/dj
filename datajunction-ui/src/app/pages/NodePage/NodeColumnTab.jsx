@@ -1,7 +1,14 @@
-import { Component, useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 import ClientCodePopover from './ClientCodePopover';
+import * as React from 'react';
+import EditColumnPopover from './EditColumnPopover';
+import LinkDimensionPopover from './LinkDimensionPopover';
+import { labelize } from '../../../utils/form';
+import PartitionColumnPopover from './PartitionColumnPopover';
 
 export default function NodeColumnTab({ node, djClient }) {
+  const [attributes, setAttributes] = useState([]);
+  const [dimensions, setDimensions] = useState([]);
   const [columns, setColumns] = useState([]);
   useEffect(() => {
     const fetchData = async () => {
@@ -10,35 +17,158 @@ export default function NodeColumnTab({ node, djClient }) {
     fetchData().catch(console.error);
   }, [djClient, node]);
 
+  useEffect(() => {
+    const fetchData = async () => {
+      const attributes = await djClient.attributes();
+      const options = attributes.map(attr => {
+        return { value: attr.name, label: labelize(attr.name) };
+      });
+      setAttributes(options);
+    };
+    fetchData().catch(console.error);
+  }, [djClient]);
+
+  useEffect(() => {
+    const fetchData = async () => {
+      const dimensions = await djClient.dimensions();
+      const options = dimensions.map(name => {
+        return { value: name, label: name };
+      });
+      setDimensions(options);
+    };
+    fetchData().catch(console.error);
+  }, [djClient]);
+
+  const showColumnAttributes = col => {
+    return col.attributes.map((attr, idx) => (
+      <span
+        className="node_type__dimension badge node_type"
+        key={`col-attr-${col.name}-${idx}`}
+      >
+        {attr.attribute_type.name.replace(/_/, ' ')}
+      </span>
+    ));
+  };
+
+  const showColumnPartition = col => {
+    if (col.partition) {
+      return (
+        <>
+          <span
+            className="node_type badge node_type__blank"
+            key={`col-attr-partition-type`}
+          >
+            <span
+              className="partition_value badge"
+              key={`col-attr-partition-type`}
+            >
+              <b>Type:</b> {col.partition.type_}
+            </span>
+            <br />
+            <span
+              className="partition_value badge"
+              key={`col-attr-partition-type`}
+            >
+              <b>Format:</b> <code>{col.partition.format}</code>
+            </span>
+            <br />
+            <span
+              className="partition_value badge"
+              key={`col-attr-partition-type`}
+            >
+              <b>Granularity:</b> <code>{col.partition.granularity}</code>
+            </span>
+          </span>
+        </>
+      );
+    }
+    return '';
+  };
+
   const columnList = columns => {
     return columns.map(col => (
-      <tr>
-        <td className="text-start">{col.name}</td>
+      <tr key={col.name}>
+        <td
+          className="text-start"
+          role="columnheader"
+          aria-label="ColumnName"
+          aria-hidden="false"
+        >
+          {col.name}
+        </td>
         <td>
-          <span className="node_type__transform badge node_type">
-            {col.type}
+          <span
+            className=""
+            role="columnheader"
+            aria-label="ColumnDisplayName"
+            aria-hidden="false"
+          >
+            {col.display_name}
           </span>
         </td>
         <td>
-          {col.dimension ? (
-            <>
-              <a href={`/nodes/${col.dimension.name}`}>{col.dimension.name}</a>
-              <ClientCodePopover code={col.clientCode} />
-            </>
-          ) : (
-            ''
-          )}{' '}
+          <span
+            className={`node_type__${
+              node.type === 'cube' ? col.type : 'transform'
+            } badge node_type`}
+            role="columnheader"
+            aria-label="ColumnType"
+            aria-hidden="false"
+          >
+            {col.type}
+          </span>
         </td>
+        {node.type !== 'cube' ? (
+          <td>
+            {col.dimension !== undefined && col.dimension !== null ? (
+              <>
+                <a href={`/nodes/${col.dimension.name}`}>
+                  {col.dimension.name}
+                </a>
+                <ClientCodePopover code={col.clientCode} />
+              </>
+            ) : (
+              ''
+            )}{' '}
+            <LinkDimensionPopover
+              column={col}
+              node={node}
+              options={dimensions}
+              onSubmit={async () => {
+                const res = await djClient.node(node.name);
+                setColumns(res.columns);
+              }}
+            />
+          </td>
+        ) : (
+          ''
+        )}
+        {node.type !== 'cube' ? (
+          <td>
+            {showColumnAttributes(col)}
+            <EditColumnPopover
+              column={col}
+              node={node}
+              options={attributes}
+              onSubmit={async () => {
+                const res = await djClient.node(node.name);
+                setColumns(res.columns);
+              }}
+            />
+          </td>
+        ) : (
+          ''
+        )}
         <td>
-          {col.attributes.find(
-            attr => attr.attribute_type.name === 'dimension',
-          ) ? (
-            <span className="node_type__dimension badge node_type">
-              dimensional
-            </span>
-          ) : (
-            ''
-          )}
+          {showColumnPartition(col)}
+          <PartitionColumnPopover
+            column={col}
+            node={node}
+            onSubmit={async () => {
+              const res = await djClient.node(node.name);
+              setColumns(res.columns);
+            }}
+          />
         </td>
       </tr>
     ));
@@ -48,12 +178,22 @@ export default function NodeColumnTab({ node, djClient }) {
     <div className="table-responsive">
       <table className="card-inner-table table">
         <thead className="fs-7 fw-bold text-gray-400 border-bottom-0">
-          <th className="text-start">Column</th>
-          <th>Type</th>
-          <th>Dimension</th>
-          <th>Attributes</th>
+          <tr>
+            <th className="text-start">Column</th>
+            <th>Display Name</th>
+            <th>Type</th>
+            {node?.type !== 'cube' ? (
+              <>
+                <th>Linked Dimension</th>
+                <th>Attributes</th>
+              </>
+            ) : (
+              ''
+            )}
+            <th>Partition</th>
+          </tr>
         </thead>
-        {columnList(columns)}
+        <tbody>{columnList(columns)}</tbody>
       </table>
     </div>
   );

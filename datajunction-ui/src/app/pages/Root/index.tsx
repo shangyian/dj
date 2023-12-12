@@ -1,8 +1,17 @@
+import { useContext } from 'react';
 import { Outlet } from 'react-router-dom';
-import logo from './assets/dj-logo.png';
+import DJLogo from '../../icons/DJLogo';
 import { Helmet } from 'react-helmet-async';
+import DJClientContext from '../../providers/djclient';
+import Search from '../../components/Search';
 
 export function Root() {
+  const djClient = useContext(DJClientContext).DataJunctionAPI;
+
+  const handleLogout = async () => {
+    await djClient.logout();
+    window.location.reload();
+  };
   return (
     <>
       <Helmet>
@@ -16,10 +25,11 @@ export function Root() {
         <div className="header">
           <div className="logo">
             <h2>
-              <img src={logo} alt="DJ Logo" width="15%" />
-              DataJunction
+              <DJLogo />
+              Data<b>Junction</b>
             </h2>
           </div>
+          <Search />
           <div className="menu">
             <div className="menu-item here menu-here-bg menu-lg-down-accordion me-0 me-lg-2 fw-semibold">
               <span className="menu-link">
@@ -34,12 +44,27 @@ export function Root() {
               </span>
               <span className="menu-link">
                 <span className="menu-title">
-                  <a href="/">Help</a>
+                  <a
+                    href="https://www.datajunction.io"
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    Docs
+                  </a>
                 </span>
               </span>
             </div>
           </div>
         </div>
+        {process.env.REACT_DISABLE_AUTH === 'true' ? (
+          ''
+        ) : (
+          <span className="menu-link">
+            <span className="menu-title">
+              <a onClick={handleLogout}>Logout</a>
+            </span>
+          </span>
+        )}
       </div>
       <Outlet />
     </>

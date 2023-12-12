@@ -1,16 +1,14 @@
-# pylint: disable=too-many-lines
+# pylint: disable=too-many-lines,C0301
 
 """
 Post requests for all example entities
 """
-import uuid
-
 from datajunction_server.models import Column
 from datajunction_server.models.query import QueryWithResults
 from datajunction_server.sql.parsing.types import IntegerType, StringType, TimestampType
 from datajunction_server.typing import QueryState
 
-EXAMPLES = (  # type: ignore
+SERVICE_SETUP = (  # type: ignore
     (
         "/catalogs/",
         {"name": "draft"},
@@ -51,6 +49,13 @@ EXAMPLES = (  # type: ignore
         "/namespaces/default/",
         {},
     ),
+    (
+        "/namespaces/basic/",
+        {},
+    ),
+)
+
+ROADS = (  # type: ignore
     (
         "/nodes/source/",
         {
@@ -374,15 +379,12 @@ EXAMPLES = (  # type: ignore
                         state_id,
                         state_name,
                         state_abbr AS state_short,
-                        state_region,
-                        r.us_region_description AS state_region_description
+                        state_region
                         FROM default.us_states s
-                        LEFT JOIN default.us_region r
-                        ON s.state_region = r.us_region_id
                     """,
             "mode": "published",
             "name": "default.us_state",
-            "primary_key": ["state_id"],
+            "primary_key": ["state_short"],
         },
     ),
     (
@@ -426,12 +428,136 @@ EXAMPLES = (  # type: ignore
         },
     ),
     (
+        "/nodes/transform/",
+        {
+            "name": "default.regional_level_agg",
+            "description": "Regional-level aggregates",
+            "mode": "published",
+            "primary_key": [
+                "us_region_id",
+                "state_name",
+                "order_year",
+                "order_month",
+                "order_day",
+            ],
+            "query": """
+WITH ro as (SELECT
+        repair_order_id,
+        municipality_id,
+        hard_hat_id,
+        order_date,
+        required_date,
+        dispatched_date,
+        dispatcher_id
+    FROM default.repair_orders)
+            SELECT
+    usr.us_region_id,
+    us.state_name,
+    CONCAT(us.state_name, '-', usr.us_region_description) AS location_hierarchy,
+    EXTRACT(YEAR FROM ro.order_date) AS order_year,
+    EXTRACT(MONTH FROM ro.order_date) AS order_month,
+    EXTRACT(DAY FROM ro.order_date) AS order_day,
+    COUNT(DISTINCT CASE WHEN ro.dispatched_date IS NOT NULL THEN ro.repair_order_id ELSE NULL END) AS completed_repairs,
+    COUNT(DISTINCT ro.repair_order_id) AS total_repairs_dispatched,
+    SUM(rd.price * rd.quantity) AS total_amount_in_region,
+    AVG(rd.price * rd.quantity) AS avg_repair_amount_in_region,
+    -- ELEMENT_AT(ARRAY_SORT(COLLECT_LIST(STRUCT(COUNT(*) AS cnt, rt.repair_type_name AS repair_type_name)), (left, right) -> case when left.cnt < right.cnt then 1 when left.cnt > right.cnt then -1 else 0 end), 0).repair_type_name AS most_common_repair_type,
+    AVG(DATEDIFF(ro.dispatched_date, ro.order_date)) AS avg_dispatch_delay,
+    COUNT(DISTINCT c.contractor_id) AS unique_contractors
+FROM ro
+JOIN
+    default.municipality m ON ro.municipality_id = m.municipality_id
+JOIN
+    default.us_states us ON m.state_id = us.state_id
+                         AND AVG(rd.price * rd.quantity) >
+                            (SELECT AVG(price * quantity) FROM default.repair_order_details WHERE repair_order_id = ro.repair_order_id)
+JOIN
+    default.us_states us ON m.state_id = us.state_id
+JOIN
+    default.us_region usr ON us.state_region = usr.us_region_id
+JOIN
+    default.repair_order_details rd ON ro.repair_order_id = rd.repair_order_id
+JOIN
+    default.repair_type rt ON rd.repair_type_id = rt.repair_type_id
+JOIN
+    default.contractors c ON rt.contractor_id = c.contractor_id
+GROUP BY
+    usr.us_region_id,
+    EXTRACT(YEAR FROM ro.order_date),
+    EXTRACT(MONTH FROM ro.order_date),
+    EXTRACT(DAY FROM ro.order_date)""",
+        },
+    ),
+    (
+        "/nodes/transform/",
+        {
+            "description": "National level aggregates",
+            "name": "default.national_level_agg",
+            "mode": "published",
+            "query": "SELECT SUM(rd.price * rd.quantity) AS total_amount_nationwide FROM default.repair_order_details rd",
+        },
+    ),
+    (
+        "/nodes/transform/",
+        {
+            "description": "Fact transform with all details on repair orders",
+            "name": "default.repair_orders_fact",
+            "display_name": "Repair Orders Fact",
+            "mode": "published",
+            "query": """SELECT
+  repair_orders.repair_order_id,
+  repair_orders.municipality_id,
+  repair_orders.hard_hat_id,
+  repair_orders.dispatcher_id,
+  repair_orders.order_date,
+  repair_orders.dispatched_date,
+  repair_orders.required_date,
+  repair_order_details.discount,
+  repair_order_details.price,
+  repair_order_details.quantity,
+  repair_order_details.repair_type_id,
+  repair_order_details.price * repair_order_details.quantity AS total_repair_cost,
+  repair_orders.dispatched_date - repair_orders.order_date AS time_to_dispatch,
+  repair_orders.dispatched_date - repair_orders.required_date AS dispatch_delay
+FROM
+  default.repair_orders repair_orders
+JOIN
+  default.repair_order_details repair_order_details
+ON repair_orders.repair_order_id = repair_order_details.repair_order_id""",
+        },
+    ),
+    (
+        "/nodes/metric/",
+        {
+            "description": """For each US region (as defined in the us_region table), we want to calculate:
+            Regional Repair Efficiency = (Number of Completed Repairs / Total Repairs Dispatched) ×
+                                         (Total Repair Amount in Region / Total Repair Amount Nationwide) × 100
+            Here:
+                A "Completed Repair" is one where the dispatched_date is not null.
+                "Total Repair Amount in Region" is the total amount spent on repairs in a given region.
+                "Total Repair Amount Nationwide" is the total amount spent on all repairs nationwide.""",
+            "name": "default.regional_repair_efficiency",
+            "query": """SELECT
+    (SUM(rm.completed_repairs) * 1.0 / SUM(rm.total_repairs_dispatched)) *
+    (SUM(rm.total_amount_in_region) * 1.0 / SUM(na.total_amount_nationwide)) * 100
+FROM
+    default.regional_level_agg rm
+CROSS JOIN
+    default.national_level_agg na""",
+            "mode": "published",
+        },
+    ),
+    (
         "/nodes/metric/",
         {
             "description": "Number of repair orders",
-            "query": ("SELECT count(repair_order_id) " "FROM default.repair_orders"),
+            "query": ("SELECT count(repair_order_id) FROM default.repair_orders_fact"),
             "mode": "published",
             "name": "default.num_repair_orders",
+            "metric_metadata": {
+                "direction": "higher_is_better",
+                "unit": "dollar",
+            },
         },
     ),
     (
@@ -439,8 +565,7 @@ EXAMPLES = (  # type: ignore
         {
             "description": "Average repair price",
             "query": (
-                "SELECT avg(price) as default_DOT_avg_repair_price "
-                "FROM default.repair_order_details"
+                "SELECT avg(repair_orders_fact.price) FROM default.repair_orders_fact repair_orders_fact"
             ),
             "mode": "published",
             "name": "default.avg_repair_price",
@@ -450,7 +575,8 @@ EXAMPLES = (  # type: ignore
         "/nodes/metric/",
         {
             "description": "Total repair cost",
-            "query": "SELECT sum(price) FROM default.repair_order_details",
+            "query": "SELECT sum(repair_orders_fact.total_repair_cost) "
+            "FROM default.repair_orders_fact repair_orders_fact",
             "mode": "published",
             "name": "default.total_repair_cost",
         },
@@ -459,10 +585,7 @@ EXAMPLES = (  # type: ignore
         "/nodes/metric/",
         {
             "description": "Average length of employment",
-            "query": (
-                "SELECT avg(NOW() - hire_date) as default_DOT_avg_length_of_employment "
-                "FROM default.hard_hats"
-            ),
+            "query": ("SELECT avg(NOW() - hire_date) " "FROM default.hard_hat"),
             "mode": "published",
             "name": "default.avg_length_of_employment",
         },
@@ -476,7 +599,7 @@ EXAMPLES = (  # type: ignore
                 SELECT
                   cast(sum(if(discount > 0.0, 1, 0)) as double) / count(*)
                     AS default_DOT_discounted_orders_rate
-                FROM default.repair_order_details
+                FROM default.repair_orders_fact
                 """
             ),
             "mode": "published",
@@ -487,9 +610,7 @@ EXAMPLES = (  # type: ignore
         "/nodes/metric/",
         {
             "description": "Total repair order discounts",
-            "query": (
-                "SELECT sum(price * discount) " "FROM default.repair_order_details"
-            ),
+            "query": ("SELECT sum(price * discount) FROM default.repair_orders_fact"),
             "mode": "published",
             "name": "default.total_repair_order_discounts",
         },
@@ -497,10 +618,8 @@ EXAMPLES = (  # type: ignore
     (
         "/nodes/metric/",
         {
-            "description": "Total repair order discounts",
-            "query": (
-                "SELECT avg(price * discount) " "FROM default.repair_order_details"
-            ),
+            "description": "Average repair order discounts",
+            "query": ("SELECT avg(price * discount) FROM default.repair_orders_fact"),
             "mode": "published",
             "name": "default.avg_repair_order_discounts",
         },
@@ -510,12 +629,42 @@ EXAMPLES = (  # type: ignore
         {
             "description": "Average time to dispatch a repair order",
             "query": (
-                "SELECT avg(dispatched_date - order_date) " "FROM default.repair_orders"
+                "SELECT avg(cast(repair_orders_fact.time_to_dispatch as int)) "
+                "FROM default.repair_orders_fact repair_orders_fact"
             ),
             "mode": "published",
+            "display_name": "Avg Time To Dispatch",
             "name": "default.avg_time_to_dispatch",
         },
     ),
+    (
+        (
+            "/nodes/default.repair_orders_fact/columns/municipality_id/"
+            "?dimension=default.municipality_dim"
+        ),
+        {},
+    ),
+    (
+        (
+            "/nodes/default.repair_orders_fact/columns/hard_hat_id/"
+            "?dimension=default.hard_hat"
+        ),
+        {},
+    ),
+    (
+        (
+            "/nodes/default.repair_orders_fact/columns/dispatcher_id/"
+            "?dimension=default.dispatcher"
+        ),
+        {},
+    ),
+    # (
+    #     (
+    #         "/nodes/default.repair_orders_fact/columns/order_date/"
+    #         "?dimension=default.date_dim"
+    #     ),
+    #     {},
+    # ),
     (
         (
             "/nodes/default.repair_order_details/columns/repair_order_id/"
@@ -538,10 +687,7 @@ EXAMPLES = (  # type: ignore
         {},
     ),
     (
-        (
-            "/nodes/default.hard_hat/columns/state/"
-            "?dimension=default.us_state&dimension_column=state_short"
-        ),
+        ("/nodes/default.hard_hat/columns/state/?dimension=default.us_state"),
         {},
     ),
     (
@@ -572,6 +718,9 @@ EXAMPLES = (  # type: ignore
         ),
         {},
     ),
+)
+
+NAMESPACED_ROADS = (  # type: ignore
     (  # foo.bar Namespaced copy of roads database example
         "/namespaces/foo.bar/",
         {},
@@ -1071,6 +1220,9 @@ EXAMPLES = (  # type: ignore
         ),
         {},
     ),
+)
+
+ACCOUNT_REVENUE = (  # type: ignore
     (  # Accounts/Revenue examples begin
         "/nodes/source/",
         {
@@ -1184,10 +1336,9 @@ EXAMPLES = (  # type: ignore
             "name": "default.number_of_account_types",
         },
     ),
-    (
-        "/namespaces/basic/",
-        {},
-    ),
+)
+
+BASIC = (  # type: ignore
     (
         "/namespaces/basic.source/",
         {},
@@ -1302,6 +1453,9 @@ EXAMPLES = (  # type: ignore
             "name": "basic.num_users",
         },
     ),
+)
+
+EVENT = (  # type: ignore
     (  # Event examples
         "/nodes/source/",
         {
@@ -1348,6 +1502,13 @@ EXAMPLES = (  # type: ignore
         {},
     ),
     (
+        (
+            "/nodes/default.long_events/columns/country/?"
+            "dimension=default.country_dim&dimension_column=country"
+        ),
+        {},
+    ),
+    (
         "/nodes/metric/",
         {
             "name": "default.device_ids_count",
@@ -1365,6 +1526,9 @@ EXAMPLES = (  # type: ignore
             "mode": "published",
         },
     ),
+)
+
+DBT = (  # type: ignore
     (
         "/namespaces/dbt.source/",
         {},
@@ -1523,7 +1687,10 @@ EXAMPLES = (  # type: ignore
             "name": "default.total_profit",
         },
     ),
-    # lateral view explode/cross join unnest examples
+)
+
+# lateral view explode/cross join unnest examples
+LATERAL_VIEW = (  # type: ignore
     (
         "/nodes/source/",
         {
@@ -1575,7 +1742,7 @@ EXAMPLES = (  # type: ignore
         {
             "query": """
             SELECT
-              cast(color_id as varchar) color_id,
+              cast(color_id as string) color_id,
               color_name,
               opacity,
               luminosity,
@@ -1617,15 +1784,14 @@ EXAMPLES = (  # type: ignore
             SELECT
               id AS mural_id,
               color_id,
-              color_name color_name
+              color_name
             FROM
             (
               select
                 id,
-                colors
+                EXPLODE(colors) AS (color_id, color_name)
               from basic.murals
-            ) murals
-            LATERAL VIEW EXPLODE(colors) AS color_id, color_name
+            )
             """,
             "description": "Mural paint colors",
             "mode": "published",
@@ -1644,6 +1810,9 @@ EXAMPLES = (  # type: ignore
             "name": "basic.avg_luminosity_patches",
         },
     ),
+)
+
+DIMENSION_LINK = (  # type: ignore
     (
         "/nodes/source/",
         {
@@ -1781,6 +1950,17 @@ EXAMPLES = (  # type: ignore
     ),
 )
 
+EXAMPLES = {  # type: ignore
+    "ROADS": ROADS,
+    "NAMESPACED_ROADS": NAMESPACED_ROADS,
+    "ACCOUNT_REVENUE": ACCOUNT_REVENUE,
+    "BASIC": BASIC,
+    "EVENT": EVENT,
+    "DBT": DBT,
+    "LATERAL_VIEW": LATERAL_VIEW,
+    "DIMENSION_LINK": DIMENSION_LINK,
+}
+
 
 COLUMN_MAPPINGS = {
     "public.basic.comments": [
@@ -1789,42 +1969,29 @@ COLUMN_MAPPINGS = {
         Column(name="timestamp", type=TimestampType()),
         Column(name="text", type=StringType()),
     ],
+    "default.roads.repair_orders": [
+        Column(name="repair_order_id", type=IntegerType()),
+        Column(name="municipality_id", type=StringType()),
+        Column(name="hard_hat_id", type=IntegerType()),
+        Column(name="order_date", type=TimestampType()),
+        Column(name="required_date", type=TimestampType()),
+        Column(name="dispatched_date", type=TimestampType()),
+        Column(name="dispatcher_id", type=IntegerType()),
+        Column(name="rating", type=IntegerType()),
+    ],
 }
 
 QUERY_DATA_MAPPINGS = {
     (
-        "WITHm0_default_DOT_num_repair_ordersAS(SELECTdefault_DOT_dispatcher.company_name,\t"
-        "count(default_DOT_repair_orders.repair_order_id)default_DOT_num_repair_ordersFROM"
-        "roads.repair_ordersASdefault_DOT_repair_ordersLEFTOUTERJOIN(SELECTdefault_DOT_repair"
-        "_orders.dispatcher_id,\tdefault_DOT_repair_orders.hard_hat_id,\tdefault_DOT_repair_"
-        "orders.municipality_id,\tdefault_DOT_repair_orders.repair_order_idFROMroads.repair_"
-        "ordersASdefault_DOT_repair_orders)ASdefault_DOT_repair_orderONdefault_DOT_repair_"
-        "orders.repair_order_id=default_DOT_repair_order.repair_order_idLEFTOUTERJOIN(SELECT"
-        "default_DOT_dispatchers.company_name,\tdefault_DOT_dispatchers.dispatcher_idFROMroads"
-        ".dispatchersASdefault_DOT_dispatchers)ASdefault_DOT_dispatcherONdefault_DOT_repair_order"
-        ".dispatcher_id=default_DOT_dispatcher.dispatcher_idGROUPBYdefault_DOT_dispatcher."
-        "company_name),m1_default_DOT_avg_repair_priceAS(SELECTdefault_DOT_dispatcher.company_"
-        "name,\tavg(default_DOT_repair_order_details.price)ASdefault_DOT_avg_repair_priceFROM"
-        "roads.repair_order_detailsASdefault_DOT_repair_order_detailsLEFTOUTERJOIN(SELECTdefault"
-        "_DOT_repair_orders.dispatcher_id,\tdefault_DOT_repair_orders.hard_hat_id,\tdefault_DOT"
-        "_repair_orders.municipality_id,\tdefault_DOT_repair_orders.repair_order_idFROMroads."
-        "repair_ordersASdefault_DOT_repair_orders)ASdefault_DOT_repair_orderONdefault_DOT_repair"
-        "_order_details.repair_order_id=default_DOT_repair_order.repair_order_idLEFTOUTERJOIN("
-        "SELECTdefault_DOT_dispatchers.company_name,\tdefault_DOT_dispatchers.dispatcher_idFROM"
-        "roads.dispatchersASdefault_DOT_dispatchers)ASdefault_DOT_dispatcherONdefault_DOT_repair"
-        "_order.dispatcher_id=default_DOT_dispatcher.dispatcher_idGROUPBYdefault_DOT_dispatcher."
-        "company_name)SELECTm0_default_DOT_num_repair_orders.default_DOT_num_repair_orders,\tm1_"
-        "default_DOT_avg_repair_price.default_DOT_avg_repair_price,\tCOALESCE(m0_default_DOT_num_"
-        "repair_orders.company_name,m1_default_DOT_avg_repair_price.company_name)company_nameFROM"
-        "m0_default_DOT_num_repair_ordersFULLOUTERJOINm1_default_DOT_avg_repair_priceONm0_default_"
-        "DOT_num_repair_orders.company_name=m1_default_DOT_avg_repair_price.company_nameLIMIT10"
+        "WITHdefault_DOT_repair_ordersAS(SELECTdefault_DOT_dispatcher.company_namedefault_DOT_dispatcher_DOT_company_name,count(default_DOT_repair_orders.repair_order_id)default_DOT_num_repair_ordersFROMroads.repair_ordersASdefault_DOT_repair_ordersLEFTOUTERJOIN(SELECTdefault_DOT_repair_orders.dispatcher_id,default_DOT_repair_orders.hard_hat_id,default_DOT_repair_orders.municipality_id,default_DOT_repair_orders.repair_order_idFROMroads.repair_ordersASdefault_DOT_repair_orders)ASdefault_DOT_repair_orderONdefault_DOT_repair_orders.repair_order_id=default_DOT_repair_order.repair_order_idLEFTOUTERJOIN(SELECTdefault_DOT_dispatchers.company_name,default_DOT_dispatchers.dispatcher_idFROMroads.dispatchersASdefault_DOT_dispatchers)ASdefault_DOT_dispatcherONdefault_DOT_repair_order.dispatcher_id=default_DOT_dispatcher.dispatcher_idGROUPBYdefault_DOT_dispatcher.company_name),default_DOT_repair_order_detailsAS(SELECTdefault_DOT_dispatcher.company_namedefault_DOT_dispatcher_DOT_company_name,avg(default_DOT_repair_order_details.price)ASdefault_DOT_avg_repair_priceFROMroads.repair_order_detailsASdefault_DOT_repair_order_detailsLEFTOUTERJOIN(SELECTdefault_DOT_repair_orders.dispatcher_id,default_DOT_repair_orders.hard_hat_id,default_DOT_repair_orders.municipality_id,default_DOT_repair_orders.repair_order_idFROMroads.repair_ordersASdefault_DOT_repair_orders)ASdefault_DOT_repair_orderONdefault_DOT_repair_order_details.repair_order_id=default_DOT_repair_order.repair_order_idLEFTOUTERJOIN(SELECTdefault_DOT_dispatchers.company_name,default_DOT_dispatchers.dispatcher_idFROMroads.dispatchersASdefault_DOT_dispatchers)ASdefault_DOT_dispatcherONdefault_DOT_repair_order.dispatcher_id=default_DOT_dispatcher.dispatcher_idGROUPBYdefault_DOT_dispatcher.company_name)SELECTdefault_DOT_repair_orders.default_DOT_num_repair_orders,default_DOT_repair_order_details.default_DOT_avg_repair_price,COALESCE(default_DOT_repair_orders.default_DOT_dispatcher_DOT_company_name,default_DOT_repair_order_details.default_DOT_dispatcher_DOT_company_name)default_DOT_dispatcher_DOT_company_nameFROMdefault_DOT_repair_ordersFULLOUTERJOINdefault_DOT_repair_order_detailsONdefault_DOT_repair_orders.default_DOT_dispatcher_DOT_company_name=default_DOT_repair_order_details.default_DOT_dispatcher_DOT_company_nameLIMIT10"
     )
     .strip()
     .replace('"', "")
     .replace("\n", "")
+    .replace("\t", "")
     .replace(" ", ""): QueryWithResults(
         **{
-            "id": uuid.UUID("bd98d6be-e2d2-413e-94c7-96d9411ddee2"),
+            "id": "bd98d6be-e2d2-413e-94c7-96d9411ddee2",
             "submitted_query": (
                 "SELECT  avg(repair_order_details.price) AS "
                 "default_DOT_avg_repair_price,\\n\\tdispatcher.company_name,"
@@ -1851,128 +2018,6 @@ QUERY_DATA_MAPPINGS = {
                     "rows": [
                         (1.0, "Foo", 100),
                         (2.0, "Bar", 200),
-                    ],
-                    "sql": "",
-                },
-            ],
-            "errors": [],
-        }
-    ),
-    (
-        "SELECT  default_DOT_payment_type_table.id,\n\t"
-        "default_DOT_payment_type_table.payment_type_classification,\n\t"
-        "default_DOT_payment_type_table.payment_type_name \n FROM "
-        "accounting.payment_type_table AS default_DOT_payment_type_table"
-    )
-    .strip()
-    .replace('"', "")
-    .replace("\n", "")
-    .replace(" ", ""): QueryWithResults(
-        **{
-            "id": uuid.UUID("0cb5478c-fd7d-4159-a414-68c50f4b9914"),
-            "submitted_query": (
-                "SELECT  payment_type_table.id,\n\tpayment_type_table."
-                "payment_type_classification,\n\t"
-                'payment_type_table.payment_type_name \n FROM "accounting"."payment_type_table" '
-                "AS payment_type_table"
-            ),
-            "state": QueryState.FINISHED,
-            "results": [
-                {
-                    "columns": [
-                        {"name": "id", "type": "int"},
-                        {"name": "payment_type_classification", "type": "string"},
-                        {"name": "payment_type_name", "type": "string"},
-                    ],
-                    "rows": [
-                        (1, "CARD", "VISA"),
-                        (2, "CARD", "MASTERCARD"),
-                    ],
-                    "sql": "",
-                },
-            ],
-            "errors": [],
-        }
-    ),
-    (
-        "SELECT  COUNT(1) basic_DOT_num_comments \n FROM "
-        '"basic"."comments" AS basic_DOT_source_DOT_comments'
-    )
-    .strip()
-    .replace('"', "")
-    .replace("\n", "")
-    .replace(" ", ""): QueryWithResults(
-        **{
-            "id": uuid.UUID("ee41ea6c-2303-4fe1-8bf0-f0ce3d6a35ca"),
-            "submitted_query": (
-                'SELECT  COUNT(1) basic_DOT_num_comments \n FROM "basic"."comments" '
-                "AS basic_DOT_source_DOT_comments"
-            ),
-            "state": QueryState.FINISHED,
-            "results": [
-                {
-                    "columns": [{"name": "cnt", "type": "long"}],
-                    "rows": [
-                        (1,),
-                    ],
-                    "sql": "",
-                },
-            ],
-            "errors": [],
-        }
-    ),
-    'SELECT  * \n FROM "accounting"."revenue"'.strip()
-    .replace('"', "")
-    .replace("\n", "")
-    .replace(" ", ""): QueryWithResults(
-        **{
-            "id": uuid.UUID("8a8bb03a-74c8-448a-8630-e9439bd5a01b"),
-            "submitted_query": ('SELECT  * \n FROM "accounting"."revenue"'),
-            "state": QueryState.FINISHED,
-            "results": [
-                {
-                    "columns": [{"name": "profit", "type": "float"}],
-                    "rows": [
-                        (129.19,),
-                    ],
-                    "sql": "",
-                },
-            ],
-            "errors": [],
-        }
-    ),
-    (
-        "SELECT  default_DOT_revenue.account_type,\n\tdefault_DOT_revenue.customer_id,"
-        "\n\tdefault_DOT_revenue.payment_amount,"
-        '\n\tdefault_DOT_revenue.payment_id \n FROM "accounting"."revenue" '
-        "AS default_DOT_revenue\n \n WHERE  default_DOT_revenue.payment_amount "
-        "> 1000000"
-    )
-    .strip()
-    .replace('"', "")
-    .replace("\n", "")
-    .replace(" ", ""): QueryWithResults(
-        **{
-            "id": uuid.UUID("1b049fb1-652e-458a-ba9d-3669412b34bd"),
-            "submitted_query": (
-                "SELECT  revenue.account_type,\n\trevenue.customer_id,\n\trevenue.payment_amount,"
-                '\n\trevenue.payment_id \n FROM "accounting"."revenue" AS revenue\n \n '
-                "WHERE  revenue.payment_amount > 1000000"
-            ),
-            "state": QueryState.FINISHED,
-            "results": [
-                {
-                    "columns": [
-                        {"name": "account_type", "type": "string"},
-                        {"name": "customer_id", "type": "int"},
-                        {"name": "payment_amount", "type": "string"},
-                        {"name": "payment_id", "type": "int"},
-                    ],
-                    "rows": [
-                        ("CHECKING", 2, "22.50", 1),
-                        ("SAVINGS", 2, "100.50", 1),
-                        ("CREDIT", 1, "11.50", 1),
-                        ("CHECKING", 2, "2.50", 1),
                     ],
                     "sql": "",
                 },

@@ -32,14 +32,10 @@ spellcheck:
 check:
 	pdm run pre-commit run --all-files
 
-version:
-	@hatch version $(v)
-	@git add __about__.py
-	@git commit -m "Bumping to v$$(hatch version)"
-	@git tag v$$(hatch version)
-	@git push
-	@git push --tags
-	@hatch version
+lint:
+	make check
 
-release:
-	@hatch publish
+dev-release:
+	hatch version dev
+	hatch build
+	hatch publish

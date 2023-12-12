@@ -1,6 +1,5 @@
-import React, { memo } from 'react';
+import { memo } from 'react';
 import { Handle, Position } from 'reactflow';
-import { DJNodeDimensions } from './DJNodeDimensions';
 import Collapse from './Collapse';
 
 function capitalize(string) {
@@ -43,6 +42,8 @@ export function DJNode({ id, data }) {
     <>
       <div
         className={'dj-node__full node_type__' + data.type + highlightNodeClass}
+        key={data.name}
+        style={{ width: '450px' }}
       >
         <div style={handleWrapperStyle}>
           <Handle
@@ -61,7 +62,8 @@ export function DJNode({ id, data }) {
           </div>
         </div>
         <div className="dj-node__body">
-          <b>{capitalize(data.type)}</b>:{' '}
+          <b>{capitalize(data.type)}</b>
+          <br />{' '}
           <a href={`/nodes/${data.name}`}>
             {data.type === 'source' ? data.table : data.display_name}
           </a>

@@ -9,9 +9,11 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import select
 from sqlmodel import Session, SQLModel
 
-from datajunction_server.utils import get_session
+from datajunction_server.utils import get_session, get_settings
 
-router = APIRouter()
+settings = get_settings()
+
+router = APIRouter(tags=["health"])
 
 
 class HealthcheckStatus(str, enum.Enum):

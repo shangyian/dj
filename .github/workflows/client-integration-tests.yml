@@ -1,4 +1,4 @@
-name: Client Integration Tests
+name: "Manual : Run client integration tests"
 on:
   schedule:
     - cron:  '0 12 * * *'
@@ -13,7 +13,7 @@ jobs:
     steps:
       - uses: actions/checkout@v2
       - name: Build and launch DJ demo environment
-        run: docker-compose --profile demo up -d
+        run: DOTENV_FILE="/code/datajunction-server/.env.integration" docker-compose --profile demo up -d
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v2
         with:
@@ -28,9 +28,9 @@ jobs:
       - name: Install dependencies
         run: |
           pdm sync -d
-          cd ./client/python; pdm install -d -G pandas
+          cd ./datajunction-clients/python; pdm install -d -G pandas
       - name: Python client integration tests
-        run: cd client/python && make test PYTEST_ARGS="--integration -k test_integration"
+        run: cd datajunction-clients/python && make test PYTEST_ARGS="--integration -k test_integration"
 
   javascript-client-integration:
     runs-on: ubuntu-latest
@@ -47,7 +47,33 @@ jobs:
           node-version: ${{ matrix.node-version }}
       - name: Install Dev Dependencies
         run: npm install --only=dev
-        working-directory: ./client/javascript
+        working-directory: ./datajunction-clients/javascript
       - name: Javascript client integration tests
         run: npm test
-        working-directory: ./client/javascript
+        working-directory: ./datajunction-clients/javascript
+
+  java-client-integration:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        java-version: [ 17 ]
+        distribution: [ 'temurin' ]
+    steps:
+      - uses: actions/checkout@v3
+      - name: Build and launch DJ demo environment
+        run: docker-compose --profile demo up -d
+      - name: Set up JDK ${{ matrix.java-version }}
+        uses: actions/setup-java@v3
+        with:
+          java-version: ${{ matrix.java-version }}
+          distribution: ${{ matrix.distribution }}
+      - name: Official Gradle Wrapper Validation Action
+        uses: gradle/wrapper-validation-action@v1
+      - name: Build with Gradle
+        uses: gradle/gradle-build-action@v2
+        with:
+          arguments: cleanTest test
+          build-root-directory: ./datajunction-clients/java
+
+
+

@@ -18,6 +18,8 @@ services:
     environment:
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4317
       - OTEL_RESOURCE_ATTRIBUTES=service.name=datajunction.server
+      - DOTENV_FILE=${DOTENV_FILE:-/code/.env}
+      - OAUTHLIB_INSECURE_TRANSPORT=1
     build:
       context: ./datajunction-server
       args:
@@ -97,7 +99,7 @@ services:
     profiles: ["demo"]
     build:
       context: ./datajunction-reflection
-    command: ["celery", "-A", "djrs.worker.app", "worker", "--loglevel", "INFO"]
+    command: ["celery", "-A", "datajunction_reflection.worker.app", "worker", "--loglevel", "INFO"]
     networks:
       - core
       - djrs-network
@@ -113,7 +115,7 @@ services:
     build:
       context: ./datajunction-reflection
     command:
-      ["celery", "--app", "djrs.worker.app", "beat", "--loglevel", "INFO"]
+      ["celery", "--app", "datajunction_reflection.worker.app", "beat", "--loglevel", "INFO"]
     networks:
       - djrs-network
     depends_on:
@@ -133,7 +135,7 @@ services:
       - "8181:8888"
     volumes:
       - ./notebooks:/home/jovyan/notebooks
-      - ./client/python:/home/jovyan/notebooks/datajunction
+      - ./datajunction-clients/python:/home/jovyan/notebooks/datajunction
     environment:
       JUPYTER_ENABLE_LAB: "yes"
     command: /bin/bash -c "pip install -e /home/jovyan/notebooks/datajunction/ && start-notebook.sh --NotebookApp.token='' --NotebookApp.password=''"

@@ -1,10 +1,18 @@
-name: Run tests for DJ
+name: "PR update : Run tests and linters"
 
 on:
-  push:
-    branches: [ main ]
   pull_request:
     branches: [ main ]
+    paths-ignore:
+      # python
+      - datajunction-clients/python/__about__.py
+      - datajunction-server/datajunction_server/__about__.py
+      - datajunction-query/djqs/__about__.py
+      - datajunction-reflection/datajunction_reflection/__about__.py
+      # javascript
+      - datajunction-clients/javascript/package.json
+      - datajunction-ui/package.json
+      # java: TODO
 
 concurrency:
   group: ${{ github.ref }}
@@ -28,6 +36,21 @@ jobs:
 
     steps:
       - uses: actions/checkout@v2
+      - uses: dorny/paths-filter@v2
+        id: filter
+        with:
+          filters: |
+            client:
+              - 'datajunction-clients/python/**'
+              # run Python unit tests also when server is updated (because server changes can break the client)
+              - 'datajunction-server/**'
+            server:
+              - 'datajunction-server/**'
+            djqs:
+              - 'datajunction-query/**'
+            djrs:
+              - 'datajunction-reflection/**'
+
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v2
         with:
@@ -41,27 +64,30 @@ jobs:
           prerelease: true
           enable-pep582: true
 
-      - name: Install dependencies
+      - name: Run Tests
+        if: |
+          (matrix.library == 'client' && steps.filter.outputs.client == 'true') ||
+          (matrix.library == 'server' && steps.filter.outputs.server == 'true') ||
+          (matrix.library == 'djqs' && steps.filter.outputs.djqs == 'true') ||
+          (matrix.library == 'djrs' && steps.filter.outputs.djrs == 'true')
         run: |
-          pdm sync -d
-          export tests_dir=${{ matrix.library == 'server' && './datajunction-server' || matrix.library == 'client' && './client/python' || matrix.library == 'djqs' && './datajunction-query' || matrix.library == 'djrs' && './datajunction-reflection'}}
-          cd $tests_dir; pdm install -d -G pandas
+          echo "Testing ${{ matrix.library }} ..."
+          export TEST_DIR=${{ matrix.library == 'server' && './datajunction-server' || matrix.library == 'client' && './datajunction-clients/python' || matrix.library == 'djqs' && './datajunction-query' || matrix.library == 'djrs' && './datajunction-reflection'}}
+
+          # Install dependencies
+          pdm sync -d; cd $TEST_DIR; pdm install -d -G pandas; pdm install -d -G transpilation
+
+          # Run linters
+          pdm run pre-commit run --all-files
+
+          # Run tests
+          export MODULE=${{ matrix.library == 'server' && 'datajunction_server' || matrix.library == 'client' && 'datajunction' || matrix.library == 'djqs' && 'djqs' || matrix.library == 'djrs' && 'datajunction_reflection'}}
+          pdm run pytest ${{ matrix.library == 'server' && '-n auto' || '' }} --cov-fail-under=100 --cov=$MODULE -vv tests/ --doctest-modules $MODULE --without-integration --without-slow-integration
 
       - uses: pre-commit/action@v3.0.0
         name: Force check of all pdm.lock files
         with:
           extra_args: pdm-lock-check --all-files
-
-      - name: Python Linters
-        run: |
-          export tests_dir=${{ matrix.library == 'server' && './datajunction-server' || matrix.library == 'client' && './client/python' || matrix.library == 'djqs' && './datajunction-query' || matrix.library == 'djrs' && './datajunction-reflection'}}
-          cd $tests_dir; pdm run pre-commit run --all-files
-
-      - name: Test DJ ${{ matrix.library }} with pytest
-        run: |
-          export module=${{ matrix.library == 'server' && 'datajunction_server' || matrix.library == 'client' && 'datajunction' || matrix.library == 'djqs' && 'djqs' || matrix.library == 'djrs' && 'djrs'}}
-          export tests_dir=${{ matrix.library == 'server' && './datajunction-server' || matrix.library == 'client' && './client/python' || matrix.library == 'djqs' && './datajunction-query' || matrix.library == 'djrs' && './datajunction-reflection'}}
-          cd $tests_dir; pdm run pytest ${{ matrix.library == 'server' && '-n auto' || '' }} --cov-fail-under=100 --cov=$module -vv tests/ --doctest-modules $module --without-integration --without-slow-integration
 
   build-javascript:
     runs-on: ubuntu-latest
@@ -76,13 +102,13 @@ jobs:
           node-version: ${{ matrix.node-version }}
       - name: Install Dev Dependencies
         run: npm install --only=dev
-        working-directory: ./client/javascript
+        working-directory: ./datajunction-clients/javascript
       - name: Build Javascript Client
         run: npm run build
-        working-directory: ./client/javascript
+        working-directory: ./datajunction-clients/javascript
       - name: Lint Javascript Client
         run: npm run lint
-        working-directory: ./client/javascript
+        working-directory: ./datajunction-clients/javascript
 
   build-ui:
     runs-on: ubuntu-latest
@@ -102,6 +128,26 @@ jobs:
       - name: Install Dependencies
         run: yarn install
       - name: Run Unit Tests
-        run: yarn test
+        run: yarn test --runInBand --ci --coverage
       - name: Build Project
         run: yarn webpack-build
+
+  build-java:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./datajunction-clients/java
+    steps:
+      - uses: actions/checkout@v3
+      - name: Set up JDK 17
+        uses: actions/setup-java@v3
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+      - name: Official Gradle Wrapper Validation Action
+        uses: gradle/wrapper-validation-action@v1
+      - name: Build with Gradle
+        uses: gradle/gradle-build-action@v2
+        with:
+          arguments: build -x test
+          build-root-directory: ./datajunction-clients/java

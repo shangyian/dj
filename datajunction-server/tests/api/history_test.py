@@ -27,11 +27,11 @@ def test_history_hash():
     assert hash(foo1) == hash(foo2)
 
 
-def test_get_history_entity(client_with_examples: TestClient):
+def test_get_history_entity(client_with_roads: TestClient):
     """
     Test getting history for an entity
     """
-    response = client_with_examples.get("/history/node/default.repair_orders/")
+    response = client_with_roads.get("/history/node/default.repair_orders/")
     assert response.ok
     history = response.json()
     assert len(history) == 1
@@ -46,18 +46,18 @@ def test_get_history_entity(client_with_examples: TestClient):
             "entity_type": "node",
             "entity_name": "default.repair_orders",
             "activity_type": "create",
-            "user": None,
+            "user": "dj",
             "details": {},
         },
     ]
 
 
-def test_get_history_node(client_with_examples: TestClient):
+def test_get_history_node(client_with_roads: TestClient):
     """
     Test getting history for a node
     """
 
-    response = client_with_examples.get("/history?node=default.repair_order")
+    response = client_with_roads.get("/history?node=default.repair_order")
     assert response.ok
     history = response.json()
     assert len(history) == 5
@@ -72,18 +72,18 @@ def test_get_history_node(client_with_examples: TestClient):
             "id": mock.ANY,
             "post": {},
             "pre": {},
-            "user": None,
+            "user": "dj",
         },
         {
             "activity_type": "set_attribute",
             "node": "default.repair_order",
             "created_at": mock.ANY,
             "details": {
+                "column": "repair_order_id",
                 "attributes": [
                     {
-                        "attribute_type_name": "primary_key",
-                        "attribute_type_namespace": "system",
-                        "column_name": "repair_order_id",
+                        "name": "primary_key",
+                        "namespace": "system",
                     },
                 ],
             },
@@ -92,7 +92,7 @@ def test_get_history_node(client_with_examples: TestClient):
             "id": mock.ANY,
             "post": {},
             "pre": {},
-            "user": None,
+            "user": "dj",
         },
         {
             "activity_type": "create",
@@ -108,7 +108,7 @@ def test_get_history_node(client_with_examples: TestClient):
             "id": mock.ANY,
             "post": {},
             "pre": {},
-            "user": None,
+            "user": "dj",
         },
         {
             "activity_type": "create",
@@ -124,7 +124,7 @@ def test_get_history_node(client_with_examples: TestClient):
             "id": mock.ANY,
             "post": {},
             "pre": {},
-            "user": None,
+            "user": "dj",
         },
         {
             "activity_type": "create",
@@ -140,17 +140,17 @@ def test_get_history_node(client_with_examples: TestClient):
             "id": mock.ANY,
             "post": {},
             "pre": {},
-            "user": None,
+            "user": "dj",
         },
     ]
 
 
-def test_get_history_namespace(client_with_examples: TestClient):
+def test_get_history_namespace(client_with_service_setup: TestClient):
     """
     Test getting history for a node context
     """
 
-    response = client_with_examples.get("/history/namespace/default")
+    response = client_with_service_setup.get("/history/namespace/default")
     assert response.ok
     history = response.json()
     assert len(history) == 1
@@ -165,6 +165,6 @@ def test_get_history_namespace(client_with_examples: TestClient):
             "id": mock.ANY,
             "post": {},
             "pre": {},
-            "user": None,
+            "user": "dj",
         },
     ]

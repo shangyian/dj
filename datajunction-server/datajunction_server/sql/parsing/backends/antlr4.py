@@ -266,6 +266,39 @@ def _(ctx: sbp.StatementDefaultContext):
 
 
 @visit.register
+def _(ctx: sbp.InlineTableDefault2Context):
+    return visit(ctx.inlineTable())
+
+
+@visit.register
+def _(ctx: sbp.RowConstructorContext):
+    namedExpr = visit(ctx.namedExpression())
+    return namedExpr
+
+
+@visit.register
+def _(ctx: sbp.InlineTableContext):
+    args = visit(ctx.expression())
+    alias, columns = visit(ctx.tableAlias())
+
+    # Generate default column aliases if they weren't specified
+    inline_table_columns = (
+        [ast.Column(col, _type=value.type) for col, value in zip(columns, args[0])]
+        if columns
+        else [
+            ast.Column(ast.Name(f"col{idx + 1}"), _type=value.type)
+            for idx, value in enumerate(args[0])
+        ]
+    )
+    return ast.InlineTable(
+        name=alias,
+        _columns=inline_table_columns,
+        explicit_columns=len(columns) > 0,
+        values=[value for value in args],
+    )
+
+
+@visit.register
 def _(ctx: sbp.QueryContext):
     ctes = []
     if ctes_ctx := ctx.ctes():
@@ -597,7 +630,7 @@ def _(ctx: sbp.FunctionCallContext):
     name = visit(ctx.functionName())
     quantifier = visit(ctx.setQuantifier()) if ctx.setQuantifier() else ""
     over = visit(ctx.windowSpec()) if ctx.windowSpec() else None
-    args = visit((ctx.argument))
+    args = visit(ctx.argument)
     return ast.Function(name, args, quantifier=quantifier, over=over)
 
 
@@ -642,7 +675,6 @@ def _(ctx: sbp.QualifiedNameContext):
 
 @visit.register
 def _(ctx: sbp.StarContext):
-
     namespace = None
     if qual_name := ctx.qualifiedName():
         namespace = visit(qual_name)
@@ -967,8 +999,11 @@ def _(ctx: sbp.SubqueryContext):
 
 
 @visit.register
-def _(ctx: sbp.StructContext) -> ast.Struct:
-    return ast.Struct(visit(ctx.argument))
+def _(ctx: sbp.StructContext) -> ast.Function:
+    return ast.Function(
+        ast.Name("struct"),
+        args=visit(ctx.argument),
+    )
 
 
 @visit.register

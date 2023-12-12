@@ -1,9 +1,8 @@
 ---
 weight: 50
+title: "Cubes"
 mermaid: true
 ---
-
-# Cubes
 
 Cubes are used to represent a set of metrics with dimensions and filters.
 
@@ -43,10 +42,14 @@ curl -X POST http://localhost:8000/nodes/cube/ \
 {{< tab "python" >}}
 
 ```py
-dj.new_cube(
+from datajunction import DJBuilder, NodeMode
+dj = DJBuilder(DJ_URL)
+
+repairs_cube = dj.create_cube(
     name="repairs_cube",
     display_name="Repairs Cube",
     description="Cube of various metrics related to repairs",
+    mode=NodeMode.PUBLISHED,  # for draft nodes, use `mode=NodeMode.DRAFT`
     metrics=[
         "num_repair_orders",
         "avg_repair_price",
@@ -61,7 +64,7 @@ dj.new_cube(
         "municipality_dim.local_region"
     ],
     filters=["hard_hat.state='AZ'"]
-).save()
+)
 ```
 {{< /tab >}}
 {{< tab "javascript" >}}
@@ -88,13 +91,13 @@ dj.cubes.create(
 ## Adding Materialization Config
 
 Any non-source node in DJ can have user-configurable materialization settings, but for cube nodes, DJ
-will seed the node with a set of generic cube materialization settings that can be used downstream by 
-different materialization engines. Like all other non-source nodes, users can then set engine-specific 
+will seed the node with a set of generic cube materialization settings that can be used downstream by
+different materialization engines. Like all other non-source nodes, users can then set engine-specific
 materialization config, which will be layered on top of the generic cube materialization settings.
 
 DJ currently supports materialization of cubes into Druid.
 
-This can be added using the following request, assuming that the Druid engine is already configured in 
+This can be added using the following request, assuming that the Druid engine is already configured in
 your DJ setup:
 {{< tabs "adding materialization" >}}
 {{< tab "curl" >}}

@@ -1,20 +1,28 @@
 """
 Models for columns.
 """
+import enum
 from typing import TYPE_CHECKING, List, Optional, Tuple, TypedDict
 
 from pydantic import root_validator
 from sqlalchemy import TypeDecorator
 from sqlalchemy.sql.schema import Column as SqlaColumn
-from sqlalchemy.types import Text
+from sqlalchemy.types import String, Text
 from sqlmodel import Field, Relationship
 
-from datajunction_server.models.base import BaseSQLModel, NodeColumns
+from datajunction_server.models.base import (
+    BaseSQLModel,
+    NodeColumns,
+    generate_display_name,
+    labelize,
+)
 from datajunction_server.sql.parsing.types import ColumnType
 
 if TYPE_CHECKING:
     from datajunction_server.models.attribute import ColumnAttribute
+    from datajunction_server.models.measure import Measure
     from datajunction_server.models.node import Node, NodeRevision
+    from datajunction_server.models.partition import Partition, PartitionType
 
 
 class ColumnYAML(TypedDict, total=False):
@@ -56,6 +64,13 @@ class Column(BaseSQLModel, table=True):  # type: ignore
 
     id: Optional[int] = Field(default=None, primary_key=True)
     name: str
+    display_name: Optional[str] = Field(
+        sa_column=SqlaColumn(
+            "display_name",
+            String,
+            default=generate_display_name("name"),
+        ),
+    )
     type: ColumnType = Field(sa_column=SqlaColumn(ColumnTypeDecorator, nullable=False))
 
     dimension_id: Optional[int] = Field(default=None, foreign_key="node.id")
@@ -78,12 +93,44 @@ class Column(BaseSQLModel, table=True):  # type: ignore
             "lazy": "joined",
         },
     )
+    measure_id: Optional[int] = Field(default=None, foreign_key="measures.id")
+    measure: "Measure" = Relationship(back_populates="columns")
+
+    partition_id: Optional[int] = Field(default=None, foreign_key="partition.id")
+    partition: "Partition" = Relationship(
+        sa_relationship_kwargs={
+            "lazy": "joined",
+            "primaryjoin": "Column.id==Partition.column_id",
+            "uselist": False,
+            "cascade": "all,delete",
+        },
+    )
+
+    @root_validator(pre=True)
+    def default_display_name(cls, values):  # pylint: disable=no-self-argument
+        """
+        Populate unset display name based on the column's name
+        """
+        values = dict(values)
+        if "display_name" not in values or not values["display_name"]:
+            values["display_name"] = labelize(values["name"])
+        return values
 
     def identifier(self) -> Tuple[str, ColumnType]:
         """
         Unique identifier for this column.
         """
         return self.name, self.type
+
+    def is_dimensional(self) -> bool:
+        """
+        Whether this column is considered dimensional
+        """
+        return (
+            self.has_dimension_attribute()
+            or self.has_primary_key_attribute()
+            or self.dimension
+        )
 
     def has_dimension_attribute(self) -> bool:
         """
@@ -120,6 +167,19 @@ class Column(BaseSQLModel, table=True):  # type: ignore
         values["type"] = str(values.get("type"))
         return values
 
+    def node_revision(self) -> Optional["NodeRevision"]:
+        """
+        Returns the most recent node revision associated with this column
+        """
+        available_revisions = sorted(self.node_revisions, key=lambda n: n.updated_at)
+        return available_revisions[-1] if available_revisions else None
+
+    def full_name(self) -> str:
+        """
+        Full column name that includes the node it belongs to, i.e., default.hard_hat.first_name
+        """
+        return f"{self.node_revision().name}.{self.name}"  # type: ignore
+
 
 class ColumnAttributeInput(BaseSQLModel):
     """
@@ -129,3 +189,13 @@ class ColumnAttributeInput(BaseSQLModel):
     attribute_type_namespace: Optional[str] = "system"
     attribute_type_name: str
     column_name: str
+
+
+class SemanticType(str, enum.Enum):
+    """
+    Semantic type of a column
+    """
+
+    MEASURE = "measure"
+    METRIC = "metric"
+    DIMENSION = "dimension"

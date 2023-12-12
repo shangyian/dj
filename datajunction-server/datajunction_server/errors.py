@@ -37,6 +37,16 @@ class ErrorCode(int, Enum):
     MISSING_PARENT = 301
     TYPE_INFERENCE = 302
 
+    # Authentication
+    AUTHENTICATION_ERROR = 400
+    OAUTH_ERROR = 401
+    INVALID_LOGIN_CREDENTIALS = 402
+    USER_NOT_FOUND = 403
+
+    # Authorization
+    UNAUTHORIZED_ACCESS = 500
+    INCOMPLETE_AUTHORIZATION = 501
+
 
 class DebugType(TypedDict, total=False):
     """
@@ -202,6 +212,12 @@ class DJException(Exception):
         )
 
 
+class DJNodeNotFound(DJException):
+    """
+    Exception raised when a given node name is not found.
+    """
+
+
 class DJInvalidInputException(DJException):
     """
     Exception raised when the input provided by the user is invalid.
@@ -254,3 +270,15 @@ class DJQueryServiceClientException(DJException):
 
     dbapi_exception: DBAPIExceptions = "InterfaceError"
     http_status_code: int = 500
+
+
+class DJActionNotAllowedException(DJException):
+    """
+    Exception raised when an action is not allowed.
+    """
+
+
+class DJPluginNotFoundException(DJException):
+    """
+    Exception raised when plugin is not found.
+    """

@@ -1,22 +1,36 @@
 """Functions to add to an ast DJ node queries"""
 import collections
+import logging
+import time
 
 # pylint: disable=too-many-arguments,too-many-locals,too-many-nested-blocks,too-many-branches,R0401
+# pylint: disable=too-many-lines
 from typing import DefaultDict, Deque, Dict, List, Optional, Set, Tuple, Union, cast
 
 from sqlmodel import Session
 
 from datajunction_server.construction.utils import to_namespaced_name
 from datajunction_server.errors import DJException, DJInvalidInputException
-from datajunction_server.models.column import Column
+from datajunction_server.internal.engines import get_engine
+from datajunction_server.models import User, access
+from datajunction_server.models.column import Column, SemanticType
 from datajunction_server.models.engine import Dialect
 from datajunction_server.models.materialization import GenericCubeConfig
-from datajunction_server.models.node import BuildCriteria, Node, NodeRevision, NodeType
+from datajunction_server.models.metric import TranslatedSQL
+from datajunction_server.models.node import BuildCriteria, Node, NodeRevision
+from datajunction_server.models.node_type import NodeType
 from datajunction_server.sql.dag import get_shared_dimensions
 from datajunction_server.sql.parsing.ast import CompileContext
 from datajunction_server.sql.parsing.backends.antlr4 import ast, parse
 from datajunction_server.sql.parsing.types import ColumnType
-from datajunction_server.utils import amenable_name
+from datajunction_server.utils import (
+    LOOKUP_CHARS,
+    SEPARATOR,
+    amenable_name,
+    from_amenable_name,
+)
+
+_logger = logging.getLogger(__name__)
 
 
 def _get_tables_from_select(
@@ -69,15 +83,17 @@ def _join_path(
             full_join_path = (joinable_dim, next_join_path)
             if joinable_dim == dimension_node:
                 for col in join_cols:
-                    if col.dimension_column is None and not any(
-                        dim_col.name == "id" for dim_col in dimension_node.columns
-                    ):
-                        raise DJException(
-                            f"Node {current_node.name} specifying dimension "
-                            f"{joinable_dim.name} on column {col.name} does not"
-                            f" specify a dimension column, but {dimension_node.name} "
-                            f"does not have the default key `id`.",
-                        )
+                    dim_pk = dimension_node.primary_key()
+                    if not col.dimension_column:
+                        if len(dim_pk) != 1:
+                            raise DJException(  # pragma: no cover
+                                f"Node {current_node.name} specifying dimension "
+                                f"{joinable_dim.name} on column {col.name} does not"
+                                f" specify a dimension column, and {dimension_node.name} "
+                                f"has a compound primary key.",
+                            )
+                        col.dimension_column = dim_pk[0].name
+
                 possible_join_paths.append(full_join_path)  # type: ignore
             if joinable_dim not in processed:  # pragma: no cover
                 to_process.append(full_join_path)
@@ -236,6 +252,7 @@ def join_tables_for_dimensions(
     the select, it will traverse through available linked tables (via dimension
     nodes) and join them in.
     """
+    initial_nodes = set(tables)
     for dim_node, required_dimension_columns in sorted(
         dimension_nodes_to_columns.items(),
         key=lambda x: x[0].name,
@@ -249,7 +266,6 @@ def join_tables_for_dimensions(
         # Join the source tables (if necessary) for these dimension columns
         # onto each select clause
         for select in selects_map:
-            initial_nodes = set(tables)
             if dim_node not in initial_nodes:  # need to join dimension
                 join_asts = _build_joins_for_dimension(
                     session,
@@ -269,7 +285,11 @@ def _build_tables_on_select(
     session: Session,
     select: ast.SelectExpression,
     tables: Dict[NodeRevision, List[ast.Table]],
+    memoized_queries: Dict[int, ast.Query],
     build_criteria: Optional[BuildCriteria] = None,
+    filters: Optional[List[str]] = None,
+    dimensions: Optional[List[str]] = None,
+    access_control=None,
 ):
     """
     Add all nodes not agg or filter dimensions to the select
@@ -279,14 +299,55 @@ def _build_tables_on_select(
             Optional[ast.Table],
             _get_node_table(node, build_criteria),
         )  # got a materialization
+        fk_column_mapping = {
+            ",".join(
+                sorted([pk.name for pk in col.dimension.current.primary_key()]),
+            ): col
+            for col in node.columns
+            if col.dimension
+        }
+
         if node_table is None:  # no materialization - recurse to node first
             node_query = parse(cast(str, node.query))
-            node_table = build_ast(  # type: ignore
-                session,
-                node_query,
-                build_criteria,
-            ).select  # pylint: disable=W0212
-            node_table.parenthesized = True  # type: ignore
+            if hash(node_query) in memoized_queries:  # pragma: no cover
+                node_table = memoized_queries[hash(node_query)].select  # type: ignore
+            else:
+                if filters:
+                    filter_asts = (  # pylint: disable=consider-using-ternary
+                        node_query.select.where and [node_query.select.where] or []
+                    )
+                    for filter_ in filters:
+                        temp_select = parse(f"select * where {filter_}").select
+                        referenced_cols = list(temp_select.find_all(ast.Column))
+
+                        # We can only push down the filter if all columns referenced by the filter
+                        # are available as foreign key columns on the node
+                        if all(
+                            col.alias_or_name.name in fk_column_mapping
+                            for col in referenced_cols
+                        ):
+                            for col in referenced_cols:
+                                col.name = ast.Name(
+                                    name=fk_column_mapping[col.alias_or_name.name].name,
+                                )
+                            filter_asts.append(
+                                temp_select.where,  # type:ignore
+                            )
+                    if filter_asts:
+                        node_query.select.where = ast.BinaryOp.And(*filter_asts)
+
+                query_ast = build_ast(  # type: ignore
+                    session,
+                    node_query,
+                    memoized_queries,
+                    build_criteria,
+                    filters,
+                    dimensions,
+                    access_control,
+                )
+                node_table = query_ast.select  # type: ignore
+                node_table.parenthesized = True  # type: ignore
+                memoized_queries[hash(node_query)] = query_ast
 
         alias = amenable_name(node.node.name)
         context = CompileContext(session=session, exception=DJException())
@@ -300,7 +361,6 @@ def _build_tables_on_select(
                     if col in set(tbl.child.select.projection)
                 ]
             node_ast.compile(context)
-
             select.replace(
                 tbl,
                 node_ast,
@@ -332,7 +392,11 @@ def dimension_columns_mapping(
 def _build_select_ast(
     session: Session,
     select: ast.SelectExpression,
+    memoized_queries: Dict[int, ast.Query],
     build_criteria: Optional[BuildCriteria] = None,
+    filters: Optional[List[str]] = None,
+    dimensions: Optional[List[str]] = None,
+    access_control=None,
 ):
     """
     Transforms a select ast by replacing dj node references with their asts
@@ -343,17 +407,65 @@ def _build_select_ast(
     tables = _get_tables_from_select(select)
     dimension_columns = dimension_columns_mapping(select)
     join_tables_for_dimensions(session, dimension_columns, tables, build_criteria)
-    _build_tables_on_select(session, select, tables, build_criteria)
+    _build_tables_on_select(
+        session,
+        select,
+        tables,
+        memoized_queries,
+        build_criteria,
+        filters,
+        dimensions,
+        access_control,
+    )
+
+
+def rename_dimension_primary_keys_to_foreign_keys(
+    dimension_node: Node,
+    current_node: NodeRevision,
+    col: ast.Column,
+) -> ast.Column:
+    """
+    Optimize the query build by renaming any requested dimension node primary key columns to
+    foreign keys on the current processing node. This results in one less join if the user is
+    only requesting the dimension node's primary key, since that column is already present via
+    current node's foreign key column.
+    """
+    if (
+        dimension_node.name != current_node.name
+        and dimension_node.type == NodeType.DIMENSION
+    ):
+        dimension_pk = ",".join(
+            [pk_col.name for pk_col in dimension_node.current.primary_key()],
+        )
+        if dimension_pk == col.alias_or_name.name:
+            foreign_key = [
+                col
+                for col in current_node.columns
+                if col.dimension and col.dimension.name == dimension_node.name
+            ]
+            if foreign_key:
+                col.name = ast.Name(
+                    foreign_key[0].name,
+                    namespace=to_namespaced_name(current_node.name),
+                )
+            col.set_alias(
+                ast.Name(amenable_name(dimension_node.name + SEPARATOR + dimension_pk)),
+            )
+    return col
 
 
 # pylint: disable=R0915
 def add_filters_dimensions_orderby_limit_to_query_ast(
+    session: Session,
+    node: NodeRevision,
     query: ast.Query,
     dialect: Optional[str] = None,  # pylint: disable=unused-argument
     filters: Optional[List[str]] = None,
     dimensions: Optional[List[str]] = None,
     orderby: Optional[List[str]] = None,
     limit: Optional[int] = None,
+    include_dimensions_in_groupby: bool = True,
+    access_control: Optional[access.AccessControlStore] = None,
 ):
     """
     Add filters and dimensions to a query ast
@@ -365,9 +477,22 @@ def add_filters_dimensions_orderby_limit_to_query_ast(
             temp_select = parse(
                 f"select * group by {agg}",
             ).select
-            query.select.group_by += temp_select.group_by  # type:ignore
+            if include_dimensions_in_groupby:
+                query.select.group_by += temp_select.group_by  # type:ignore
             for col in temp_select.find_all(ast.Column):
                 projection_addition[col.identifier(False)] = col
+
+                if access_control:
+                    dj_node = access_control.add_request_by_node_name(
+                        session,
+                        col,
+                    )
+                    if dj_node:
+                        rename_dimension_primary_keys_to_foreign_keys(
+                            dj_node,
+                            node,
+                            col,
+                        )
 
     if filters:
         filter_asts = (  # pylint: disable=consider-using-ternary
@@ -383,6 +508,17 @@ def add_filters_dimensions_orderby_limit_to_query_ast(
             for col in temp_select.find_all(ast.Column):
                 if not dimensions:
                     projection_addition[col.identifier(False)] = col
+                if access_control:
+                    dj_node = access_control.add_request_by_node_name(
+                        session,
+                        col,
+                    )
+                    if dj_node:  # pragma: no cover
+                        rename_dimension_primary_keys_to_foreign_keys(
+                            dj_node,
+                            node,
+                            col,
+                        )
 
         query.select.where = ast.BinaryOp.And(*filter_asts)
 
@@ -397,6 +533,12 @@ def add_filters_dimensions_orderby_limit_to_query_ast(
             query.select.organization.order += (  # type:ignore
                 temp_query.select.organization.order  # type:ignore
             )
+            for col in temp_query.find_all(ast.Column):
+                if access_control:  # pragma: no cover
+                    access_control.add_request_by_node_name(
+                        session,
+                        col,
+                    )
 
     # add all used dimension columns to the projection without duplicates
     projection_update = []
@@ -442,7 +584,14 @@ def _get_node_table(
             )
         else:
             name = to_namespaced_name(node.name)
-        table = ast.Table(name, _dj_node=node)
+        table = ast.Table(
+            name,
+            _columns=[
+                ast.Column(name=ast.Name(col.name), _type=col.type)
+                for col in node.columns
+            ],
+            _dj_node=node,
+        )
     elif node.availability and node.availability.is_available(
         criteria=build_criteria,
     ):  # pragma: no cover
@@ -455,11 +604,15 @@ def _get_node_table(
                     else None
                 ),
             ),
+            _columns=[
+                ast.Column(name=ast.Name(col.name), _type=col.type)
+                for col in node.columns
+            ],
             _dj_node=node,
         )
     if table and as_select:  # pragma: no cover
         return ast.Select(
-            projection=[ast.Wildcard()],
+            projection=table.columns,  # type: ignore
             from_=ast.From(relations=[ast.Relation(table)]),
         )
     return table
@@ -473,10 +626,18 @@ def build_node(  # pylint: disable=too-many-arguments
     orderby: Optional[List[str]] = None,
     limit: Optional[int] = None,
     build_criteria: Optional[BuildCriteria] = None,
+    access_control: Optional[access.AccessControlStore] = None,
+    include_dimensions_in_groupby: bool = None,
 ) -> ast.Query:
     """
     Determines the optimal way to build the Node and does so
     """
+    if access_control:
+        access_control.add_request_by_node(node)
+
+    if include_dimensions_in_groupby is None:
+        include_dimensions_in_groupby = node.type == NodeType.METRIC
+
     # Set the dialect by finding available engines for this node, or default to Spark
     if not build_criteria:
         build_criteria = BuildCriteria(
@@ -504,45 +665,141 @@ def build_node(  # pylint: disable=too-many-arguments
         ):
             return ast.Query(select=select)  # pragma: no cover
 
-    if node.query:
-        query = parse(node.query)
+    if node.query and node.type == NodeType.METRIC:
+        query = parse(NodeRevision.format_metric_alias(node.query, node.name))
+    elif node.query and node.type != NodeType.METRIC:
+        node_query = parse(node.query)
+        if node_query.ctes:
+            node_query = node_query.bake_ctes()  # pragma: no cover
+        node_query.select.add_aliases_to_unnamed_columns()
+        query = parse(f"select * from {node.name}")
+        query.select.projection = []
+        for expr in node_query.select.projection:
+            query.select.projection.append(
+                ast.Column(ast.Name(expr.alias_or_name.name), _table=node_query),  # type: ignore
+            )
     else:
         query = build_source_node_query(node)
 
     add_filters_dimensions_orderby_limit_to_query_ast(
+        session,
+        node,
         query,
         build_criteria.dialect,
         filters,
         dimensions,
         orderby,
         limit,
+        include_dimensions_in_groupby=include_dimensions_in_groupby,
+        access_control=access_control,
     )
-    return build_ast(session, query, build_criteria)
+
+    if access_control:
+        access_control.validate_and_raise()
+        access_control.state = access.AccessControlState.INDIRECT
+
+    memoized_queries: Dict[int, ast.Query] = {}
+    _logger.info("Calling build_ast on %s", node.name)
+    built_ast = build_ast(
+        session,
+        query,
+        memoized_queries,
+        build_criteria,
+        filters,
+        dimensions,
+        access_control,
+    )
+    if access_control:
+        access_control.add_request_by_nodes(
+            [
+                cast(NodeRevision, cast(ast.Table, tbl).dj_node)
+                for tbl in built_ast.filter(
+                    lambda ast_node: isinstance(ast_node, ast.Table)
+                    and ast_node.dj_node is not None,
+                )
+            ],
+        )
+        access_control.validate_and_raise()
+    _logger.info("Finished build_ast on %s", node.name)
+    return built_ast
 
 
-def build_metric_nodes(
-    session: Session,
+def rename_columns(built_ast: ast.Query, node: NodeRevision):
+    """
+    Rename columns in the built ast to fully qualified column names.
+    """
+    projection = []
+    node_columns = {col.name for col in node.columns}
+    for expression in built_ast.select.projection:
+        if (
+            not isinstance(expression, ast.Alias)
+            and not isinstance(
+                expression,
+                ast.Wildcard,
+            )
+            and not (hasattr(expression, "alias") and expression.alias)  # type: ignore
+        ):
+            alias_name = expression.alias_or_name.identifier(False)  # type: ignore
+            if expression.alias_or_name.name in node_columns:  # type: ignore
+                alias_name = node.name + SEPARATOR + expression.alias_or_name.name  # type: ignore
+            expression = expression.copy()
+            expression.set_semantic_entity(alias_name)  # type: ignore
+            expression.set_alias(ast.Name(amenable_name(alias_name)))
+            projection.append(expression)
+        else:
+            expression = expression.copy()
+            if isinstance(
+                expression,
+                ast.Aliasable,
+            ) and not isinstance(  # pragma: no cover
+                expression,
+                ast.Wildcard,
+            ):
+                column_ref = expression.alias_or_name.identifier()
+                if column_ref in node_columns:  # type: ignore
+                    alias_name = node.name + SEPARATOR + column_ref  # type: ignore
+                    expression.set_semantic_entity(alias_name)
+                else:
+                    expression.set_semantic_entity(from_amenable_name(column_ref))
+            projection.append(expression)  # type: ignore
+    built_ast.select.projection = projection
+
+    if built_ast.select.where:
+        for col in built_ast.select.where.find_all(ast.Column):
+            if hasattr(col, "alias"):  # pragma: no cover
+                col.alias = None
+
+    if built_ast.select.group_by:
+        for i in range(  # pylint: disable=consider-using-enumerate
+            len(built_ast.select.group_by),
+        ):
+            if hasattr(built_ast.select.group_by[i], "alias"):  # pragma: no cover
+                built_ast.select.group_by[i] = built_ast.select.group_by[i].copy()
+                built_ast.select.group_by[i].alias = None
+    return built_ast
+
+
+def group_metrics_by_parent(
     metric_nodes: List[Node],
-    filters: List[str],
+) -> DefaultDict[Node, List[NodeRevision]]:
+    """
+    Group metrics by their parent node
+    """
+    common_parents = collections.defaultdict(list)
+    for metric_node in metric_nodes:
+        immediate_parent = metric_node.current.parents[0]
+        common_parents[immediate_parent].append(metric_node.current)
+    return common_parents
+
+
+def validate_shared_dimensions(
+    metric_nodes: List[Node],
     dimensions: List[str],
-    orderby: List[str],
-    limit: Optional[int] = None,
-    build_criteria: Optional[BuildCriteria] = None,
+    filters: List[str],
 ):
     """
-    Build a single query for all metrics in the list, including the
-    specified group bys (dimensions) and filters. As long as all
-    metric nodes share the same set of dimensions, we can:
-    (a) build each metric node query separately
-    (b) wrap each built metric node query in a WITH statement
-    (c) join the node queries together via the dimension columns
+    Determine if dimensions are shared.
     """
-    if any(metric_node.type != NodeType.METRIC for metric_node in metric_nodes):
-        raise DJInvalidInputException(  # pragma: no cover
-            "Cannot build a query for multiple nodes if one or more "
-            "of them aren't metric nodes.",
-        )
-
     shared_dimensions = [dim.name for dim in get_shared_dimensions(metric_nodes)]
     for dimension_attribute in dimensions:
         if dimension_attribute not in shared_dimensions:
@@ -568,10 +825,42 @@ def build_metric_nodes(
                     f" metric and thus cannot be included.{potential_dimension_match}",
                 )
 
+
+def build_metric_nodes(
+    session: Session,
+    metric_nodes: List[Node],
+    filters: List[str],
+    dimensions: List[str],
+    orderby: List[str],
+    limit: Optional[int] = None,
+    build_criteria: Optional[BuildCriteria] = None,
+    access_control: Optional[access.AccessControlStore] = None,
+):
+    """
+    Build a single query for all metrics in the list, including the specified
+    group bys (dimensions) and filters. The metric nodes should share the same set
+    of dimensional attributes. Then we can:
+    (a) Group metrics by their parent nodes.
+    (b) Build a query for each parent node with the dimensional attributes referenced joined in
+    (c) For all metrics that reference the parent node, insert the metric expression
+        into the parent node's select and build the parent query
+    (d) Set the rest of the parent query's attributes (filters, orderby, limit etc)
+    (e) Join together the transforms on the shared dimensions
+    (f) Select all the requested metrics and dimensions in the final SELECT
+    """
+    if any(metric_node.type != NodeType.METRIC for metric_node in metric_nodes):
+        raise DJInvalidInputException(  # pragma: no cover
+            "Cannot build a query for multiple nodes if one or more "
+            "of them aren't metric nodes.",
+        )
+
+    validate_shared_dimensions(metric_nodes, dimensions, filters)
+
     combined_ast: ast.Query = ast.Query(
         select=ast.Select(from_=ast.From(relations=[])),
         ctes=[],
     )
+    final_mapping = {}
     initial_dimension_columns = []
     all_dimension_columns = []
 
@@ -586,101 +875,120 @@ def build_metric_nodes(
                 break
         orderby_mapping[order] = orderby_metric
 
-    for (idx, metric_node) in enumerate(metric_nodes):
-        # Build each metric node separately
-        curr_orderby = None
+    context = CompileContext(session=session, exception=DJException())
+    common_parents = group_metrics_by_parent(metric_nodes)
 
-        if (not orderby_sort_items) and orderby_mapping:
-            curr_orderby = [
-                order
-                for order, metric_name in orderby_mapping.items()
-                if metric_name is None
-            ]
-
-        metric_ast = build_node(
+    for parent_node, metrics in common_parents.items():
+        parent_ast = build_node(
             session=session,
-            node=metric_node.current,
-            filters=filters,
+            node=parent_node.current,
             dimensions=dimensions,
-            orderby=curr_orderby,
+            filters=filters,
             build_criteria=build_criteria,
+            include_dimensions_in_groupby=True,
+            access_control=access_control,
         )
 
+        # Select only columns that were one of the chosen dimensions
+        parent_ast.select.projection = [
+            expr
+            for expr in parent_ast.select.projection
+            if expr.alias_or_name.identifier(False).replace(  # type: ignore
+                f"_{LOOKUP_CHARS.get('.')}_",
+                SEPARATOR,
+            )
+            in dimensions
+        ]
+        # Re-alias the dimensions with better names, but keep the group by alias-free
+        if parent_ast.select.group_by:  # pragma: no cover
+            for i in range(  # pylint: disable=consider-using-enumerate
+                len(parent_ast.select.group_by),
+            ):
+                if hasattr(parent_ast.select.group_by[i], "alias"):  # pragma: no cover
+                    parent_ast.select.group_by[i] = parent_ast.select.group_by[i].copy()
+                    parent_ast.select.group_by[i].alias = None
+
+            if parent_ast.select.where:
+                for col in parent_ast.select.where.find_all(ast.Column):
+                    if hasattr(col, "alias"):  # pragma: no cover
+                        col.alias = None
+
+        for expr in parent_ast.select.projection:
+            expr.set_alias(
+                ast.Name(amenable_name(expr.alias_or_name.identifier(False))),  # type: ignore
+            )
+        parent_ast.compile(context)
+
+        # Add the metric expression into the parent node query
+        for metric_node in metrics:
+            metric_query = parse(
+                NodeRevision.format_metric_alias(
+                    metric_node.query,  # type: ignore
+                    metric_node.name,
+                ),
+            )
+            metric_query.compile(context)
+            metric_query.build(session, {})
+            parent_ast.select.projection.extend(metric_query.select.projection)
+
         # Add the WITH statements to the combined query
-        metric_ast_alias = ast.Name(f"m{idx}_" + metric_node.name.replace(".", "_DOT_"))
-        metric_ast.alias = metric_ast_alias
-        metric_ast.parenthesized = True
-        metric_ast.as_ = True
-        combined_ast.ctes += [metric_ast]
+        parent_ast_alias = ast.Name(amenable_name(parent_node.name))
+        parent_ast.alias = parent_ast_alias
+        parent_ast.parenthesized = True
+        parent_ast.as_ = True
+        combined_ast.ctes += [parent_ast]
 
         # Add the metric and dimensions to the final query layer's SELECT
-        current_table = ast.Table(metric_ast_alias)
+        current_cte_as_table = ast.Table(parent_ast_alias)
 
-        organization = cast(ast.Organization, metric_ast.select.organization)
-        metric_ast.select.organization = None
-        # if an orderby referred to this metric node, parse and add it to the order items
-        if metric_order := (
-            [None]
-            + [
-                order_key  # type: ignore
-                for order_key, order_metric in orderby_mapping.items()
-                if metric_node.name == order_metric
-            ]
-        ).pop():
-            metric_sort_item = parse(f"select * order by {metric_order}").select.organization.order[0]  # type: ignore #pylint: disable=C0301
-            metric_col = ast.Column(
-                name=ast.Name(
-                    [
-                        exp.alias_or_name.identifier(False)
-                        for exp in metric_ast.select.projection
-                        if exp.is_aggregation()
-                    ][0],
-                ),
-                _table=current_table,
-            )
-            for col in metric_sort_item.find_all(ast.Column):
-                col.swap(metric_col)
-            orderby_mapping[metric_order] = metric_sort_item  # type: ignore
-
+        # If the parent node contains an orderby, parse and add it to the order items
         # bind the table for this built metric to all columns in the
-        metric_ast.organization = None
-        for col in organization.find_all(ast.Column):
-            col.add_table(current_table)
-        orderby_sort_items += organization.order  # type: ignore
+        organization = cast(ast.Organization, parent_ast.select.organization)
+        parent_ast.select.organization = None
+        if organization:  # pragma: no cover
+            for col in organization.find_all(ast.Column):
+                col.add_table(current_cte_as_table)
+            orderby_sort_items += organization.order  # type: ignore
 
         final_select_columns = [
             ast.Column(
                 name=col.alias_or_name,  # type: ignore
-                _table=current_table,
+                _table=current_cte_as_table,
                 _type=col.type,  # type: ignore
             )
-            for col in metric_ast.select.projection
+            for col in parent_ast.select.projection
         ]
-        metric_column_idents = {
-            col.alias_or_name.name  # type: ignore
-            for col in parse(metric_node.current.query).select.projection
-        }
 
         metric_columns = []
-
         dimension_columns = []
-
+        metric_column_identifiers = {amenable_name(metric.name) for metric in metrics}
         for col in final_select_columns:
-            if col.name.name in metric_column_idents:
+            if col.name.name in metric_column_identifiers:
+                for metric_node in metrics:
+                    if amenable_name(metric_node.name) in col.alias_or_name.name:
+                        final_mapping[metric_node.name] = col
+                        col.set_semantic_entity(
+                            metric_node.name + SEPARATOR + metric_node.columns[0].name,
+                        )
+                        col.set_semantic_type(SemanticType.METRIC)
                 metric_columns.append(col)
             else:
+                col.set_semantic_entity(from_amenable_name(col.alias_or_name.name))
+                col.set_semantic_type(SemanticType.DIMENSION)
                 dimension_columns.append(col)
 
         all_dimension_columns += dimension_columns
         combined_ast.select.projection.extend(metric_columns)
 
+        # Each time we build another parent node CTE clause, add it
+        # to the join clause with the current CTEs on the selected dimensions
         if not combined_ast.select.from_.relations:  # type: ignore
             initial_dimension_columns = dimension_columns
             combined_ast.select.from_.relations.append(  # type: ignore
-                ast.Relation(current_table),
+                ast.Relation(current_cte_as_table),
             )
         else:
-            comparisons = [
+            join_parents_on = [
                 ast.BinaryOp.Eq(initial_dim_col, current_dim_col)
                 for initial_dim_col, current_dim_col in zip(
                     initial_dimension_columns,
@@ -690,16 +998,18 @@ def build_metric_nodes(
             combined_ast.select.from_.relations[0].extensions.append(  # type: ignore
                 ast.Join(
                     "FULL OUTER",
-                    ast.Table(metric_ast_alias),
+                    ast.Table(parent_ast_alias),
                     ast.JoinCriteria(
-                        on=ast.BinaryOp.And(*comparisons),
+                        on=ast.BinaryOp.And(*join_parents_on),
                     ),
                 ),
             )
 
+    # Include dimensions in the final select: COALESCE the dimensions across
+    # all parent nodes, which will be used as the joins
     dimension_grouping: Dict[str, List] = {}
     for col in all_dimension_columns:
-        dimension_grouping.setdefault(str(col.alias_or_name.name), []).append(col)
+        dimension_grouping.setdefault(col.identifier(), []).append(col)
     dimension_columns = [
         ast.Function(name=ast.Name("COALESCE"), args=list(columns)).set_alias(
             ast.Name(col_name),
@@ -708,27 +1018,60 @@ def build_metric_nodes(
         else columns[0]
         for col_name, columns in dimension_grouping.items()
     ]
+    for dim_col in dimension_columns:
+        dimension_name = dim_col.alias_or_name.name.replace(
+            f"_{LOOKUP_CHARS.get('.')}_",
+            SEPARATOR,
+        )
+        final_mapping[dimension_name] = dim_col
 
     combined_ast.select.projection.extend(dimension_columns)
 
     # go through the orderby items and make sure we put them in the order the user requested them in
-
-    for idx, sort_item in enumerate(orderby_mapping.values()):
+    for idx, sort_item in enumerate(orderby_mapping):
         if isinstance(sort_item, ast.SortItem):
-            orderby_sort_items.insert(idx, sort_item)
+            orderby_sort_items.insert(idx, sort_item)  # pragma: no cover
+        else:
+            sort_expr_list = sort_item.split(" ")
+            if sort_item in final_mapping:  # pragma: no cover
+                orderby_sort_items.insert(
+                    idx,
+                    ast.SortItem(
+                        expr=final_mapping[sort_expr_list[0]].alias_or_name,  # type: ignore
+                        asc=sort_expr_list[1] if len(sort_expr_list) >= 2 else "",
+                        nulls=sort_expr_list[2] if len(sort_expr_list) == 3 else "",
+                    ),
+                )
 
     combined_ast.select.organization = ast.Organization(orderby_sort_items)
 
     if limit is not None:
         combined_ast.select.limit = ast.Number(limit)
-
     return combined_ast
+
+
+def build_temp_select(temp_query: str):
+    """
+    Builds an intermediate select ast used to build cube queries
+    """
+    temp_select = parse(temp_query).select
+
+    for col in temp_select.find_all(ast.Column):
+        dimension_column = col.identifier(False).replace(
+            SEPARATOR,
+            f"_{LOOKUP_CHARS.get(SEPARATOR)}_",
+        )
+        col.name = ast.Name(dimension_column)
+    return temp_select
 
 
 def build_materialized_cube_node(
     selected_metrics: List[Column],
     selected_dimensions: List[Column],
     cube: NodeRevision,
+    filters: List[str] = None,
+    orderby: List[str] = None,
+    limit: Optional[int] = None,
 ) -> ast.Query:
     """
     Build query for a materialized cube node
@@ -737,22 +1080,32 @@ def build_materialized_cube_node(
         select=ast.Select(from_=ast.From(relations=[])),
         ctes=[],
     )
-    default_materialization_config = [
-        materialization
-        for materialization in cube.materializations
-        if materialization.name == "default"
-    ][0].config
-    cube_config = GenericCubeConfig.parse_obj(default_materialization_config)
+    materialization_config = cube.materializations[0]
+    cube_config = GenericCubeConfig.parse_obj(materialization_config.config)
 
-    selected_metric_keys = [col.name for col in selected_metrics]
+    if materialization_config.name == "default":
+        # TODO: remove after we migrate old Druid materializations  # pylint: disable=fixme
+        selected_metric_keys = [
+            col.name for col in selected_metrics
+        ]  # pragma: no cover
+    else:
+        selected_metric_keys = [
+            col.node_revision().name for col in selected_metrics  # type: ignore
+        ]
 
     # Assemble query for materialized cube based on the previously saved measures
     # combiner expression for each metric
-    for metric_key, metric_measures in cube_config.measures.items():
-        if metric_key in selected_metric_keys:
+    for metric_key in selected_metric_keys:
+        if metric_key in cube_config.measures:  # pragma: no cover
+            metric_measures = cube_config.measures[metric_key]
             measures_combiner_ast = parse(f"SELECT {metric_measures.combiner}")
             measures_type_lookup = {
-                measure.name: measure.type for measure in metric_measures.measures
+                (
+                    measure.name
+                    if materialization_config.name == "default"
+                    else measure.field_name
+                ): measure.type
+                for measure in metric_measures.measures
             }
             for col in measures_combiner_ast.find_all(ast.Column):
                 col.add_type(
@@ -762,17 +1115,49 @@ def build_materialized_cube_node(
                 )
             combined_ast.select.projection.extend(
                 [
-                    proj.set_alias(ast.Name(metric_key))
+                    proj.set_alias(ast.Name(amenable_name(metric_key)))
                     for proj in measures_combiner_ast.select.projection
                 ],
             )
 
     # Add in selected dimension attributes to the query
     for selected_dim in selected_dimensions:
-        dimension_column = ast.Column(name=ast.Name(selected_dim.name))
+        dimension_column = ast.Column(
+            name=ast.Name(
+                (
+                    selected_dim.node_revision().name  # type: ignore
+                    + SEPARATOR
+                    + selected_dim.name
+                ).replace(SEPARATOR, f"_{LOOKUP_CHARS.get(SEPARATOR)}_"),
+            ),
+        )
         combined_ast.select.projection.append(dimension_column)
         combined_ast.select.group_by.append(dimension_column)
 
+    # Add in filters to the query
+    filter_asts = []
+    for filter_ in filters:  # type: ignore
+        temp_select = build_temp_select(
+            f"select * where {filter_}",
+        )
+        filter_asts.append(temp_select.where)
+
+    if filter_asts:
+        # pylint: disable=no-value-for-parameter
+        combined_ast.select.where = ast.BinaryOp.And(*filter_asts)
+
+    # Add orderby
+    if orderby:
+        temp_select = build_temp_select(
+            f"select * order by {','.join(orderby)}",
+        )
+        combined_ast.select.organization = temp_select.organization
+
+    # Add limit
+    if limit:
+        combined_ast.select.limit = ast.Number(value=limit)
+
+    # Set up FROM clause
     combined_ast.select.from_.relations.append(  # type: ignore
         ast.Relation(primary=ast.Table(ast.Name(cube.availability.table))),  # type: ignore
     )
@@ -796,12 +1181,269 @@ def build_source_node_query(node: NodeRevision):
 def build_ast(  # pylint: disable=too-many-arguments
     session: Session,
     query: ast.Query,
+    memoized_queries: Dict[int, ast.Query] = None,
     build_criteria: Optional[BuildCriteria] = None,
+    filters: Optional[List[str]] = None,
+    dimensions: Optional[List[str]] = None,
+    access_control=None,
 ) -> ast.Query:
     """
     Determines the optimal way to build the query AST and does so
     """
+    memoized_queries = memoized_queries or {}
+
+    start = time.time()
     context = CompileContext(session=session, exception=DJException())
-    query.compile(context)
-    query.build(session, build_criteria)
+    if hash(query) in memoized_queries:
+        query = memoized_queries[hash(query)]  # pragma: no cover
+    else:
+        query.compile(context)
+        memoized_queries[hash(query)] = query
+    end = time.time()
+    _logger.info("Finished compiling query %s in %s", str(query)[-100:], end - start)
+
+    start = time.time()
+    query.build(
+        session,
+        memoized_queries,
+        build_criteria,
+        filters,
+        dimensions,
+        access_control,
+    )
+    end = time.time()
+    _logger.info("Finished building query in %s", end - start)
     return query
+
+
+def metrics_to_measures(
+    session: Session,
+    metric_nodes: List[Node],
+) -> Tuple[DefaultDict[str, Set[str]], DefaultDict[str, Set[str]]]:
+    """
+    For the given metric nodes, returns a mapping between the metrics' referenced parent nodes
+    and the list of necessary measures to extract from the parent node.
+    The structure is:
+    {
+        "parent_node_name1": ["measure_columnA", "measure_columnB"],
+        "parent_node_name2": ["measure_columnX"],
+    }
+    """
+    ctx = CompileContext(session, DJException())
+    metric_to_measures = collections.defaultdict(set)
+    parents_to_measures = collections.defaultdict(set)
+    for metric_node in metric_nodes:
+        metric_ast = parse(metric_node.current.query)
+        metric_ast.compile(ctx)
+        for col in metric_ast.find_all(ast.Column):
+            if col.table:  # pragma: no cover
+                parents_to_measures[col.table.dj_node.name].add(  # type: ignore
+                    col.alias_or_name.name,
+                )
+                metric_to_measures[metric_node.name].add(
+                    col.alias_or_name.name,
+                )
+    return parents_to_measures, metric_to_measures
+
+
+def get_measures_query(
+    session: Session,
+    metrics: List[str],
+    dimensions: List[str],
+    filters: List[str],
+    engine_name: Optional[str] = None,
+    engine_version: Optional[str] = None,
+    current_user: Optional[User] = None,
+    validate_access: access.ValidateAccessFn = None,
+) -> TranslatedSQL:
+    """
+    Builds the measures SQL for a set of metrics with dimensions and filters.
+    This SQL can be used to produce an intermediate table with all the measures
+    and dimensions needed for an analytics database (e.g., Druid).
+    """
+    from datajunction_server.api.helpers import (  # pylint: disable=import-outside-toplevel
+        assemble_column_metadata,
+        validate_cube,
+    )
+
+    engine = (
+        get_engine(session, engine_name, engine_version)
+        if engine_name and engine_version
+        else None
+    )
+    build_criteria = BuildCriteria(
+        dialect=engine.dialect if engine and engine.dialect else Dialect.SPARK,
+    )
+    access_control = access.AccessControlStore(
+        validate_access=validate_access,
+        user=current_user,
+        base_verb=access.ResourceRequestVerb.READ,
+    )
+
+    combined_ast: ast.Query = ast.Query(
+        select=ast.Select(from_=ast.From(relations=[])),
+        ctes=[],
+    )
+    initial_dimension_columns = []
+    all_dimension_columns = []
+
+    if not filters:
+        filters = []
+
+    (_, metric_nodes, _, _, _) = validate_cube(
+        session,
+        metrics,
+        dimensions,
+    )
+    context = CompileContext(session=session, exception=DJException())
+    common_parents = group_metrics_by_parent(metric_nodes)
+
+    # Mapping between each metric node and its measures
+    parents_to_measures, _ = metrics_to_measures(
+        session,
+        metric_nodes,
+    )
+
+    for parent_node, _ in common_parents.items():  # type: ignore
+        measure_columns, dimensional_columns = [], []
+        parent_ast = build_node(
+            session=session,
+            node=parent_node.current,
+            dimensions=dimensions,
+            filters=filters,
+            build_criteria=build_criteria,
+            include_dimensions_in_groupby=False,
+            access_control=access_control,
+        )
+
+        # Select only columns that were one of the necessary measures
+        parent_ast.select.projection = [
+            expr
+            for expr in parent_ast.select.projection
+            if from_amenable_name(expr.alias_or_name.identifier(False)).split(  # type: ignore
+                SEPARATOR,
+            )[
+                -1
+            ]
+            in parents_to_measures[parent_node.name]
+            or from_amenable_name(expr.alias_or_name.identifier(False))  # type: ignore
+            in dimensions
+        ]
+        parent_ast = rename_columns(parent_ast, parent_node.current)
+
+        # Sort the selected columns into dimension vs measure columns and
+        # generate identifiers for them
+        for expr in parent_ast.select.projection:
+            column_identifier = expr.alias_or_name.identifier(False)  # type: ignore
+            if from_amenable_name(column_identifier) in dimensions:
+                dimensional_columns.append(expr)
+                expr.set_semantic_type(SemanticType.DIMENSION)  # type: ignore
+            else:
+                measure_columns.append(expr)
+                expr.set_semantic_type(SemanticType.MEASURE)  # type: ignore
+        parent_ast.compile(context)
+
+        # Add the WITH statements to the combined query
+        parent_ast_alias = ast.Name(amenable_name(parent_node.name))
+        parent_ast.alias = parent_ast_alias
+        parent_ast.parenthesized = True
+        parent_ast.as_ = True
+        combined_ast.ctes += [parent_ast]
+
+        # Add the measures and dimensions to the final query layer's SELECT
+        current_cte_as_table = ast.Table(parent_ast_alias)
+
+        # Add dimensions to the final query layer's SELECT
+        outer_dimensional_columns = []
+        for col in dimensional_columns:
+            col_without_alias = ast.Column(
+                name=ast.Name(col.alias_or_name.name),  # type: ignore
+                _table=parent_ast,
+                _type=col.type,  # type: ignore
+                semantic_entity=col.semantic_entity,  # type: ignore
+                semantic_type=col.semantic_type,  # type: ignore
+            )
+            outer_dimensional_columns.append(col_without_alias)
+        all_dimension_columns += outer_dimensional_columns
+
+        # Add measures to the final query layer's SELECT
+        for col in measure_columns:
+            combined_ast.select.projection.append(
+                ast.Column(
+                    name=ast.Name(col.alias_or_name.name),  # type: ignore
+                    _table=parent_ast,
+                    _type=col.type,  # type: ignore
+                    semantic_entity=col.semantic_entity,  # type: ignore
+                    semantic_type=col.semantic_type,  # type: ignore
+                ),
+            )
+
+        # Each time we build another parent node CTE clause, add it
+        # to the join clause with the current CTEs on the selected dimensions
+        if not combined_ast.select.from_.relations:  # type: ignore
+            initial_dimension_columns = outer_dimensional_columns
+            combined_ast.select.from_.relations.append(  # type: ignore
+                ast.Relation(current_cte_as_table),
+            )
+        else:
+            join_parents_on = [
+                ast.BinaryOp.Eq(initial_dim_col, current_dim_col)
+                for initial_dim_col, current_dim_col in zip(
+                    initial_dimension_columns,
+                    outer_dimensional_columns,
+                )
+            ]
+            combined_ast.select.from_.relations[0].extensions.append(  # type: ignore
+                ast.Join(
+                    "FULL OUTER",
+                    ast.Table(parent_ast_alias),
+                    ast.JoinCriteria(
+                        on=ast.BinaryOp.And(*join_parents_on),
+                    ),
+                ),
+            )
+
+    # Include dimensions in the final select: COALESCE the dimensions across
+    # all parent nodes, which will be used as the joins
+    dimension_grouping: Dict[str, List] = {}
+    for col in all_dimension_columns:
+        dimension_grouping.setdefault(
+            col.alias_or_name.identifier(False),  # type: ignore
+            [],
+        ).append(
+            col,
+        )
+
+    dimension_columns = [
+        ast.Function(name=ast.Name("COALESCE"), args=list(columns))
+        .set_alias(
+            ast.Name(col_name),
+        )
+        .set_semantic_entity(columns[0].semantic_entity)
+        .set_semantic_type(columns[0].semantic_type)
+        if len(columns) > 1
+        else columns[0]
+        for col_name, columns in dimension_grouping.items()
+    ]
+    combined_ast.select.projection.extend(dimension_columns)
+
+    # Assemble column metadata
+    columns_metadata = []
+    for col in combined_ast.select.projection:
+        metadata = assemble_column_metadata(  # pragma: no cover
+            cast(ast.Column, col),
+        )
+        columns_metadata.append(metadata)
+    dependencies, _ = combined_ast.extract_dependencies(
+        CompileContext(session, DJException()),
+    )
+    return TranslatedSQL(
+        sql=str(combined_ast),
+        columns=columns_metadata,
+        dialect=build_criteria.dialect,
+        upstream_tables=[
+            f"{dep.catalog.name}.{dep.schema_}.{dep.table}"
+            for dep in dependencies
+            if dep.type == NodeType.SOURCE
+        ],
+    )

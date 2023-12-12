@@ -1,7 +1,6 @@
 """Clients for various configurable services."""
 from typing import TYPE_CHECKING, List, Optional, Union
 from urllib.parse import urljoin
-from uuid import UUID
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -14,6 +13,7 @@ from datajunction_server.models.materialization import (
     GenericMaterializationInput,
     MaterializationInfo,
 )
+from datajunction_server.models.partition import PartitionBackfill
 from datajunction_server.models.query import QueryCreate, QueryWithResults
 from datajunction_server.sql.parsing.types import ColumnType
 
@@ -118,7 +118,6 @@ class QueryServiceClient:  # pylint: disable=too-few-public-methods
                 message=f"Error response from query service: {response_data['message']}",
             )
         query_info = response.json()
-        query_info["id"] = UUID(query_info["id"])
         return QueryWithResults(**query_info)
 
     def get_query(
@@ -157,6 +156,26 @@ class QueryServiceClient:  # pylint: disable=too-few-public-methods
         result = response.json()
         return MaterializationInfo(**result)
 
+    def deactivate_materialization(
+        self,
+        node_name: str,
+        materialization_name: str,
+    ) -> MaterializationInfo:
+        """
+        Deactivates the specified node materialization
+        """
+        response = self.requests_session.delete(
+            "/materialization/",
+            params={
+                "node_name": node_name,
+                "materialization_name": materialization_name,
+            },
+        )
+        if not response.ok:  # pragma: no cover
+            return MaterializationInfo(urls=[], output_tables=[])
+        result = response.json()
+        return MaterializationInfo(**result)
+
     def get_materialization_info(
         self,
         node_name: str,
@@ -172,4 +191,20 @@ class QueryServiceClient:  # pylint: disable=too-few-public-methods
         )
         if not response.ok:
             return MaterializationInfo(output_tables=[], urls=[])
+        return MaterializationInfo(**response.json())
+
+    def run_backfill(
+        self,
+        node_name: str,
+        materialization_name: str,
+        backfill: PartitionBackfill,
+    ) -> MaterializationInfo:
+        """Kicks off a backfill with the given backfill spec"""
+        response = self.requests_session.post(
+            f"/materialization/run/{node_name}/{materialization_name}/",
+            json=backfill.dict(),
+            timeout=20,
+        )
+        if not response.ok:
+            return MaterializationInfo(output_tables=[], urls=[])  # pragma: no cover
         return MaterializationInfo(**response.json())

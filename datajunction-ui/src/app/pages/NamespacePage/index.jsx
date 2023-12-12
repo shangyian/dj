@@ -4,6 +4,9 @@ import { useContext, useEffect, useState } from 'react';
 import NodeStatus from '../NodePage/NodeStatus';
 import DJClientContext from '../../providers/djclient';
 import Explorer from '../NamespacePage/Explorer';
+import EditIcon from '../../icons/EditIcon';
+import DeleteNode from '../../components/DeleteNode';
+import AddNamespacePopover from './AddNamespacePopover';
 
 export function NamespacePage() {
   const djClient = useContext(DJClientContext).DataJunctionAPI;
@@ -56,12 +59,9 @@ export function NamespacePage() {
   useEffect(() => {
     const fetchData = async () => {
       if (namespace === undefined && namespaceHierarchy !== undefined) {
-        namespace = namespaceHierarchy.children[0].path;
+        namespace = namespaceHierarchy[0].namespace;
       }
-      const djNodes = await djClient.namespace(namespace);
-      const nodes = djNodes.map(node => {
-        return djClient.node(node);
-      });
+      const nodes = await djClient.namespace(namespace);
       const foundNodes = await Promise.all(nodes);
       setState({
         namespace: namespace,
@@ -75,7 +75,7 @@ export function NamespacePage() {
     <tr>
       <td>
         <a href={'/nodes/' + node.name} className="link-table">
-          {node.display_name}
+          {node.name}
         </a>
         <span
           className="rounded-pill badge bg-secondary-soft"
@@ -83,6 +83,11 @@ export function NamespacePage() {
         >
           {node.version}
         </span>
+      </td>
+      <td>
+        <a href={'/nodes/' + node.name} className="link-table">
+          {node.type !== 'source' ? node.display_name : ''}
+        </a>
       </td>
       <td>
         <span className={'node_type__' + node.type + ' badge node_type'}>
@@ -96,12 +101,15 @@ export function NamespacePage() {
         <span className="status">{node.mode}</span>
       </td>
       <td>
-        <span className="status">{node.tags}</span>
-      </td>
-      <td>
         <span className="status">
           {new Date(node.updated_at).toLocaleString('en-us')}
         </span>
+      </td>
+      <td>
+        <a href={`/nodes/${node?.name}/edit`} style={{ marginLeft: '0.5rem' }}>
+          <EditIcon />
+        </a>
+        <DeleteNode nodeName={node?.name} />
       </td>
     </tr>
   ));
@@ -111,6 +119,46 @@ export function NamespacePage() {
       <div className="card">
         <div className="card-header">
           <h2>Explore</h2>
+
+          <span className="menu-link">
+            <span className="menu-title">
+              <div className="dropdown">
+                <span className="add_node">+ Add Node</span>
+                <div className="dropdown-content">
+                  <a href={`/create/source`}>
+                    <div className="node_type__source node_type_creation_heading">
+                      Register Table
+                    </div>
+                  </a>
+                  <a href={`/create/transform/${namespace}`}>
+                    <div className="node_type__transform node_type_creation_heading">
+                      Transform
+                    </div>
+                  </a>
+                  <a href={`/create/metric/${namespace}`}>
+                    <div className="node_type__metric node_type_creation_heading">
+                      Metric
+                    </div>
+                  </a>
+                  <a href={`/create/dimension/${namespace}`}>
+                    <div className="node_type__dimension node_type_creation_heading">
+                      Dimension
+                    </div>
+                  </a>
+                  <a href={`/create/tag`}>
+                    <div className="entity__tag node_type_creation_heading">
+                      Tag
+                    </div>
+                  </a>
+                  <a href={`/create/cube/${namespace}`}>
+                    <div className="node_type__cube node_type_creation_heading">
+                      Cube
+                    </div>
+                  </a>
+                </div>
+              </div>
+            </span>
+          </span>
           <div className="table-responsive">
             <div className={`sidebar`}>
               <span
@@ -122,7 +170,7 @@ export function NamespacePage() {
                   padding: '1rem 1rem 1rem 0',
                 }}
               >
-                Namespaces
+                Namespaces <AddNamespacePopover />
               </span>
               {namespaceHierarchy
                 ? namespaceHierarchy.map(child => (
@@ -138,11 +186,12 @@ export function NamespacePage() {
               <thead>
                 <tr>
                   <th>Name</th>
+                  <th>Display Name</th>
                   <th>Type</th>
                   <th>Status</th>
                   <th>Mode</th>
-                  <th>Tags</th>
                   <th>Last Updated</th>
+                  <th>Actions</th>
                 </tr>
               </thead>
               <tbody>{nodesList}</tbody>

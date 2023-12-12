@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import partial
 from http import HTTPStatus
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from pydantic import BaseModel, Extra
 from pydantic import Field as PydanticField
@@ -20,11 +20,12 @@ from sqlalchemy.types import Enum
 from sqlmodel import Field, Relationship, SQLModel
 from typing_extensions import TypedDict
 
-from datajunction_server.errors import DJInvalidInputException
+from datajunction_server.errors import DJError, DJInvalidInputException
 from datajunction_server.models.base import (
     BaseSQLModel,
     NodeColumns,
     generate_display_name,
+    labelize,
 )
 from datajunction_server.models.catalog import Catalog
 from datajunction_server.models.column import Column, ColumnYAML
@@ -34,13 +35,16 @@ from datajunction_server.models.materialization import (
     Materialization,
     MaterializationConfigOutput,
 )
+from datajunction_server.models.node_type import NodeType
+from datajunction_server.models.partition import PartitionOutput, PartitionType
 from datajunction_server.models.tag import Tag, TagNodeRelationship
 from datajunction_server.sql.parsing.types import ColumnType
 from datajunction_server.typing import UTCDatetime
-from datajunction_server.utils import Version, amenable_name
+from datajunction_server.utils import SEPARATOR, Version, amenable_name
 
 DEFAULT_DRAFT_VERSION = Version(major=0, minor=1)
 DEFAULT_PUBLISHED_VERSION = Version(major=1, minor=0)
+MIN_VALID_THROUGH_TS = -sys.maxsize - 1
 
 
 @dataclass(frozen=True)
@@ -52,6 +56,7 @@ class BuildCriteria:
 
     timestamp: Optional[UTCDatetime] = None
     dialect: Dialect = Dialect.SPARK
+    for_materialization: bool = False
 
 
 class NodeRelationship(BaseSQLModel, table=True):  # type: ignore
@@ -117,26 +122,6 @@ class BoundDimensionsRelationship(BaseSQLModel, table=True):  # type: ignore
         foreign_key="column.id",
         primary_key=True,
     )
-
-
-class NodeType(str, enum.Enum):
-    """
-    Node type.
-
-    A node can have 4 types, currently:
-
-    1. SOURCE nodes are root nodes in the DAG, and point to tables or views in a DB.
-    2. TRANSFORM nodes are SQL transformations, reading from SOURCE/TRANSFORM nodes.
-    3. METRIC nodes are leaves in the DAG, and have a single aggregation query.
-    4. DIMENSION nodes are special SOURCE nodes that can be auto-joined with METRICS.
-    5. CUBE nodes contain a reference to a set of METRICS and a set of DIMENSIONS.
-    """
-
-    SOURCE = "source"
-    TRANSFORM = "transform"
-    METRIC = "metric"
-    DIMENSION = "dimension"
-    CUBE = "cube"
 
 
 class NodeMode(str, enum.Enum):
@@ -284,7 +269,7 @@ class AvailabilityNode(TemporalPartitionRange):
     """A node in the availability trie tracker"""
 
     children: Dict = {}
-    valid_through_ts: Optional[int] = Field(default=-sys.maxsize - 1)
+    valid_through_ts: Optional[int] = Field(default=MIN_VALID_THROUGH_TS)
 
     def merge_temporal(self, other: "AvailabilityNode"):
         """
@@ -382,6 +367,7 @@ class AvailabilityStateBase(TemporalPartitionRange):
     schema_: Optional[str] = Field(default=None)
     table: str
     valid_through_ts: int
+    url: Optional[str]
 
     # An ordered list of categorical partitions like ["country", "group_id"]
     # or ["region_id", "age_group"]
@@ -429,20 +415,19 @@ class AvailabilityStateBase(TemporalPartitionRange):
             else partition
             for partition in self.partitions + other.partitions  # type: ignore
         ]
+        min_range = [
+            x for x in (self.min_temporal_partition, other.min_temporal_partition) if x
+        ]
+        max_range = [
+            x for x in (self.max_temporal_partition, other.max_temporal_partition) if x
+        ]
         top_level_partition = PartitionAvailability(
             value=[None for _ in other.categorical_partitions]
             if other.categorical_partitions
             else [],
-            min_temporal_partition=min(
-                x
-                for x in (self.min_temporal_partition, other.min_temporal_partition)
-                if x
-            ),
-            max_temporal_partition=max(
-                x
-                for x in (self.max_temporal_partition, other.max_temporal_partition)
-                if x
-            ),
+            min_temporal_partition=min(min_range) if min_range else None,
+            max_temporal_partition=max(max_range) if max_range else None,
+            valid_through_ts=max(self.valid_through_ts, other.valid_through_ts),
         )
         all_partitions += [top_level_partition]
 
@@ -471,6 +456,12 @@ class AvailabilityStateBase(TemporalPartitionRange):
                 top_level_partition.max_temporal_partition
                 or merged_top_level[0].max_temporal_partition
             )
+            self.valid_through_ts = (
+                top_level_partition.valid_through_ts
+                or merged_top_level[0].valid_through_ts
+                or MIN_VALID_THROUGH_TS
+            )
+
         return self
 
 
@@ -496,6 +487,143 @@ class AvailabilityState(AvailabilityStateBase, table=True):  # type: ignore
         return True
 
 
+class MetricDirection(str, enum.Enum):
+    """
+    The direction of the metric that's considered good, i.e., higher is better
+    """
+
+    HIGHER_IS_BETTER = "higher_is_better"
+    LOWER_IS_BETTER = "lower_is_better"
+    NEUTRAL = "neutral"
+
+
+class Unit(BaseSQLModel):
+    """
+    Metric unit
+    """
+
+    name: str
+    label: Optional[str]
+    category: Optional[str]
+    abbreviation: Optional[str]
+    description: Optional[str]
+
+    def __str__(self):
+        return self.name  # pragma: no cover
+
+    def __repr__(self):
+        return self.name
+
+    @validator("label", always=True)
+    def get_label(  # pylint: disable=no-self-argument
+        cls,
+        label: str,
+        values: Dict[str, Any],
+    ) -> str:
+        """Generate a default label if one was not provided."""
+        if not label and values:
+            return labelize(values["name"])
+        return label
+
+
+class MetricUnit(enum.Enum):
+    """
+    Available units of measure for metrics
+    TODO: Eventually this can be recorded in a database,   # pylint: disable=fixme
+    since measurement units can be customized depending on the metric
+    (i.e., clicks/hour). For the time being, this enum provides some basic units.
+    """
+
+    UNKNOWN = Unit(name="unknown", category="")
+    UNITLESS = Unit(name="unitless", category="")
+
+    PERCENTAGE = Unit(
+        name="percentage",
+        category="",
+        abbreviation="%",
+        description="A ratio expressed as a number out of 100. Values range from 0 to 100.",
+    )
+
+    PROPORTION = Unit(
+        name="proportion",
+        category="",
+        abbreviation="",
+        description="A ratio that compares a part to a whole. Values range from 0 to 1.",
+    )
+
+    # Monetary
+    DOLLAR = Unit(name="dollar", label="Dollar", category="currency", abbreviation="$")
+
+    # Time
+    SECOND = Unit(name="second", category="time", abbreviation="s")
+    MINUTE = Unit(name="minute", category="time", abbreviation="m")
+    HOUR = Unit(name="hour", category="time", abbreviation="h")
+    DAY = Unit(name="day", category="time", abbreviation="d")
+    WEEK = Unit(name="week", category="time", abbreviation="w")
+    MONTH = Unit(name="month", category="time", abbreviation="mo")
+    YEAR = Unit(name="year", category="time", abbreviation="y")
+
+
+class MetricMetadataOptions(BaseSQLModel):
+    """
+    Metric metadata options list
+    """
+
+    directions: List[MetricDirection]
+    units: List[Unit]
+
+
+class MetricMetadataBase(BaseSQLModel):  # type: ignore
+    """
+    Base class for additional metric metadata
+    """
+
+    direction: Optional[MetricDirection] = Field(
+        sa_column=SqlaColumn(Enum(MetricDirection)),
+        default=MetricDirection.NEUTRAL,
+    )
+    unit: Optional[MetricUnit] = Field(
+        sa_column=SqlaColumn(Enum(MetricUnit)),
+        default=MetricUnit.UNKNOWN,
+    )
+
+
+class MetricMetadata(MetricMetadataBase, table=True):  # type: ignore
+    """
+    Additional metric metadata
+    """
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+
+    @classmethod
+    def from_input(cls, input_data: "MetricMetadataInput") -> "MetricMetadata":
+        """
+        Parses a MetricMetadataInput object to a MetricMetadata object
+        """
+        return MetricMetadata(
+            direction=input_data.direction,
+            unit=MetricUnit[input_data.unit.upper()] if input_data.unit else None,
+        )
+
+
+class MetricMetadataOutput(BaseSQLModel):
+    """
+    Metric metadata output
+    """
+
+    direction: Optional[MetricDirection]
+    unit: Optional[Unit]
+
+
+class MetricMetadataInput(BaseSQLModel):
+    """
+    Metric metadata output
+    """
+
+    direction: Optional[MetricDirection]
+    unit: Optional[str]
+
+
 class NodeAvailabilityState(BaseSQLModel, table=True):  # type: ignore
     """
     Join table for availability state
@@ -519,6 +647,11 @@ class NodeNamespace(SQLModel, table=True):  # type: ignore
     """
 
     namespace: str = Field(nullable=False, unique=True, primary_key=True)
+    deactivated_at: UTCDatetime = Field(
+        nullable=True,
+        sa_column=SqlaColumn(DateTime(timezone=True)),
+        default=None,
+    )
 
 
 class Node(NodeBase, table=True):  # type: ignore
@@ -606,6 +739,18 @@ class NodeRevision(NodeRevisionBase, table=True):  # type: ignore
         },
     )
 
+    metric_metadata_id: Optional[int] = Field(
+        default=None,
+        foreign_key="metricmetadata.id",
+    )
+    metric_metadata: Optional[MetricMetadata] = Relationship(
+        sa_relationship_kwargs={
+            "primaryjoin": "NodeRevision.metric_metadata_id==MetricMetadata.id",
+            "cascade": "all, delete",
+            "uselist": False,
+        },
+    )
+
     # A list of metric columns and dimension columns, only used by cube nodes
     cube_elements: List["Column"] = Relationship(
         link_model=CubeRelationship,
@@ -630,7 +775,12 @@ class NodeRevision(NodeRevisionBase, table=True):  # type: ignore
         },
     )
 
-    parent_links: List[NodeRelationship] = Relationship()
+    parent_links: List[NodeRelationship] = Relationship(
+        sa_relationship_kwargs={
+            "primaryjoin": "NodeRevision.id==NodeRelationship.child_id",
+            "cascade": "all, delete",
+        },
+    )
 
     missing_parents: List[MissingParent] = Relationship(
         link_model=NodeMissingParents,
@@ -665,11 +815,16 @@ class NodeRevision(NodeRevisionBase, table=True):  # type: ignore
 
     # Nodes of type SOURCE will not have this property as their materialization
     # is not managed as a part of this service
-    materializations: List[Materialization] = Relationship(
+    materializations: List["Materialization"] = Relationship(
         back_populates="node_revision",
         sa_relationship_kwargs={
             "cascade": "all, delete-orphan",
         },
+    )
+
+    lineage: List[Dict] = Field(
+        default=[],
+        sa_column=SqlaColumn(JSON),
     )
 
     def __hash__(self) -> int:
@@ -688,7 +843,8 @@ class NodeRevision(NodeRevisionBase, table=True):  # type: ignore
     @staticmethod
     def format_metric_alias(query: str, name: str) -> str:
         """
-        Metric aliases must have the same name as the node.
+        Return a metric query with the metric aliases reassigned to
+        have the same name as the node, if they aren't already matching.
         """
         from datajunction_server.sql.parsing import (  # pylint: disable=import-outside-toplevel
             ast,
@@ -699,30 +855,9 @@ class NodeRevision(NodeRevisionBase, table=True):  # type: ignore
 
         tree = parse(query)
         projection_0 = tree.select.projection[0]
-
-        # if the name is not what we expect, check if it is an alias
-        # if it is an alias, we will raise because the user will have
-        # deliberately named this expression
-        # otherwise, we will just add the alias we want e.g. the node name
-        expr_name: Optional[ast.Name] = (
-            projection_0.alias_or_name  # type: ignore
-            if hasattr(projection_0, "alias")
-            else None
+        tree.select.projection[0] = projection_0.set_alias(
+            ast.Name(amenable_name(name)),
         )
-        if (
-            expr_name
-            and expr_name.parent_key == "alias"
-            and expr_name.name != amenable_name(name)
-        ):
-            raise DJInvalidInputException(
-                "Invalid Metric. The expression in the projection "
-                "cannot have alias different from the node name. Got "
-                f"`{expr_name}` but expected `{amenable_name(name)}`",
-            )
-        if not expr_name or expr_name and expr_name.parent_key != "alias":
-            tree.select.projection[0] = projection_0.set_alias(
-                ast.Name(amenable_name(name)),
-            )
         return str(tree)
 
     def check_metric(self):
@@ -757,17 +892,6 @@ class NodeRevision(NodeRevisionBase, table=True):  # type: ignore
                 "should have a single aggregation",
             )
 
-        # must query from a single table
-        if (
-            len(tree.select.from_.relations) != 1
-            or tree.select.from_.relations[0].extensions
-        ):
-            raise DJInvalidInputException(
-                http_status_code=HTTPStatus.BAD_REQUEST,
-                message=f"Metric {self.name} selects from more than one node, "
-                "should only select from a single node",
-            )
-
     def extra_validation(self) -> None:
         """
         Extra validation for node data.
@@ -799,8 +923,96 @@ class NodeRevision(NodeRevisionBase, table=True):  # type: ignore
                     f"Node {self.name} of type cube node needs cube elements",
                 )
 
+    def copy_dimension_links_from_revision(self, old_revision: "NodeRevision"):
+        """
+        Copy dimension links and attributes from another node revision if the column names match
+        """
+        old_columns_mapping = {col.name: col for col in old_revision.columns}
+        for col in self.columns:  # pylint: disable=not-an-iterable
+            if col.name in old_columns_mapping:
+                col.dimension_id = old_columns_mapping[col.name].dimension_id
+                col.attributes = old_columns_mapping[col.name].attributes or []
+        return self
+
     class Config:  # pylint: disable=missing-class-docstring,too-few-public-methods
         extra = Extra.allow
+
+    def has_available_materialization(self, build_criteria: BuildCriteria) -> bool:
+        """
+        Has a materialization available
+        """
+        return (
+            self.availability is not None  # pragma: no cover
+            and self.availability.is_available(  # pylint: disable=no-member
+                criteria=build_criteria,
+            )
+        )
+
+    def cube_elements_with_nodes(self) -> List[Tuple[Column, Optional["NodeRevision"]]]:
+        """
+        Cube elements along with their nodes
+        """
+        return [
+            (element, element.node_revision())
+            for element in self.cube_elements  # pylint: disable=not-an-iterable
+        ]
+
+    def cube_metrics(self) -> List[Node]:
+        """
+        Cube node's metrics
+        """
+        if self.type != NodeType.CUBE:
+            raise DJInvalidInputException(  # pragma: no cover
+                message="Cannot retrieve metrics for a non-cube node!",
+            )
+
+        return [
+            node_revision.node  # type: ignore
+            for element, node_revision in self.cube_elements_with_nodes()
+            if node_revision and node_revision.type == NodeType.METRIC
+        ]
+
+    def cube_dimensions(self) -> List[str]:
+        """
+        Cube node's dimension attributes
+        """
+        if self.type != NodeType.CUBE:
+            raise DJInvalidInputException(  # pragma: no cover
+                "Cannot retrieve dimensions for a non-cube node!",
+            )
+        return [
+            node_revision.name + SEPARATOR + element.name
+            for element, node_revision in self.cube_elements_with_nodes()
+            if node_revision and node_revision.type != NodeType.METRIC
+        ]
+
+    def temporal_partition_columns(self) -> List[Column]:
+        """
+        The node's temporal partition columns, if any
+        """
+        return [
+            col
+            for col in self.columns  # pylint: disable=not-an-iterable
+            if col.partition and col.partition.type_ == PartitionType.TEMPORAL
+        ]
+
+    def categorical_partition_columns(self) -> List[Column]:
+        """
+        The node's categorical partition columns, if any
+        """
+        return [
+            col
+            for col in self.columns  # pylint: disable=not-an-iterable
+            if col.partition and col.partition.type_ == PartitionType.CATEGORICAL
+        ]
+
+    def __deepcopy__(self, memo):
+        """
+        Note: We should not use copy or deepcopy to copy any SQLAlchemy objects.
+        This is implemented here to make copying of AST structures easier, but does
+        not actually copy anything
+        """
+        return None
 
 
 class ImmutableNodeFields(BaseSQLModel):
@@ -847,6 +1059,32 @@ class NodeNameList(SQLModel):
     __root__: List[str]
 
 
+class NodeIndexItem(SQLModel):
+    """
+    Node details used for indexing purposes
+    """
+
+    name: str
+    display_name: str
+    description: str
+    type: NodeType
+
+
+class NodeMinimumDetail(SQLModel):
+    """
+    List of high level node details
+    """
+
+    name: str
+    display_name: str
+    description: str
+    version: str
+    type: NodeType
+    status: NodeStatus
+    mode: NodeMode
+    updated_at: UTCDatetime
+
+
 class AttributeTypeName(BaseSQLModel):
     """
     Attribute type name.
@@ -870,6 +1108,9 @@ class DimensionAttributeOutput(SQLModel):
     """
 
     name: str
+    node_name: Optional[str]
+    node_display_name: Optional[str]
+    is_primary_key: bool
     type: ColumnType
     path: List[str]
 
@@ -882,15 +1123,17 @@ class DimensionAttributeOutput(SQLModel):
         return values
 
 
-class ColumnOutput(SQLModel):
+class ColumnOutput(BaseSQLModel):
     """
     A simplified column schema, without ID or dimensions.
     """
 
     name: str
+    display_name: Optional[str]
     type: ColumnType
     attributes: Optional[List[AttributeOutput]]
     dimension: Optional[NodeNameOutput]
+    partition: Optional[PartitionOutput]
 
     class Config:  # pylint: disable=too-few-public-methods
         """
@@ -947,10 +1190,9 @@ class SourceNodeFields(BaseSQLModel):
 
 class CubeNodeFields(BaseSQLModel):
     """
-    Cube node fields that can be changed
+    Cube-specific fields that can be changed
     """
 
-    display_name: Optional[str]
     metrics: List[str]
     dimensions: List[str]
     filters: Optional[List[str]]
@@ -966,6 +1208,7 @@ class MetricNodeFields(BaseSQLModel):
     """
 
     required_dimensions: Optional[List[str]]
+    metric_metadata: Optional[MetricMetadataInput]
 
 
 #
@@ -990,13 +1233,19 @@ class CreateSourceNode(ImmutableNodeFields, MutableNodeFields, SourceNodeFields)
     """
 
 
-class CreateCubeNode(ImmutableNodeFields, CubeNodeFields):
+class CreateCubeNode(ImmutableNodeFields, MutableNodeFields, CubeNodeFields):
     """
     A create object for cube nodes
     """
 
 
-class UpdateNode(MutableNodeFields, SourceNodeFields):
+class UpdateNode(
+    MutableNodeFields,
+    SourceNodeFields,
+    MutableNodeQueryField,
+    MetricNodeFields,
+    CubeNodeFields,
+):
     """
     Update node object where all fields are optional
     """
@@ -1007,6 +1256,7 @@ class UpdateNode(MutableNodeFields, SourceNodeFields):
             **SourceNodeFields.__annotations__,  # pylint: disable=E1101
             **MutableNodeFields.__annotations__,  # pylint: disable=E1101
             **MutableNodeQueryField.__annotations__,  # pylint: disable=E1101
+            **CubeNodeFields.__annotations__,  # pylint: disable=E1101
         }.items()
     }
 
@@ -1078,6 +1328,7 @@ class NodeRevisionOutput(SQLModel):
     updated_at: UTCDatetime
     materializations: List[MaterializationConfigOutput]
     parents: List[NodeNameOutput]
+    metric_metadata: Optional[MetricMetadataOutput] = None
 
     class Config:  # pylint: disable=missing-class-docstring,too-few-public-methods
         allow_population_by_field_name = True
@@ -1092,6 +1343,7 @@ class NodeOutput(OutputModel):
     current: NodeRevisionOutput = PydanticField(flatten=True)
     created_at: UTCDatetime
     tags: List["Tag"] = []
+    current_version: str
 
 
 class NodeValidation(SQLModel):
@@ -1101,6 +1353,31 @@ class NodeValidation(SQLModel):
 
     message: str
     status: NodeStatus
-    node_revision: NodeRevision
     dependencies: List[NodeRevisionOutput]
     columns: List[Column]
+    errors: List[DJError]
+    missing_parents: List[str]
+
+
+class LineageColumn(BaseModel):
+    """
+    Column in lineage graph
+    """
+
+    column_name: str
+    node_name: Optional[str] = None
+    node_type: Optional[str] = None
+    display_name: Optional[str] = None
+    lineage: Optional[List["LineageColumn"]] = None
+
+
+LineageColumn.update_forward_refs()
+
+
+class NamespaceOutput(OutputModel):
+    """
+    Output for a namespace that includes the number of nodes
+    """
+
+    namespace: str
+    num_nodes: int

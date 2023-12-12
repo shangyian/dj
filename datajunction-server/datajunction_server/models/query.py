@@ -2,7 +2,6 @@
 Models for queries.
 """
 
-import uuid
 from datetime import datetime
 from enum import Enum
 from typing import Any, List, Optional
@@ -47,6 +46,13 @@ class ColumnMetadata(BaseSQLModel):
 
     name: str
     type: str
+    column: Optional[str]
+    node: Optional[str]
+    semantic_entity: Optional[str]
+    semantic_type: Optional[str]
+
+    def __hash__(self):
+        return hash((self.name, self.type))  # pragma: no cover
 
 
 class StatementResults(BaseSQLModel):
@@ -87,7 +93,7 @@ class QueryWithResults(BaseSQLModel):
     Model for query with results.
     """
 
-    id: uuid.UUID
+    id: str
     engine_name: Optional[str] = None
     engine_version: Optional[str] = None
     submitted_query: str
@@ -142,9 +148,6 @@ def encode_results(obj: Any) -> Any:
     """
     Custom msgpack encoder for ``QueryWithResults``.
     """
-    if isinstance(obj, uuid.UUID):
-        return msgpack.ExtType(QueryExtType.UUID, str(obj).encode("utf-8"))
-
     if isinstance(obj, datetime):
         return msgpack.ExtType(QueryExtType.TIMESTAMP, obj.isoformat().encode("utf-8"))
 
@@ -155,9 +158,6 @@ def decode_results(code: int, data: bytes) -> Any:
     """
     Custom msgpack decoder for ``QueryWithResults``.
     """
-    if code == QueryExtType.UUID:
-        return uuid.UUID(data.decode())
-
     if code == QueryExtType.TIMESTAMP:
         return datetime.fromisoformat(data.decode())
 

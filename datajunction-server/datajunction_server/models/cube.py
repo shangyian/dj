@@ -7,8 +7,11 @@ from typing import List, Optional
 from pydantic import Field, root_validator
 from sqlmodel import SQLModel
 
+from datajunction_server.models.base import BaseSQLModel
 from datajunction_server.models.materialization import MaterializationConfigOutput
-from datajunction_server.models.node import AvailabilityState, ColumnOutput, NodeType
+from datajunction_server.models.node import AvailabilityState, ColumnOutput
+from datajunction_server.models.node_type import NodeType
+from datajunction_server.models.partition import PartitionOutput
 from datajunction_server.typing import UTCDatetime
 
 
@@ -18,8 +21,10 @@ class CubeElementMetadata(SQLModel):
     """
 
     name: str
+    display_name: str
     node_name: str
     type: str
+    partition: Optional[PartitionOutput]
 
     @root_validator(pre=True)
     def type_string(cls, values):  # pylint: disable=no-self-argument
@@ -28,7 +33,11 @@ class CubeElementMetadata(SQLModel):
         """
         values = dict(values)
         values["node_name"] = values["node_revisions"][0].name
-        values["type"] = values["node_revisions"][0].type
+        values["type"] = (
+            values["node_revisions"][0].type
+            if values["node_revisions"][0].type == NodeType.METRIC
+            else NodeType.DIMENSION
+        )
         return values
 
 
@@ -53,3 +62,22 @@ class CubeRevisionMetadata(SQLModel):
 
     class Config:  # pylint: disable=missing-class-docstring,too-few-public-methods
         allow_population_by_field_name = True
+
+
+class DimensionValue(BaseSQLModel):
+    """
+    Dimension value and count
+    """
+
+    value: List[str]
+    count: Optional[int]
+
+
+class DimensionValues(BaseSQLModel):
+    """
+    Dimension values
+    """
+
+    dimensions: List[str]
+    values: List[DimensionValue]
+    cardinality: int

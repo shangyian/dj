@@ -1,8 +1,7 @@
 ---
 weight: 5
+title: "Namespaces"
 ---
-
-# Namespaces
 
 All nodes in DataJunction exist within a namespace. Node names are dot separated alpha-numeric elements. The leading elements
 identify the namespace where the node exists. Nodes that do not include any dots in the name are automatically
@@ -32,7 +31,7 @@ curl -X POST http://localhost:8000/namespaces/default/
 {{< tab "python" >}}
 
 ```py
-dj.new_namespace("default")
+dj.create_namespace("default")
 ```
 {{< /tab >}}
 {{< tab "javascript" >}}

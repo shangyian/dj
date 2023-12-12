@@ -29,11 +29,11 @@ from sqlmodel import Session
 
 from datajunction_server.construction.utils import get_dj_node, to_namespaced_name
 from datajunction_server.errors import DJError, DJErrorException, DJException, ErrorCode
+from datajunction_server.models.column import SemanticType
 from datajunction_server.models.node import BuildCriteria
 from datajunction_server.models.node import NodeRevision
 from datajunction_server.models.node import NodeRevision as DJNode
-from datajunction_server.models.node import NodeType
-from datajunction_server.models.node import NodeType as DJNodeType
+from datajunction_server.models.node_type import NodeType as DJNodeType
 from datajunction_server.sql.functions import function_registry, table_function_registry
 from datajunction_server.sql.parsing.backends.exceptions import DJParseException
 from datajunction_server.sql.parsing.types import (
@@ -197,6 +197,20 @@ class Node(ABC):
             return None
         return self.parent.get_nearest_parent_of_type(node_type)
 
+    def get_furthest_parent(
+        self: "Node",
+    ) -> Optional[TNode]:
+        """
+        Traverse up the tree until you find a node of `node_type` or hit the root
+        """
+        if self.parent is None:
+            return None
+        curr_parent = self.parent
+        while True:
+            if curr_parent.parent is None:
+                return curr_parent
+            curr_parent = curr_parent.parent
+
     def flatten(self) -> Iterator["Node"]:
         """
         Flatten the sub-ast of the node as an iterator
@@ -302,6 +316,8 @@ class Node(ABC):
         for node in self.flatten():
             if compare_(node, from_):
                 other = to.copy() if copy else to
+                if isinstance(from_, Table) and from_.parent == to:
+                    continue
                 if isinstance(from_, Table):
                     for ref in from_.ref_columns:
                         ref.add_table(other)
@@ -442,10 +458,13 @@ class Node(ABC):
         """
         Compile a DJ Node. By default, we call compile on all immediate children of this node.
         """
+        if self._is_compiled:
+            return
         for child in self.children:
             if not child.is_compiled():
                 child.compile(ctx)
                 child._is_compiled = True
+        self._is_compiled = True
 
     def is_compiled(self) -> bool:
         """
@@ -471,13 +490,23 @@ class Aliasable(Node):
 
     alias: Optional["Name"] = None
     as_: Optional[bool] = None
+    semantic_entity: Optional[str] = None
+    semantic_type: Optional[SemanticType] = None
 
-    def set_alias(self: TNode, alias: "Name") -> TNode:
+    def set_alias(self: TNode, alias: Optional["Name"]) -> TNode:
         self.alias = alias
         return self
 
     def set_as(self: TNode, as_: bool) -> TNode:
         self.as_ = as_
+        return self
+
+    def set_semantic_entity(self: TNode, semantic_entity: str) -> TNode:
+        self.semantic_entity = semantic_entity
+        return self
+
+    def set_semantic_type(self: TNode, semantic_type: SemanticType) -> TNode:
+        self.semantic_type = semantic_type
         return self
 
     @property
@@ -566,6 +595,15 @@ class Expression(Node):
 
     def set_alias(self: TExpression, alias: "Name") -> Alias[TExpression]:
         return Alias(child=self).set_alias(alias)
+
+    def without_aliases(self) -> TExpression:
+        exp = self
+        while hasattr(exp, "alias") or isinstance(exp, Alias) or hasattr(exp, "child"):
+            if hasattr(exp, "child"):
+                exp = exp.child
+            elif hasattr(exp, "expression"):
+                exp = exp.expression
+        return exp
 
 
 @dataclass(eq=False)
@@ -662,6 +700,19 @@ class Named(Node):
 
 
 @dataclass(eq=False)
+class DefaultName(Name):
+    name: str = ""
+
+    def __bool__(self) -> bool:
+        return False
+
+
+@dataclass(eq=False)
+class UnNamed(Named):
+    name: Name = field(default_factory=DefaultName)
+
+
+@dataclass(eq=False)
 class Column(Aliasable, Named, Expression):
     """
     Column used in statements
@@ -671,6 +722,7 @@ class Column(Aliasable, Named, Expression):
         repr=False,
         default=None,
     )
+    _is_struct_ref: bool = False
     _type: Optional["ColumnType"] = field(repr=False, default=None)
     _expression: Optional[Expression] = field(repr=False, default=None)
     _is_compiled: bool = False
@@ -683,6 +735,7 @@ class Column(Aliasable, Named, Expression):
         if self.expression:
             self.add_type(self.expression.type)
             return self.expression.type
+
         parent_expr = f"in {self.parent}" if self.parent else "that has no parent"
         raise DJParseException(f"Cannot resolve type of column {self} {parent_expr}")
 
@@ -716,6 +769,13 @@ class Column(Aliasable, Named, Expression):
         """
         self._expression = expression
         return self
+
+    def set_struct_ref(self):
+        """
+        Marks this column as a struct dereference. This implies that we treat the name
+        and namespace values on this object as struct column and struct subscript values.
+        """
+        self._is_struct_ref = True
 
     def add_table(self, table: "TableExpression"):
         self._table = table
@@ -756,6 +816,21 @@ class Column(Aliasable, Named, Expression):
     def is_compiled(self):
         return self._is_compiled or (self.table and self._type)
 
+    def column_names(self) -> Tuple[Optional[str], str, Optional[str]]:
+        """
+        Returns the column namespace (if any), column name, and subscript name (if any)
+        """
+        subscript_name = None
+        column_name = self.name.name
+        column_namespace = None
+        if len(self.namespace) == 2:  # struct
+            column_namespace, column_name = self.namespace
+            column_name = column_name.name
+            subscript_name = self.name.name
+        elif len(self.namespace) == 1:  # non-struct
+            column_namespace = self.namespace[0].name
+        return column_namespace, column_name, subscript_name
+
     def find_table_sources(
         self,
         ctx: CompileContext,
@@ -775,6 +850,8 @@ class Column(Aliasable, Named, Expression):
                 query.find_all(TableExpression),
             ),
         )
+        if hasattr(self, "child"):
+            self.add_type(self.child.type)
         for table in direct_tables:
             if not table.is_compiled():
                 table.compile(ctx)
@@ -782,22 +859,31 @@ class Column(Aliasable, Named, Expression):
         namespace = (
             self.name.namespace.identifier(False) if self.name.namespace else ""
         )  # a.x -> a
+
+        # Determine if the column is referencing a struct
+        column_namespace, column_name, subscript_name = self.column_names()
+        is_struct = column_namespace and column_name and subscript_name
+
         found = []
 
         # Go through TableExpressions directly on the AST first and collect all
         # possible origins for this column. There may be more than one if the column
         # is not namespaced.
         for table in direct_tables:
-            if not namespace or table.alias_or_name.identifier(False) == namespace:
+            if (
+                # This column may be namespaced, in which case we'll search for an origin table
+                # that has the namespace as an alias or name. If this column has no namespace,
+                # it should be sourced from the immediate table
+                not namespace
+                or namespace == table.alias_or_name.identifier(False)
+            ) or (
+                # This column may be a struct, meaning it'll have an optional namespace,
+                # a column name, and a subscript
+                table.column_mapping.get(namespace)
+                or (table.column_mapping.get(column_name) and is_struct)
+            ):
                 if table.add_ref_column(self, ctx):
                     found.append(table)
-
-            # The column's namespace may match the name of a column on the table, which
-            # implies that the column on the table is likely a struct and the dereferencing
-            # will happen on the struct object
-            for col in table.columns:
-                if col.alias_or_name.name == namespace:
-                    table.add_ref_column(self, ctx)
 
         if found:
             return found
@@ -818,11 +904,23 @@ class Column(Aliasable, Named, Expression):
         if found:
             return found
 
+        # Check for ctes
+        alpha_query = self.get_furthest_parent()
+        if isinstance(alpha_query, Query) and alpha_query.ctes:
+            for table in alpha_query.ctes:
+                if table.alias_or_name.identifier(False) == namespace:
+                    if table.add_ref_column(self, ctx):
+                        found.append(table)
+
         # If nothing was found in the initial AST, traverse through dimensions graph
         # to find another table in DJ that could be its origin
         to_process = collections.deque(direct_tables)
+        processed = set()
         while to_process:
             current_table = to_process.pop()
+            if current_table in processed:
+                continue
+            processed.add(current_table)
             if (
                 not namespace
                 or current_table.alias_or_name.identifier(False) == namespace
@@ -869,7 +967,7 @@ class Column(Aliasable, Named, Expression):
                 ctx.exception.errors.append(
                     DJError(
                         code=ErrorCode.INVALID_COLUMN,
-                        message=f"Column`{self}` does not exist on any valid table.",
+                        message=f"Column `{self}` does not exist on any valid table.",
                     ),
                 )
                 return
@@ -887,16 +985,40 @@ class Column(Aliasable, Named, Expression):
             source_table.add_ref_column(self, ctx)
         self._is_compiled = True
 
+    @property
+    def struct_column_name(self) -> str:
+        """If this is a struct reference, the struct type's column name"""
+        column_namespace, column_name, subscript_name = self.column_names()
+        if len(self.namespace) == 1:  # non-struct
+            return column_namespace
+        return column_name
+
+    @property
+    def struct_subscript(self) -> str:
+        """If this is a struct reference, the struct type's field name"""
+        return self.name.name
+
     def __str__(self) -> str:
         as_ = " AS " if self.as_ else " "
         alias = "" if not self.alias else f"{as_}{self.alias}"
         if self.table is not None and not isinstance(self.table, FunctionTable):
-            ret = f"{self.table.alias_or_name.identifier()}.{self.name.quote_style}{self.name.name}{self.name.quote_style}"
+            name = (
+                self.struct_column_name + "." + self.struct_subscript
+                if self._is_struct_ref
+                else self.name.name
+            )
+            ret = f"{self.name.quote_style}{name}{self.name.quote_style}"
+            if table_name := self.table.alias_or_name:
+                ret = table_name.identifier() + "." + ret
         else:
             ret = str(self.name)
         if self.parenthesized:
             ret = f"({ret})"
         return ret + alias
+
+    @property
+    def is_struct_ref(self):
+        return self._is_struct_ref
 
 
 @dataclass(eq=False)
@@ -940,24 +1062,33 @@ class TableExpression(Aliasable, Expression):
     column_list: List[Column] = field(default_factory=list)
     _columns: List[Expression] = field(
         default_factory=list,
-    )  # all those expressions that can be had from the table
+    )  # all those expressions that can be had from the table; usually derived from dj node metadata for Table
+    # ref (referenced) columns are columns used elsewhere from this table
     _ref_columns: List[Column] = field(init=False, repr=False, default_factory=list)
 
     @property
     def columns(self) -> List[Expression]:
         """
-        Return the columns referenced from this table
+        Return the columns named in this table
         """
         col_list_names = {col.name.name for col in self.column_list}
         return [
             col
             for col in self._columns
             if isinstance(col, (Aliasable, Named))
-            and col.alias_or_name.name not in col_list_names
+            and (col.alias_or_name.name in col_list_names if col_list_names else True)
         ]
 
-    def is_compiled(self) -> bool:
-        return True if self._columns or self._is_compiled else False
+    @property
+    def column_mapping(self) -> Dict[str, Column]:
+        """
+        Return the columns named in this table
+        """
+        return {
+            col.alias_or_name.name: col
+            for col in self._columns
+            if isinstance(col, (Aliasable, Named))
+        }
 
     @property
     def ref_columns(self) -> Set[Column]:
@@ -972,9 +1103,31 @@ class TableExpression(Aliasable, Expression):
         ctx: Optional[CompileContext] = None,
     ) -> bool:
         """
-        Add column referenced from this table
-        returning True if the table has the column
-        and False otherwise
+        Add column referenced from this table. Returns True if the table has the column
+        and False otherwise.
+
+        This function handles the following cases:
+
+        Regular columns. For example:
+        (1) non-aliased columns
+          `SELECT country_id AS country1 FROM countries` should match the `country_id`
+          column in the table `countries`
+        (2) aliased columns
+          `SELECT C.country_id AS country1 FROM countries C` should match the `country_id`
+          column in the table `countries` with the column namespace/table alias `C`
+
+        Struct columns. For example:
+        (1) non-aliased struct columns
+          `countries` has column `identifiers` with type:
+                STRUCT<country_name STR, country_code STR>
+          `SELECT identifiers.country_name AS name FROM countries` should match the
+          `identifier` -> `country_name` column in the table `countries`
+        (2) aliased struct columns
+          `countries` has column `identifiers` with type:
+                STRUCT<country_name STR, country_code STR>
+          `SELECT C.identifiers.country_name AS name FROM countries C` should match the
+          `identifier` -> `country_name` column in the table `countries` with the column namespace/
+          table alias `C`
         """
         if not self._columns:
             if ctx is None:
@@ -983,6 +1136,14 @@ class TableExpression(Aliasable, Expression):
                     "add Column ref without a compilation context.",
                 )
             self.compile(ctx)
+
+        if not isinstance(column, Alias):
+            ref_col_name = column.name.name
+            if matching_column := self.column_mapping.get(ref_col_name):
+                self._ref_columns.append(column)
+                column.add_table(self)
+                column.add_expression(matching_column)
+                column.add_type(matching_column.type)
 
         # For table-valued functions, add the list of columns that gets
         # returned as reference columns and compile them
@@ -1006,8 +1167,11 @@ class TableExpression(Aliasable, Expression):
 
         for col in self.columns:
             if isinstance(col, (Aliasable, Named)):
-                current_col_name = col.alias_or_name.identifier(False)
-                if column.name.name == current_col_name:
+                if (
+                    not column.alias
+                    and not hasattr(column, "child")
+                    and column.name.name == col.alias_or_name.name
+                ):
                     self._ref_columns.append(column)
                     column.add_table(self)
                     column.add_expression(col)
@@ -1018,18 +1182,30 @@ class TableExpression(Aliasable, Expression):
                 # the search column's namespace and if there's a nested field that matches the
                 # search column's name
                 if isinstance(col.type, StructType):
+                    # struct column name
                     column_namespace = ".".join(
                         [name.name for name in column.namespace],
                     )
-                    if column_namespace == current_col_name:
+                    subscript_name = column.name.name
+                    column_name = column.name.name
+                    if len(column.namespace) == 2:
+                        column_namespace, column_name, _ = column.column_names()
+
+                    if col.alias_or_name.identifier(False) in (
+                        column_namespace,
+                        column_name,
+                    ):
                         for type_field in col.type.fields:
-                            if type_field.name.name == column.name.name:
+                            if type_field.name.name == subscript_name:
+                                self._ref_columns.append(column)
+                                column.set_struct_ref()
                                 column.add_table(self)
                                 column.add_expression(col)
                                 column.add_type(type_field.type)
+                                return True
         return False
 
-    def is_compiled(self) -> bool:  # noqa: F811
+    def is_compiled(self) -> bool:
         return bool(self._columns) or self._is_compiled
 
     def in_from_or_lateral(self) -> bool:
@@ -1188,6 +1364,7 @@ class BinaryOpKind(DJEnum):
     Plus = "+"
     Minus = "-"
     Modulo = "%"
+    NullSafeEq = "<=>"
 
 
 @dataclass(eq=False)
@@ -1329,10 +1506,13 @@ class BinaryOp(Operation):
         """
         Compile a DJ Node. By default, we call compile on all immediate children of this node.
         """
+        if self._is_compiled:
+            return
         for child in self.children:
             if not child.is_compiled():
                 child.compile(ctx)
                 child._is_compiled = True
+        self._is_compiled = True
 
 
 @dataclass(eq=False)
@@ -1420,10 +1600,16 @@ class Function(Named, Operation):
         # If not, create a new Function object
         return super().__new__(cls)
 
+    def __getnewargs__(self):
+        return self.name, self.args
+
     def __deepcopy__(self, memodict):
         return self
 
     def __str__(self) -> str:
+        if self.name.name.upper() in function_registry and self.is_runtime():
+            return self.function().substitute()
+
         over = f" {self.over} " if self.over else ""
         quantifier = f" {self.quantifier} " if self.quantifier else ""
         ret = (
@@ -1439,6 +1625,9 @@ class Function(Named, Operation):
     def is_aggregation(self) -> bool:
         return self.function().is_aggregation
 
+    def is_runtime(self) -> bool:
+        return self.function().is_runtime
+
     @property
     def type(self) -> ColumnType:
         return self.function().infer_type(*self.args)
@@ -1447,6 +1636,7 @@ class Function(Named, Operation):
         """
         Compile a function
         """
+        self._is_compiled = True
         for arg in self.args:
             if not arg.is_compiled():
                 arg.compile(ctx)
@@ -1864,6 +2054,11 @@ class Subscript(Expression):
         if isinstance(self.expr.type, MapType):
             type_ = cast(MapType, self.expr.type)
             return type_.value.type
+        if isinstance(self.expr.type, StructType):
+            nested_field = self.expr.type.fields_mapping.get(
+                self.index.value.replace("'", ""),
+            )
+            return nested_field.type
         return cast(ListType, self.expr.type).element.type
 
 
@@ -1936,6 +2131,27 @@ class Join(Node):
 
 
 @dataclass(eq=False)
+class InlineTable(TableExpression, Named):
+    """
+    An inline table
+    """
+
+    values: List[Expression] = field(default_factory=list)
+    explicit_columns: bool = False
+
+    def __str__(self) -> str:
+        values = "VALUES " + ",\n\t".join(
+            [f'({", ".join([str(col) for col in row])})' for row in self.values],
+        )
+        alias = f"{self.alias_or_name.name}" + (
+            f"({', '.join([col.alias_or_name.name for col in self.columns])})"
+            if self.explicit_columns
+            else ""
+        )
+        return f"{values} AS {alias}"
+
+
+@dataclass(eq=False)
 class FunctionTableExpression(TableExpression, Named, Operation):
     """
     An uninitializable Type for FunctionTable for use as a
@@ -1958,9 +2174,9 @@ class FunctionTable(FunctionTableExpression):
             if self.column_list
             else ""
         )
-        column_list_str = f"({cols})" if alias else str(cols)
+        column_list_str = f"({cols})" if cols else ""
         args_str = f"({', '.join(str(col) for col in self.args)})" if self.args else ""
-        return f"{self.name}{args_str}{alias}{as_}{column_list_str}"
+        return f"{self.name}{args_str}{as_}{alias}{column_list_str}"
 
     def set_alias(self: TNode, alias: Name) -> TNode:
         self.alias = alias
@@ -2104,8 +2320,8 @@ class Organization(Node):
     Sets up organization for the query
     """
 
-    order: Optional[List[SortItem]] = None
-    sort: Optional[List[SortItem]] = None
+    order: List[SortItem] = field(default_factory=list)
+    sort: List[SortItem] = field(default_factory=list)
 
     def __str__(self) -> str:
         ret = ""
@@ -2183,7 +2399,7 @@ class Select(SelectExpression):
         if self.organization:
             select += f"\n{self.organization}"
         if self.limit:
-            select += f"LIMIT {self.limit}"
+            select += f"\nLIMIT {self.limit}"
 
         if self.alias:
             as_ = " AS " if self.as_ else " "
@@ -2216,7 +2432,7 @@ class Select(SelectExpression):
 
 
 @dataclass(eq=False)
-class Query(TableExpression):
+class Query(TableExpression, UnNamed):
     """
     Overarching query type
     """
@@ -2230,6 +2446,8 @@ class Query(TableExpression):
         )
 
     def compile(self, ctx: CompileContext):
+        if self._is_compiled:
+            return
         self.apply(
             lambda node: node is not self
             and not node.is_compiled()
@@ -2237,6 +2455,7 @@ class Query(TableExpression):
         )
         for expr in self.select.projection:
             self._columns += expr.columns
+        self._is_compiled = True
 
     def bake_ctes(self) -> "Query":
         """
@@ -2245,14 +2464,21 @@ class Query(TableExpression):
         Note: This destroys the structure of the query which cannot be undone
         you may want to deepcopy it first
         """
+
         for cte in self.ctes:
-            table = Table(name=cte.alias_or_name)
-            self.replace(table, cte)
+            for tbl in self.filter(
+                lambda node: isinstance(node, Table)
+                and node.identifier(False) == cte.alias_or_name.identifier(False),
+            ):
+                tbl.swap(cte)
+        self.ctes = []
         return self
 
     def __str__(self) -> str:
         is_cte = self.parent is not None and self.parent_key == "ctes"
         ctes = ",\n".join(str(cte) for cte in self.ctes)
+        if ctes:
+            ctes += "\n\n"
         with_ = f"WITH\n{ctes}" if ctes else ""
 
         parts = [f"{with_}{self.select}\n"]
@@ -2307,7 +2533,11 @@ class Query(TableExpression):
     def build(  # pylint: disable=R0913,C0415
         self,
         session: Session,
+        memoized_queries: Dict[int, "Query"],
         build_criteria: Optional[BuildCriteria] = None,
+        filters: Optional[List[str]] = None,
+        dimensions: Optional[List[str]] = None,
+        access_control=None,
     ):
         """
         Transforms a query ast by replacing dj node references with their asts
@@ -2315,11 +2545,13 @@ class Query(TableExpression):
         from datajunction_server.construction.build import _build_select_ast
 
         self.bake_ctes()  # pylint: disable=W0212
-        _build_select_ast(session, self.select, build_criteria)
+        _build_select_ast(
+            session,
+            self.select,
+            memoized_queries,
+            build_criteria,
+            filters,
+            dimensions,
+            access_control,
+        )
         self.select.add_aliases_to_unnamed_columns()
-
-        # Make the generated query deterministic
-        self.select.projection = sorted(
-            self.select.projection,
-            key=lambda x: str(x.alias_or_name),
-        )[:]

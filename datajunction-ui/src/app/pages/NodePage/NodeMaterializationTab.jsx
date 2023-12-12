@@ -1,6 +1,9 @@
 import { useEffect, useState } from 'react';
 import ClientCodePopover from './ClientCodePopover';
 import TableIcon from '../../icons/TableIcon';
+import AddMaterializationPopover from './AddMaterializationPopover';
+import * as React from 'react';
+import AddBackfillPopover from './AddBackfillPopover';
 
 const cronstrue = require('cronstrue');
 
@@ -8,23 +11,32 @@ export default function NodeMaterializationTab({ node, djClient }) {
   const [materializations, setMaterializations] = useState([]);
   useEffect(() => {
     const fetchData = async () => {
-      const data = await djClient.materializations(node.name);
-      setMaterializations(data);
+      if (node) {
+        const data = await djClient.materializations(node.name);
+        setMaterializations(data);
+      }
     };
     fetchData().catch(console.error);
   }, [djClient, node]);
+  //
+  // const rangePartition = partition => {
+  //   return (
+  //     <div>
+  //       <span className="badge partition_value">
+  //         <span className="badge partition_value">{partition.range[0]}</span>to
+  //         <span className="badge partition_value">{partition.range[1]}</span>
+  //       </span>
+  //     </div>
+  //   );
+  // };
 
-  const rangePartition = partition => {
-    return (
-      <div>
-        <span className="badge partition_value">
-          <span className="badge partition_value">{partition.range[0]}</span>to
-          <span className="badge partition_value">{partition.range[1]}</span>
-        </span>
-      </div>
-    );
-  };
-
+  const partitionColumnsMap = node
+    ? Object.fromEntries(
+        node?.columns
+          .filter(col => col.partition !== null)
+          .map(col => [col.name, col.display_name]),
+      )
+    : {};
   const cron = materialization => {
     var parsedCron = '';
     try {
@@ -35,53 +47,35 @@ export default function NodeMaterializationTab({ node, djClient }) {
 
   const materializationRows = materializations => {
     return materializations.map(materialization => (
-      <tr>
+      <tr key={materialization.name}>
         <td className="text-start node_name">
-          <a href={materialization.urls[0]}>{materialization.name}</a>
-          <ClientCodePopover code={materialization.clientCode} />
-        </td>
-        <td>
           <span className={`badge cron`}>{materialization.schedule}</span>
           <div className={`cron-description`}>{cron(materialization)} </div>
         </td>
         <td>
-          {materialization.engine.name}
-          <br />
-          {materialization.engine.version}
+          {materialization.job?.replace('MaterializationJob', '').toUpperCase()}
         </td>
+        <td>{materialization.strategy?.toUpperCase()}</td>
         <td>
-          {materialization.config.partitions ? (
-            materialization.config.partitions.map(partition =>
-              partition.type_ === 'categorical' ? (
-                <div className="partition__full">
-                  <div className="partition__header">{partition.name}</div>
+          {node.columns
+            .filter(col => col.partition !== null)
+            .map(column => {
+              return (
+                <div className="partition__full" key={column.name}>
+                  <div className="partition__header">{column.display_name}</div>
                   <div className="partition__body">
-                    {partition.values !== null && partition.values.length > 0
-                      ? partition.values.map(val => (
-                          <span className="badge partition_value">{val}</span>
-                        ))
-                      : null}
-                    {partition.range !== null && partition.range.length > 0
-                      ? rangePartition(partition)
-                      : null}
-                    {(partition.range === null && partition.values === null) ||
-                    (partition.range.length === 0 &&
-                      partition.values.length === 0) ? (
-                      <span className={`badge partition_value_highlight`}>
-                        ALL
-                      </span>
-                    ) : null}
+                    <code>{column.name}</code>
+                    <span className="badge partition_value">
+                      {column.partition.type_}
+                    </span>
                   </div>
                 </div>
-              ) : null,
-            )
-          ) : (
-            <br />
-          )}
+              );
+            })}
         </td>
         <td>
           {materialization.output_tables.map(table => (
-            <div className={`table__full`}>
+            <div className={`table__full`} key={table}>
               <div className="table__header">
                 <TableIcon />{' '}
                 <span className={`entity-info`}>
@@ -94,58 +88,158 @@ export default function NodeMaterializationTab({ node, djClient }) {
             </div>
           ))}
         </td>
-        {/*<td>{Object.keys(materialization.config.spark).map(key => <li className={`list-group-item`}>{key}: {materialization.config.spark[key]}</li>)}</td>*/}
-
-        <td>
-          {materialization.config.partitions ? (
-            materialization.config.partitions.map(partition =>
-              partition.type_ === 'temporal' ? (
-                <div className="partition__full">
-                  <div className="partition__header">{partition.name}</div>
+        {materializations[0].strategy === 'incremental_time' ? (
+          <td>
+            {materialization.backfills.map(backfill => (
+              <a href={backfill.urls[0]} className="partitionLink">
+                <div
+                  className="partition__full"
+                  key={backfill.spec.column_name}
+                >
+                  <div className="partition__header">
+                    {partitionColumnsMap[backfill.spec.column_name]}
+                  </div>
                   <div className="partition__body">
-                    {partition.values !== null && partition.values.length > 0
-                      ? partition.values.map(val => (
-                          <span className="badge partition_value">{val}</span>
-                        ))
-                      : null}
-                    {partition.range !== null && partition.range.length > 0
-                      ? rangePartition(partition)
-                      : null}
+                    <span className="badge partition_value">
+                      {backfill.spec.range[0]}
+                    </span>
+                    to
+                    <span className="badge partition_value">
+                      {backfill.spec.range[1]}
+                    </span>
                   </div>
                 </div>
-              ) : null,
-            )
-          ) : (
-            <br />
-          )}
-        </td>
+              </a>
+            ))}
+            <AddBackfillPopover node={node} materialization={materialization} />
+          </td>
+        ) : (
+          <></>
+        )}
         <td>
           {materialization.urls.map((url, idx) => (
-            <a href={url}>[{idx + 1}]</a>
+            <a href={url} key={`url-${idx}`}>
+              [{idx + 1}]
+            </a>
           ))}
+        </td>
+        <td>
+          <ClientCodePopover code={materialization.clientCode} />
         </td>
       </tr>
     ));
   };
   return (
-    <div className="table-responsive">
-      <table className="card-inner-table table">
-        <thead className="fs-7 fw-bold text-gray-400 border-bottom-0">
-          <th className="text-start">Name</th>
-          <th>Schedule</th>
-          <th>Engine</th>
-          <th>Partitions</th>
-          <th>Output Tables</th>
-          <th>Backfills</th>
-          <th>URLs</th>
-        </thead>
-        {materializationRows(
-          materializations.filter(
-            materialization =>
-              !(materialization.name === 'default' && node.type === 'cube'),
-          ),
-        )}
-      </table>
-    </div>
+    <>
+      <div className="table-vertical">
+        <div>
+          <h2>Materializations</h2>
+          <AddMaterializationPopover node={node} />
+          {materializations.length > 0 ? (
+            <table
+              className="card-inner-table table"
+              aria-label="Materializations"
+              aria-hidden="false"
+            >
+              <thead className="fs-7 fw-bold text-gray-400 border-bottom-0">
+                <tr>
+                  <th className="text-start">Schedule</th>
+                  <th>Job Type</th>
+                  <th>Strategy</th>
+                  <th>Partitions</th>
+                  <th>Intended Output Tables</th>
+                  {materializations[0].strategy === 'incremental_time' ? (
+                    <th>Backfills</th>
+                  ) : (
+                    <></>
+                  )}
+                  <th>URLs</th>
+                </tr>
+              </thead>
+              <tbody>
+                {materializationRows(
+                  materializations.filter(
+                    materialization =>
+                      !(
+                        materialization.name === 'default' &&
+                        node.type === 'cube'
+                      ),
+                  ),
+                )}
+              </tbody>
+            </table>
+          ) : (
+            <div className="message alert" style={{ marginTop: '10px' }}>
+              No materialization workflows configured for this node.
+            </div>
+          )}
+        </div>
+        <div>
+          <h2>Materialized Datasets</h2>
+          {node && node.availability !== null ? (
+            <table
+              className="card-inner-table table"
+              aria-label="Availability"
+              aria-hidden="false"
+            >
+              <thead className="fs-7 fw-bold text-gray-400 border-bottom-0">
+                <tr>
+                  <th className="text-start">Output Dataset</th>
+                  <th>Valid Through</th>
+                  <th>Partitions</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>
+                    {
+                      <div
+                        className={`table__full`}
+                        key={node.availability.table}
+                      >
+                        <div className="table__header">
+                          <TableIcon />{' '}
+                          <span className={`entity-info`}>
+                            {node.availability.catalog +
+                              '.' +
+                              node.availability.schema_}
+                          </span>
+                        </div>
+                        <div className={`table__body upstream_tables`}>
+                          <a href={node.availability.url}>
+                            {node.availability.table}
+                          </a>
+                        </div>
+                      </div>
+                    }
+                  </td>
+                  <td>
+                    {new Date(node.availability.valid_through_ts).toISOString()}
+                  </td>
+                  <td>
+                    <span
+                      className={`badge partition_value`}
+                      style={{ fontSize: '100%' }}
+                    >
+                      <span className={`badge partition_value_highlight`}>
+                        {node.availability.min_temporal_partition}
+                      </span>
+                      to
+                      <span className={`badge partition_value_highlight`}>
+                        {node.availability.max_temporal_partition}
+                      </span>
+                    </span>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          ) : (
+            <div className="message alert" style={{ marginTop: '10px' }}>
+              No materialized datasets available for this node.
+            </div>
+          )}
+        </div>
+      </div>
+    </>
   );
 }

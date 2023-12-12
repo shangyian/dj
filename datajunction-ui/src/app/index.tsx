@@ -10,49 +10,117 @@ import { BrowserRouter, Routes, Route } from 'react-router-dom';
 import { NamespacePage } from './pages/NamespacePage/Loadable';
 import { NodePage } from './pages/NodePage/Loadable';
 import { SQLBuilderPage } from './pages/SQLBuilderPage/Loadable';
+import { CubeBuilderPage } from './pages/CubeBuilderPage/Loadable';
+import { TagPage } from './pages/TagPage/Loadable';
+import { AddEditNodePage } from './pages/AddEditNodePage/Loadable';
+import { AddEditTagPage } from './pages/AddEditTagPage/Loadable';
 import { NotFoundPage } from './pages/NotFoundPage/Loadable';
+import { LoginPage } from './pages/LoginPage';
+import { RegisterTablePage } from './pages/RegisterTablePage';
 import { Root } from './pages/Root/Loadable';
 import DJClientContext from './providers/djclient';
 import { DataJunctionAPI } from './services/DJService';
+import { CookiesProvider, useCookies } from 'react-cookie';
+import * as Constants from './constants';
 
 export function App() {
+  const [cookies] = useCookies([Constants.LOGGED_IN_FLAG_COOKIE]);
   return (
-    <BrowserRouter>
-      <Helmet
-        titleTemplate="DataJunction: %s"
-        defaultTitle="DataJunction: A Metrics Platform"
-      >
-        <meta
-          name="description"
-          content="DataJunction serves as a semantic layer to help manage metrics"
-        />
-      </Helmet>
-      <DJClientContext.Provider value={{ DataJunctionAPI }}>
-        <Routes>
-          <Route
-            path="/"
-            element={<Root />}
-            children={
-              <>
-                <Route path="nodes" key="nodes">
-                  <Route path=":name" element={<NodePage />} />
-                </Route>
+    <CookiesProvider>
+      <BrowserRouter>
+        {cookies.__djlif || process.env.REACT_DISABLE_AUTH === 'true' ? (
+          <>
+            <Helmet
+              titleTemplate="DataJunction: %s"
+              defaultTitle="DataJunction: A Metrics Platform"
+            >
+              <meta
+                name="description"
+                content="DataJunction serves as a semantic layer to help manage metrics"
+              />
+            </Helmet>
+            <DJClientContext.Provider value={{ DataJunctionAPI }}>
+              <Routes>
+                <Route
+                  path="/"
+                  element={<Root />}
+                  children={
+                    <>
+                      <Route path="nodes" key="nodes">
+                        <Route path=":name" element={<NodePage />} />
+                        <Route
+                          path=":name/edit"
+                          key="edit"
+                          element={<AddEditNodePage />}
+                        />
+                        <Route
+                          path=":name/edit-cube"
+                          key="edit-cube"
+                          element={<CubeBuilderPage />}
+                        />
+                      </Route>
 
-                <Route path="/" element={<NamespacePage />} key="index" />
-                <Route path="namespaces">
-                  <Route
-                    path=":namespace"
-                    element={<NamespacePage />}
-                    key="namespaces"
-                  />
-                </Route>
-                <Route path="sql" key="sql" element={<SQLBuilderPage />} />
-              </>
-            }
-          />
-          <Route path="*" element={<NotFoundPage />} />
-        </Routes>
-      </DJClientContext.Provider>
-    </BrowserRouter>
+                      <Route path="/" element={<NamespacePage />} key="index" />
+                      <Route path="namespaces">
+                        <Route
+                          path=":namespace"
+                          element={<NamespacePage />}
+                          key="namespaces"
+                        />
+                      </Route>
+                      <Route
+                        path="create/tag"
+                        key="createtag"
+                        element={<AddEditTagPage />}
+                      ></Route>
+                      <Route
+                        path="create/source"
+                        key="register"
+                        element={<RegisterTablePage />}
+                      ></Route>
+                      <Route path="/create/cube">
+                        <Route
+                          path=":initialNamespace"
+                          key="create"
+                          element={<CubeBuilderPage />}
+                        />
+                        <Route
+                          path=""
+                          key="create"
+                          element={<CubeBuilderPage />}
+                        />
+                      </Route>
+                      <Route path="create/:nodeType">
+                        <Route
+                          path=":initialNamespace"
+                          key="create"
+                          element={<AddEditNodePage />}
+                        />
+                        <Route
+                          path=""
+                          key="create"
+                          element={<AddEditNodePage />}
+                        />
+                      </Route>
+                      <Route
+                        path="sql"
+                        key="sql"
+                        element={<SQLBuilderPage />}
+                      />
+                      <Route path="tags" key="tags">
+                        <Route path=":name" element={<TagPage />} />
+                      </Route>
+                    </>
+                  }
+                />
+                <Route path="*" element={<NotFoundPage />} />
+              </Routes>
+            </DJClientContext.Provider>
+          </>
+        ) : (
+          <LoginPage />
+        )}
+      </BrowserRouter>
+    </CookiesProvider>
   );
 }

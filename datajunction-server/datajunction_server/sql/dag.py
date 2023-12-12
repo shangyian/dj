@@ -9,13 +9,9 @@ from sqlmodel import Session, select
 
 from datajunction_server.models import Column
 from datajunction_server.models.base import NodeColumns
-from datajunction_server.models.node import (
-    DimensionAttributeOutput,
-    Node,
-    NodeRevision,
-    NodeType,
-)
-from datajunction_server.utils import get_settings
+from datajunction_server.models.node import DimensionAttributeOutput, Node, NodeRevision
+from datajunction_server.models.node_type import NodeType
+from datajunction_server.utils import SEPARATOR, get_settings
 
 settings = get_settings()
 
@@ -53,14 +49,10 @@ def get_dimensions(
 
         for column in current_node.current.columns:
             # Include the dimension if it's a column belonging to a dimension node
-            # or if it's tagged with the dimension column attribute
-            if (
-                current_node.type == NodeType.DIMENSION
-                or any(
-                    attr.attribute_type.name == "dimension"
-                    for attr in column.attributes
-                )
-                or column.dimension
+            # or if it's tagged with the dimension column attribute (but not
+            # additionally linked to a dimension)
+            if current_node.type == NodeType.DIMENSION or (
+                column.is_dimensional() and not column.dimension_id
             ):
                 join_path_str = [
                     (
@@ -77,6 +69,10 @@ def get_dimensions(
                 dimensions.append(
                     DimensionAttributeOutput(
                         name=f"{current_node.name}.{column.name}",
+                        node_name=current_node.current.name,
+                        node_display_name=current_node.current.display_name,
+                        is_primary_key=column.name
+                        in {pk.name for pk in current_node.current.primary_key()},
                         type=column.type,
                         path=join_path_str,
                     ),
@@ -105,7 +101,15 @@ def check_convergence(path1: List[str], path2: List[str]) -> bool:
         if partial1 == partial2:
             return True
 
-    return False
+    # TODO: Once we introduce dimension roles, we can remove this.  # pylint: disable=fixme
+    # To workaround this for now, we're using column names as the effective role of the dimension
+    if (
+        path1
+        and path2
+        and path1[-1].split(SEPARATOR)[-1] == path2[-1].split(SEPARATOR)[-1]
+    ):
+        return True
+    return False  # pragma: no cover
 
 
 def group_dimensions_by_name(node: Node) -> Dict[str, List[DimensionAttributeOutput]]:
@@ -132,17 +136,19 @@ def get_shared_dimensions(
         node_dimensions = group_dimensions_by_name(node)
 
         # Merge each set of dimensions based on the name and path
-        to_delete = set()
+        to_delete = set(common.keys() - node_dimensions.keys())
         common_dim_keys = common.keys() & list(node_dimensions.keys())
+        if not common_dim_keys:
+            return []
         for common_dim in common_dim_keys:
             for existing_attr in common[common_dim]:
                 for new_attr in node_dimensions[common_dim]:
                     converged = check_convergence(existing_attr.path, new_attr.path)
                     if not converged:
-                        to_delete.add(common_dim)
+                        to_delete.add(common_dim)  # pragma: no cover
 
         for dim_key in to_delete:
-            del common[dim_key]
+            del common[dim_key]  # pragma: no cover
 
     return sorted(
         [y for x in common.values() for y in x],
@@ -207,3 +213,27 @@ def get_nodes_with_dimension(
     if node_types:
         return [node for node in final_set if node.type in node_types]
     return list(final_set)
+
+
+def get_nodes_with_common_dimensions(
+    session: Session,
+    common_dimensions: List[Node],
+    node_types: Optional[List[NodeType]] = None,
+) -> List[NodeRevision]:
+    """
+    Find all nodes that share a list of common dimensions
+    """
+    nodes_that_share_dimensions = set()
+    first = True
+    for dimension in common_dimensions:
+        new_nodes = get_nodes_with_dimension(session, dimension, node_types)
+        if first:
+            nodes_that_share_dimensions = set(new_nodes)
+            first = False
+        else:
+            nodes_that_share_dimensions = nodes_that_share_dimensions.intersection(
+                set(new_nodes),
+            )
+            if not nodes_that_share_dimensions:
+                break
+    return list(nodes_that_share_dimensions)

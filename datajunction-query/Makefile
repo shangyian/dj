@@ -40,3 +40,11 @@ spellcheck:
 
 check:
 	pdm run pre-commit run --all-files
+
+lint:
+	make check
+
+dev-release:
+	hatch version dev
+	hatch build
+	hatch publish
