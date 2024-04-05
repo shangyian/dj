@@ -2,13 +2,14 @@
 Application healthchecks.
 """
 
-import enum
 from typing import List
 
 from fastapi import APIRouter, Depends
+from pydantic.main import BaseModel
 from sqlalchemy import select
-from sqlmodel import Session, SQLModel
+from sqlalchemy.orm import Session
 
+from datajunction_server.enum import StrEnum
 from datajunction_server.utils import get_session, get_settings
 
 settings = get_settings()
@@ -16,7 +17,7 @@ settings = get_settings()
 router = APIRouter(tags=["health"])
 
 
-class HealthcheckStatus(str, enum.Enum):
+class HealthcheckStatus(StrEnum):
     """
     Possible health statuses.
     """
@@ -25,7 +26,7 @@ class HealthcheckStatus(str, enum.Enum):
     FAILED = "failed"
 
 
-class HealthCheck(SQLModel):
+class HealthCheck(BaseModel):
     """
     A healthcheck response.
     """
@@ -34,7 +35,7 @@ class HealthCheck(SQLModel):
     status: HealthcheckStatus
 
 
-async def database_health(session: Session) -> HealthcheckStatus:
+def database_health(session: Session) -> HealthcheckStatus:
     """
     The status of the database.
     """
@@ -44,18 +45,20 @@ async def database_health(session: Session) -> HealthcheckStatus:
             HealthcheckStatus.OK if result == (1,) else HealthcheckStatus.FAILED
         )
         return health_status
-    except Exception:  # pylint: disable=broad-except
-        return HealthcheckStatus.FAILED
+    except Exception:  # pylint: disable=broad-except  # pragma: no cover
+        return HealthcheckStatus.FAILED  # pragma: no cover
 
 
 @router.get("/health/", response_model=List[HealthCheck])
-async def health_check(session: Session = Depends(get_session)) -> List[HealthCheck]:
+def health_check(
+    session: Session = Depends(get_session),
+) -> List[HealthCheck]:
     """
     Healthcheck for services.
     """
     return [
         HealthCheck(
             name="database",
-            status=await database_health(session),
+            status=database_health(session),
         ),
     ]

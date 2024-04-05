@@ -1,12 +1,13 @@
+# pylint: disable=too-many-arguments
 """
 Data related APIs.
 """
 from http import HTTPStatus
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from fastapi import Depends, Query, Request
 from fastapi.responses import JSONResponse
-from sqlmodel import Session
+from sqlalchemy.orm import Session
 from sse_starlette.sse import EventSourceResponse
 
 from datajunction_server.api.helpers import (
@@ -17,6 +18,9 @@ from datajunction_server.api.helpers import (
     query_event_stream,
     validate_orderby,
 )
+from datajunction_server.database.availabilitystate import AvailabilityState
+from datajunction_server.database.history import ActivityType, EntityType, History
+from datajunction_server.database.user import User
 from datajunction_server.errors import (
     DJException,
     DJInvalidInputException,
@@ -28,10 +32,9 @@ from datajunction_server.internal.access.authorization import (
     validate_access_requests,
 )
 from datajunction_server.internal.engines import get_engine
-from datajunction_server.models import History, User, access
-from datajunction_server.models.history import ActivityType, EntityType
+from datajunction_server.models import access
 from datajunction_server.models.metric import TranslatedSQL
-from datajunction_server.models.node import AvailabilityState, AvailabilityStateBase
+from datajunction_server.models.node import AvailabilityStateBase
 from datajunction_server.models.node_type import NodeType
 from datajunction_server.models.query import QueryCreate, QueryWithResults
 from datajunction_server.service_clients import QueryServiceClient
@@ -100,15 +103,29 @@ def add_availability_state(
     # Merge the new availability state with the current availability state if one exists
     old_availability = node_revision.availability
     if (
-        node_revision.availability
-        and node_revision.availability.catalog == node.current.catalog.name
-        and node_revision.availability.schema_ == data.schema_
-        and node_revision.availability.table == data.table
+        old_availability
+        and old_availability.catalog == data.catalog
+        and old_availability.schema_ == data.schema_
+        and old_availability.table == data.table
     ):
         data.merge(node_revision.availability)
 
     # Update the node with the new availability state
-    node_revision.availability = AvailabilityState.from_orm(data)
+    node_revision.availability = AvailabilityState(
+        catalog=data.catalog,
+        schema_=data.schema_,
+        table=data.table,
+        valid_through_ts=data.valid_through_ts,
+        url=data.url,
+        min_temporal_partition=data.min_temporal_partition,
+        max_temporal_partition=data.max_temporal_partition,
+        partitions=[
+            partition.dict() if not isinstance(partition, Dict) else partition
+            for partition in data.partitions  # type: ignore
+        ],
+        categorical_partitions=data.categorical_partitions,
+        temporal_partitions=data.temporal_partitions,
+    )
     if node_revision.availability and not node_revision.availability.partitions:
         node_revision.availability.partitions = []
     session.add(node_revision)
@@ -117,10 +134,10 @@ def add_availability_state(
             entity_type=EntityType.AVAILABILITY,
             node=node.name,
             activity_type=ActivityType.CREATE,
-            pre=AvailabilityStateBase.parse_obj(old_availability).dict()
+            pre=AvailabilityStateBase.from_orm(old_availability).dict()
             if old_availability
             else {},
-            post=AvailabilityStateBase.parse_obj(node_revision.availability).dict(),
+            post=AvailabilityStateBase.from_orm(node_revision.availability).dict(),
             user=current_user.username if current_user else None,
         ),
     )

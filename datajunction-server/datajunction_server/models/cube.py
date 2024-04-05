@@ -5,17 +5,22 @@ Models for cubes.
 from typing import List, Optional
 
 from pydantic import Field, root_validator
-from sqlmodel import SQLModel
+from pydantic.main import BaseModel
 
-from datajunction_server.models.base import BaseSQLModel
 from datajunction_server.models.materialization import MaterializationConfigOutput
-from datajunction_server.models.node import AvailabilityState, ColumnOutput
+from datajunction_server.models.node import (
+    AvailabilityStateBase,
+    ColumnOutput,
+    NodeMode,
+    NodeStatus,
+)
 from datajunction_server.models.node_type import NodeType
 from datajunction_server.models.partition import PartitionOutput
+from datajunction_server.models.tag import TagOutput
 from datajunction_server.typing import UTCDatetime
 
 
-class CubeElementMetadata(SQLModel):
+class CubeElementMetadata(BaseModel):
     """
     Metadata for an element in a cube
     """
@@ -32,16 +37,20 @@ class CubeElementMetadata(SQLModel):
         Extracts the type as a string
         """
         values = dict(values)
-        values["node_name"] = values["node_revisions"][0].name
-        values["type"] = (
-            values["node_revisions"][0].type
-            if values["node_revisions"][0].type == NodeType.METRIC
-            else NodeType.DIMENSION
-        )
+        if "node_revisions" in values:
+            values["node_name"] = values["node_revisions"][0].name
+            values["type"] = (
+                values["node_revisions"][0].type
+                if values["node_revisions"][0].type == NodeType.METRIC
+                else NodeType.DIMENSION
+            )
         return values
 
+    class Config:  # pylint: disable=missing-class-docstring,too-few-public-methods
+        orm_mode = True
 
-class CubeRevisionMetadata(SQLModel):
+
+class CubeRevisionMetadata(BaseModel):
     """
     Metadata for a cube node
     """
@@ -52,19 +61,25 @@ class CubeRevisionMetadata(SQLModel):
     name: str
     display_name: str
     version: str
+    status: NodeStatus
+    mode: NodeMode
     description: str = ""
-    availability: Optional[AvailabilityState] = None
+    availability: Optional[AvailabilityStateBase] = None
     cube_elements: List[CubeElementMetadata]
-    query: str
+    cube_node_metrics: List[str]
+    cube_node_dimensions: List[str]
+    query: Optional[str]
     columns: List[ColumnOutput]
     updated_at: UTCDatetime
     materializations: List[MaterializationConfigOutput]
+    tags: Optional[List[TagOutput]]
 
     class Config:  # pylint: disable=missing-class-docstring,too-few-public-methods
         allow_population_by_field_name = True
+        orm_mode = True
 
 
-class DimensionValue(BaseSQLModel):
+class DimensionValue(BaseModel):
     """
     Dimension value and count
     """
@@ -73,7 +88,7 @@ class DimensionValue(BaseSQLModel):
     count: Optional[int]
 
 
-class DimensionValues(BaseSQLModel):
+class DimensionValues(BaseModel):
     """
     Dimension values
     """

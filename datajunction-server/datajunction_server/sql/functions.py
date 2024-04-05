@@ -139,7 +139,9 @@ class Dispatch(metaclass=DispatchMeta):
 
         type_list = []
         for i, arg in enumerate(args):
-            type_list.append((i, type(arg.type) if hasattr(arg, "type") else type(arg)))
+            type_list.append(
+                (i, type(arg.type) if hasattr(arg, "type") else type(arg)),
+            )
 
         types = tuple(type_list)
 
@@ -2126,7 +2128,8 @@ def infer_type(
             message="The then result and else result must match in type! "
             f"Got {then.type} and {else_.type}",
         )
-
+    if then.type == ct.NullType():
+        return else_.type
     return then.type
 
 
@@ -3265,6 +3268,48 @@ def infer_type(
     return ct.StringType()
 
 
+class Percentile(Function):
+    """
+    percentile() - Computes the percentage ranking of a value in a group of values.
+    """
+
+    is_aggregation = True
+
+
+@Percentile.register
+def infer_type(
+    col: Union[ct.NumberType, ct.IntervalTypeBase],
+    percentage: ct.NumberType,
+) -> ct.FloatType:
+    return ct.FloatType()  # type: ignore
+
+
+@Percentile.register
+def infer_type(
+    col: Union[ct.NumberType, ct.IntervalTypeBase],
+    percentage: ct.NumberType,
+    freq: ct.IntegerType,
+) -> ct.FloatType:
+    return ct.FloatType()  # type: ignore
+
+
+@Percentile.register
+def infer_type(
+    col: Union[ct.NumberType, ct.IntervalTypeBase],
+    percentage: ct.ListType,
+) -> ct.ListType:
+    return ct.ListType(element_type=ct.FloatType())  # type: ignore
+
+
+@Percentile.register
+def infer_type(
+    col: Union[ct.NumberType, ct.IntervalTypeBase],
+    percentage: ct.ListType,
+    freq: ct.IntegerType,
+) -> ct.ListType:
+    return ct.ListType(element_type=ct.FloatType())  # type: ignore
+
+
 class PercentRank(Function):
     """
     percent_rank() - Computes the percentage ranking of a value in a group of values.
@@ -3304,6 +3349,72 @@ def infer_type(
     power: ct.ColumnType,
 ) -> ct.DoubleType:
     return ct.DoubleType()
+
+
+class Rand(Function):
+    """
+    rand() - Returns a random value with independent and identically distributed
+    (i.i.d.) uniformly distributed values in [0, 1).
+    """
+
+
+@Rand.register
+def infer_type() -> ct.FloatType:
+    return ct.FloatType()
+
+
+@Rand.register
+def infer_type(seed: ct.IntegerType) -> ct.FloatType:
+    return ct.FloatType()
+
+
+@Rand.register
+def infer_type(seed: ct.NullType) -> ct.FloatType:
+    return ct.FloatType()
+
+
+class Randn(Function):
+    """
+    randn() - Returns a random value with independent and identically
+    distributed (i.i.d.) values drawn from the standard normal distribution.
+    """
+
+
+@Randn.register
+def infer_type() -> ct.FloatType:
+    return ct.FloatType()
+
+
+@Randn.register
+def infer_type(seed: ct.IntegerType) -> ct.FloatType:
+    return ct.FloatType()
+
+
+@Randn.register
+def infer_type(seed: ct.NullType) -> ct.FloatType:
+    return ct.FloatType()
+
+
+class Random(Function):
+    """
+    random() - Returns a random value with independent and identically
+    distributed (i.i.d.) uniformly distributed values in [0, 1).
+    """
+
+
+@Random.register
+def infer_type() -> ct.FloatType:
+    return ct.FloatType()
+
+
+@Random.register
+def infer_type(seed: ct.IntegerType) -> ct.FloatType:
+    return ct.FloatType()
+
+
+@Random.register
+def infer_type(seed: ct.NullType) -> ct.FloatType:
+    return ct.FloatType()
 
 
 class Rank(Function):
@@ -3383,6 +3494,39 @@ def infer_type(  # type: ignore
     child: ct.NumberType,
 ) -> ct.NumberType:
     return ct.IntegerType()
+
+
+class Sequence(Function):
+    """
+    Generates an array of elements from start to stop (inclusive), incrementing by step.
+    """
+
+
+@Sequence.register
+def infer_type(  # type: ignore
+    start: ct.IntegerType,
+    end: ct.IntegerType,
+    step: Optional[ct.IntegerType] = None,
+) -> ct.ListType:
+    return ct.ListType(element_type=ct.IntegerType())
+
+
+@Sequence.register
+def infer_type(  # type: ignore
+    start: ct.TimestampType,
+    end: ct.TimestampType,
+    step: ct.IntervalTypeBase,
+) -> ct.ListType:
+    return ct.ListType(element_type=ct.TimestampType())
+
+
+@Sequence.register
+def infer_type(  # type: ignore
+    start: ct.DateType,
+    end: ct.DateType,
+    step: ct.IntervalTypeBase,
+) -> ct.ListType:
+    return ct.ListType(element_type=ct.DateType())
 
 
 class Size(Function):
@@ -3613,6 +3757,20 @@ def infer_type(
     fmt: Optional[ct.StringType] = None,
 ) -> ct.DateType:
     return ct.DateType()
+
+
+class ToTimestamp(Function):  # pragma: no cover # pylint: disable=abstract-method
+    """
+    Parses the timestamp_str expression with the fmt expression to a timestamp.
+    """
+
+
+@ToTimestamp.register  # type: ignore
+def infer_type(
+    expr: ct.StringType,
+    fmt: Optional[ct.StringType] = None,
+) -> ct.TimestampType:
+    return ct.TimestampType()
 
 
 class Transform(Function):

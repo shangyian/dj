@@ -25,14 +25,15 @@ from typing import (
     cast,
 )
 
-from sqlmodel import Session
+from sqlalchemy.orm import Session
 
 from datajunction_server.construction.utils import get_dj_node, to_namespaced_name
+from datajunction_server.database import DimensionLink
+from datajunction_server.database.node import NodeRevision
+from datajunction_server.database.node import NodeRevision as DJNode
 from datajunction_server.errors import DJError, DJErrorException, DJException, ErrorCode
 from datajunction_server.models.column import SemanticType
 from datajunction_server.models.node import BuildCriteria
-from datajunction_server.models.node import NodeRevision
-from datajunction_server.models.node import NodeRevision as DJNode
 from datajunction_server.models.node_type import NodeType as DJNodeType
 from datajunction_server.sql.functions import function_registry, table_function_registry
 from datajunction_server.sql.parsing.backends.exceptions import DJParseException
@@ -40,6 +41,7 @@ from datajunction_server.sql.parsing.types import (
     BigIntType,
     BooleanType,
     ColumnType,
+    DateTimeBase,
     DayTimeIntervalType,
     DecimalType,
     DoubleType,
@@ -584,14 +586,10 @@ class Expression(Node):
         """
         Determines whether an Expression is an aggregation or not
         """
-        return all(
-            [
-                child.is_aggregation()
-                for child in self.children
-                if isinstance(child, Expression)
-            ]
-            or [False],
-        )
+        for child in self.children:
+            if hasattr(child, "is_aggregation") and child.is_aggregation():
+                return True
+        return False
 
     def set_alias(self: TExpression, alias: "Name") -> Alias[TExpression]:
         return Alias(child=self).set_alias(alias)
@@ -726,6 +724,7 @@ class Column(Aliasable, Named, Expression):
     _type: Optional["ColumnType"] = field(repr=False, default=None)
     _expression: Optional[Expression] = field(repr=False, default=None)
     _is_compiled: bool = False
+    role: Optional[str] = None
 
     @property
     def type(self):
@@ -876,14 +875,19 @@ class Column(Aliasable, Named, Expression):
                 # it should be sourced from the immediate table
                 not namespace
                 or namespace == table.alias_or_name.identifier(False)
-            ) or (
-                # This column may be a struct, meaning it'll have an optional namespace,
-                # a column name, and a subscript
-                table.column_mapping.get(namespace)
-                or (table.column_mapping.get(column_name) and is_struct)
             ):
                 if table.add_ref_column(self, ctx):
                     found.append(table)
+
+        # This column may be a struct, meaning it'll have an optional namespace,
+        # a column name, and a subscript
+        if not found:
+            for table in direct_tables:
+                if table.column_mapping.get(namespace) or (
+                    table.column_mapping.get(column_name) and is_struct
+                ):
+                    if table.add_ref_column(self, ctx):
+                        found.append(table)
 
         if found:
             return found
@@ -914,10 +918,10 @@ class Column(Aliasable, Named, Expression):
 
         # If nothing was found in the initial AST, traverse through dimensions graph
         # to find another table in DJ that could be its origin
-        to_process = collections.deque(direct_tables)
+        to_process = collections.deque([(table, []) for table in direct_tables])
         processed = set()
         while to_process:
-            current_table = to_process.pop()
+            current_table, path = to_process.pop()
             if current_table in processed:
                 continue
             processed.add(current_table)
@@ -932,11 +936,14 @@ class Column(Aliasable, Named, Expression):
             # If the table has a DJ node, check to see if the DJ node has dimensions,
             # which would link us to new nodes to search for this column in
             if isinstance(current_table, Table) and current_table.dj_node:
+                if not isinstance(current_table.dj_node, NodeRevision):
+                    current_table.set_dj_node(current_table.dj_node.current)
                 for dj_col in current_table.dj_node.columns:
                     if dj_col.dimension:
                         new_table = Table(
                             name=to_namespaced_name(dj_col.dimension.name),
                             _dj_node=dj_col.dimension.current,
+                            path=path,
                         )
                         new_table._columns = [
                             Column(
@@ -946,7 +953,27 @@ class Column(Aliasable, Named, Expression):
                             )
                             for col in dj_col.dimension.current.columns
                         ]
-                        to_process.append(new_table)
+                        to_process.append((new_table, path))
+                for link in current_table.dj_node.dimension_links:
+                    all_roles = []
+                    if self.role:
+                        all_roles = self.role.split(" -> ")
+                    if (not link.role and not all_roles) or (link.role in all_roles):
+                        new_table = Table(
+                            name=to_namespaced_name(link.dimension.name),
+                            _dj_node=link.dimension.current,
+                            dimension_link=link,
+                            path=path + [link],
+                        )
+                        new_table._columns = [
+                            Column(
+                                name=Name(col.name),
+                                _type=col.type,
+                                _table=new_table,
+                            )
+                            for col in link.dimension.current.columns
+                        ]
+                        to_process.append((new_table, path + [link]))
         return found
 
     def compile(self, ctx: CompileContext):
@@ -1009,7 +1036,15 @@ class Column(Aliasable, Named, Expression):
             )
             ret = f"{self.name.quote_style}{name}{self.name.quote_style}"
             if table_name := self.table.alias_or_name:
-                ret = table_name.identifier() + "." + ret
+                ret = (
+                    (
+                        table_name
+                        if isinstance(table_name, str)
+                        else table_name.identifier()
+                    )
+                    + "."
+                    + ret
+                )
         else:
             ret = str(self.name)
         if self.parenthesized:
@@ -1181,7 +1216,11 @@ class TableExpression(Aliasable, Expression):
                 # For struct types we can additionally check if there's a column that matches
                 # the search column's namespace and if there's a nested field that matches the
                 # search column's name
-                if isinstance(col.type, StructType):
+                if (
+                    hasattr(col, "_type")
+                    and col._type
+                    and isinstance(col.type, StructType)
+                ) or (not hasattr(col, "_type") and isinstance(col.type, StructType)):
                     # struct column name
                     column_namespace = ".".join(
                         [name.name for name in column.namespace],
@@ -1231,6 +1270,8 @@ class Table(TableExpression, Named):
     """
 
     _dj_node: Optional[DJNode] = field(repr=False, default=None)
+    dimension_link: Optional[DimensionLink] = field(repr=False, default=None)
+    path: Optional[List["Table"]] = field(repr=False, default=None)
 
     @property
     def dj_node(self) -> Optional[DJNode]:
@@ -1259,7 +1300,8 @@ class Table(TableExpression, Named):
     def set_alias(self: TNode, alias: "Name") -> TNode:
         self.alias = alias
         for col in self._columns:
-            col.table.alias = self.alias
+            if col.table:
+                col.table.alias = self.alias
         return self
 
     def compile(self, ctx: CompileContext):
@@ -1623,7 +1665,9 @@ class Function(Named, Operation):
         return function_registry[self.name.name.upper()]
 
     def is_aggregation(self) -> bool:
-        return self.function().is_aggregation
+        if self.function().is_aggregation:
+            return True
+        return super().is_aggregation()
 
     def is_runtime(self) -> bool:
         return self.function().is_runtime
@@ -1656,7 +1700,7 @@ class Value(Expression):
     """
 
     def is_aggregation(self) -> bool:
-        return True
+        return False
 
 
 @dataclass(eq=False)
@@ -1798,19 +1842,29 @@ class Interval(Value):
         units = ["YEAR", "MONTH", "DAY", "HOUR", "MINUTE", "SECOND"]
         years_months_units = {"YEAR", "MONTH"}
         days_seconds_units = {"DAY", "HOUR", "MINUTE", "SECOND"}
-
+        from_ = [DateTimeBase.Unit(f.unit) for f in self.from_]
         if all(unit.unit in years_months_units for unit in self.from_):
-            if self.to.unit is None or self.to.unit in years_months_units:
-                # If all the units in the from_ list are YEAR or MONTH, the interval is a YearMonthInterval
+            if (
+                self.to is None
+                or self.to.unit is None
+                or self.to.unit in years_months_units
+            ):
+                # If all the units in the from_ list are YEAR or MONTH, the interval
+                # is a YearMonthInterval
                 return YearMonthIntervalType(
-                    sorted(self.from_, key=lambda u: units.index(u))[0],
+                    sorted(from_, key=lambda u: units.index(u))[0],
                     self.to,
                 )
         elif all(unit.unit in days_seconds_units for unit in self.from_):
-            if self.to.unit is None or self.to.unit in days_seconds_units:
-                # If the to_ attribute is None or its unit is DAY, HOUR, MINUTE, or SECOND, the interval is a DayTimeInterval
+            if (
+                self.to is None
+                or self.to.unit is None
+                or self.to.unit in days_seconds_units
+            ):
+                # If the to_ attribute is None or its unit is DAY, HOUR, MINUTE, or
+                # SECOND, the interval is a DayTimeInterval
                 return DayTimeIntervalType(
-                    sorted(self.from_, key=lambda u: units.index(u))[0],
+                    sorted(from_, key=lambda u: units.index(u))[0],
                     self.to,
                 )
         raise DJParseException(f"Invalid interval type specified in {self}.")
@@ -2118,16 +2172,16 @@ class Join(Node):
     def __str__(self) -> str:
         parts = []
         if self.natural:
-            parts.append("NATURAL ")
+            parts.append("NATURAL")
         if self.join_type:
-            parts.append(f"{self.join_type} ")
-        parts.append("JOIN ")
+            parts.append(f"{str(self.join_type).upper().strip()}")
+        parts.append("JOIN")
         if self.lateral:
-            parts.append("LATERAL ")
+            parts.append("LATERAL")
         parts.append(str(self.right))
         if self.criteria:
-            parts.append(f" {self.criteria}")
-        return "".join(parts)
+            parts.append(f"{self.criteria}")
+        return " ".join(parts)
 
 
 @dataclass(eq=False)
@@ -2484,7 +2538,7 @@ class Query(TableExpression, UnNamed):
         parts = [f"{with_}{self.select}\n"]
         query = "".join(parts)
         if self.parenthesized:
-            query = f"({query})"
+            query = f"({query.strip()})"
         if self.alias:
             as_ = " AS " if self.as_ else " "
             if is_cte:
@@ -2496,7 +2550,7 @@ class Query(TableExpression, UnNamed):
     def set_alias(self: TNode, alias: "Name") -> TNode:
         self.alias = alias
         for col in self._columns:
-            if isinstance(col, Column):
+            if isinstance(col, Column) and col.table is not None:
                 col.table.alias = self.alias
         return self
 

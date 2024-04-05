@@ -13,11 +13,12 @@ field_type=IntegerType(), is_optional=True, doc='an optional field'))
 """
 
 import re
-from enum import Enum
 from typing import TYPE_CHECKING, Any, ClassVar, Dict, Generator, Optional, Tuple, cast
 
 from pydantic import BaseModel, Extra
 from pydantic.class_validators import AnyCallable
+
+from datajunction_server.enum import StrEnum
 
 if TYPE_CHECKING:
     from datajunction_server.sql.parsing import ast
@@ -657,7 +658,7 @@ class DateTimeBase(PrimitiveType, Singleton):
     """
 
     # pylint: disable=invalid-name
-    class Unit(str, Enum):
+    class Unit(StrEnum):
         """
         Units used for date and time functions and intervals
         """
@@ -752,9 +753,9 @@ class DayTimeIntervalType(IntervalTypeBase):
         from_: DateTimeBase.Unit = DateTimeBase.Unit.day,
         to_: Optional[DateTimeBase.Unit] = DateTimeBase.Unit.second,
     ):
-        key = (from_.upper(), to_.upper())  # type: ignore
-        cls._instances[key] = cls._instances.get(key) or object.__new__(cls)
-        return cls._instances[key]
+        key = (from_.upper(), to_.upper() if to_ else None)
+        cls._instances[key] = cls._instances.get(key) or object.__new__(cls)  # type: ignore
+        return cls._instances[key]  # type: ignore
 
     def __init__(
         self,
@@ -763,7 +764,7 @@ class DayTimeIntervalType(IntervalTypeBase):
     ):
         if not self._initialized:
             from_ = from_.upper()  # type: ignore
-            to_ = to_.upper()  # type: ignore
+            to_ = to_.upper() if to_ else None  # type: ignore
             to_str = f" TO {to_}" if to_ else ""
             to_repr = f', to="{to_}"' if to_ else ""
             super().__init__(
@@ -799,9 +800,9 @@ class YearMonthIntervalType(IntervalTypeBase):
         from_: DateTimeBase.Unit = DateTimeBase.Unit.year,
         to_: Optional[DateTimeBase.Unit] = DateTimeBase.Unit.month,
     ):
-        key = (from_.upper(), to_.upper())  # type: ignore
-        cls._instances[key] = cls._instances.get(key) or object.__new__(cls)
-        return cls._instances[key]
+        key = (from_.upper(), to_.upper() if to_ else None)
+        cls._instances[key] = cls._instances.get(key) or object.__new__(cls)  # type: ignore
+        return cls._instances[key]  # type: ignore
 
     def __init__(
         self,
@@ -810,7 +811,7 @@ class YearMonthIntervalType(IntervalTypeBase):
     ):
         if not self._initialized:
             from_ = from_.upper()  # type: ignore
-            to_ = to_.upper()  # type: ignore
+            to_ = to_.upper() if to_ else None  # type: ignore
             to_str = f" TO {to_}" if to_ else ""
             to_repr = f', to="{to_}"' if to_ else ""
             super().__init__(
@@ -919,6 +920,7 @@ PRIMITIVE_TYPES: Dict[str, PrimitiveType] = {
     "boolean": BooleanType(),
     "varchar": VarcharType(),
     "int": IntegerType(),
+    "integer": IntegerType(),
     "tinyint": TinyIntType(),
     "smallint": SmallIntType(),
     "bigint": BigIntType(),
@@ -935,4 +937,5 @@ PRIMITIVE_TYPES: Dict[str, PrimitiveType] = {
     "binary": BinaryType(),
     "none": NullType(),
     "null": NullType(),
+    "wildcard": WildcardType(),
 }

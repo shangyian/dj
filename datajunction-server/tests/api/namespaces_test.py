@@ -12,7 +12,7 @@ def test_list_all_namespaces(client_with_examples: TestClient) -> None:
     Test ``GET /namespaces/``.
     """
     response = client_with_examples.get("/namespaces/")
-    assert response.ok
+    assert response.status_code in (200, 201)
     assert response.json() == [
         {"namespace": "basic", "num_nodes": 8},
         {"namespace": "basic.dimension", "num_nodes": 2},
@@ -51,7 +51,7 @@ def test_list_all_namespaces_access_limited(client_with_examples: TestClient) ->
 
     response = client_with_examples.get("/namespaces/")
 
-    assert response.ok
+    assert response.status_code in (200, 201)
     assert response.json() == [
         {"namespace": "dbt.dimension", "num_nodes": 1},
         {"namespace": "dbt.source", "num_nodes": 0},
@@ -112,7 +112,7 @@ def test_list_all_namespaces_deny_all(client_with_examples: TestClient) -> None:
 
     response = client_with_examples.get("/namespaces/")
 
-    assert response.ok
+    assert response.status_code in (200, 201)
     assert response.json() == []
 
 
@@ -121,14 +121,14 @@ def test_list_nodes_by_namespace(client_with_basic: TestClient) -> None:
     Test ``GET /namespaces/{namespace}/``.
     """
     response = client_with_basic.get("/namespaces/basic.source/")
-    assert response.ok
+    assert response.status_code in (200, 201)
     assert {n["name"] for n in response.json()} == {
         "basic.source.users",
         "basic.source.comments",
     }
 
     response = client_with_basic.get("/namespaces/basic/")
-    assert response.ok
+    assert response.status_code in (200, 201)
     assert {n["name"] for n in response.json()} == {
         "basic.source.users",
         "basic.dimension.users",
@@ -140,14 +140,14 @@ def test_list_nodes_by_namespace(client_with_basic: TestClient) -> None:
     }
 
     response = client_with_basic.get("/namespaces/basic/?type_=dimension")
-    assert response.ok
+    assert response.status_code in (200, 201)
     assert {n["name"] for n in response.json()} == {
         "basic.dimension.users",
         "basic.dimension.countries",
     }
 
     response = client_with_basic.get("/namespaces/basic/?type_=source")
-    assert response.ok
+    assert response.status_code in (200, 201)
     assert {n["name"] for n in response.json()} == {
         "basic.source.comments",
         "basic.source.users",
@@ -182,7 +182,7 @@ def test_deactivate_namespaces(client_with_namespaced_roads: TestClient) -> None
 
     # Check that the namespace is no longer listed
     response = client_with_namespaced_roads.get("/namespaces/")
-    assert response.ok
+    assert response.status_code in (200, 201)
     assert "foo.bar" not in {n["namespace"] for n in response.json()}
 
     response = client_with_namespaced_roads.delete("/namespaces/foo.bar/?cascade=false")
@@ -196,12 +196,12 @@ def test_deactivate_namespaces(client_with_namespaced_roads: TestClient) -> None
 
     # Check that the namespace is back
     response = client_with_namespaced_roads.get("/namespaces/")
-    assert response.ok
+    assert response.status_code in (200, 201)
     assert "foo.bar" in {n["namespace"] for n in response.json()}
 
     # Check that nodes in the namespace remain deactivated
     response = client_with_namespaced_roads.get("/namespaces/foo.bar/")
-    assert response.ok
+    assert response.status_code in (200, 201)
     assert response.json() == []
 
     # Restore with cascade=true should also restore all the nodes
@@ -232,7 +232,7 @@ def test_deactivate_namespaces(client_with_namespaced_roads: TestClient) -> None
 
     # Check that nodes in the namespace are restored
     response = client_with_namespaced_roads.get("/namespaces/foo.bar/")
-    assert response.ok
+    assert response.status_code in (200, 201)
     assert {n["name"] for n in response.json()} == {
         "foo.bar.repair_orders",
         "foo.bar.repair_order_details",
@@ -332,7 +332,7 @@ def test_hard_delete_namespace(client_with_examples: TestClient):
         "'foo.bar.avg_repair_order_discounts', 'foo.bar.avg_repair_price', "
         "'foo.bar.avg_time_to_dispatch', 'foo.bar.contractor', 'foo.bar.contractors', "
         "'foo.bar.dispatcher', 'foo.bar.dispatchers', 'foo.bar.hard_hat', "
-        "'foo.bar.hard_hat_state', 'foo.bar.hard_hats', 'foo.bar.local_hard_hats', "
+        "'foo.bar.hard_hats', 'foo.bar.hard_hat_state', 'foo.bar.local_hard_hats', "
         "'foo.bar.municipality', 'foo.bar.municipality_dim', "
         "'foo.bar.municipality_municipality_type', 'foo.bar.municipality_type', "
         "'foo.bar.num_repair_orders', 'foo.bar.repair_order', "
@@ -348,6 +348,10 @@ def test_hard_delete_namespace(client_with_examples: TestClient):
     client_with_examples.post("/namespaces/foo.bar.baz/")
     client_with_examples.post("/namespaces/foo.bar.baf/")
     client_with_examples.post("/namespaces/foo.bar.bif.d/")
+
+    # Deactivating a few nodes should still allow the hard delete to go through
+    client_with_examples.delete("/nodes/foo.bar.avg_length_of_employment")
+    client_with_examples.delete("/nodes/foo.bar.avg_repair_order_discounts")
 
     hard_delete_response = client_with_examples.delete(
         "/namespaces/foo.bar/hard/?cascade=true",
@@ -588,13 +592,24 @@ def test_create_namespace(client_with_service_setup: TestClient):
     }
 
     # Verify that it raises when creating an invalid namespace
-    invalid_namespaces = ["a.111b.c", "111mm.abcd", "aa.bb.111", "1234", "aa..bb"]
+    invalid_namespaces = [
+        "a.111b.c",
+        "111mm.abcd",
+        "aa.bb.111",
+        "1234",
+        "aa..bb",
+        "user.abc",
+        "[aff].mmm",
+        "aff._mmm",
+        "aff.mmm+",
+        "aff.123_mmm",
+    ]
     for invalid_namespace in invalid_namespaces:
         response = client_with_service_setup.post(f"/namespaces/{invalid_namespace}")
         assert response.status_code == 422
         assert response.json()["message"] == (
             f"{invalid_namespace} is not a valid namespace. Namespace parts cannot start "
-            "with numbers or be empty."
+            "with numbers, be empty, or use the reserved keyword [user]"
         )
 
 
@@ -607,18 +622,28 @@ def test_export_namespaces(client_with_examples: TestClient):
         "/nodes/cube/",
         json={
             "name": "default.example_cube",
+            "display_name": "Example Cube",
             "description": "An example cube so that the export path is tested",
             "metrics": ["default.num_repair_orders"],
             "dimensions": ["default.hard_hat.city"],
             "mode": "published",
         },
     )
-    assert response.ok
+    assert response.status_code in (200, 201)
     response = client_with_examples.get(
         "/namespaces/default/export/",
     )
     project_definition = response.json()
-    assert {d["filename"] for d in project_definition} == {
+    node_defs = {d["filename"]: d for d in project_definition}
+    assert node_defs["example_cube.cube.yaml"] == {
+        "description": "An example cube so that the export path is tested",
+        "dimensions": ["default.hard_hat.city"],
+        "directory": "",
+        "display_name": "Example Cube",
+        "filename": "example_cube.cube.yaml",
+        "metrics": ["default.num_repair_orders"],
+    }
+    assert set(node_defs.keys()) == {
         "repair_orders.source.yaml",
         "repair_order_details.source.yaml",
         "repair_type.source.yaml",

@@ -4,22 +4,22 @@ Models for metrics.
 from typing import List, Optional
 
 from pydantic.class_validators import root_validator
-from sqlmodel import SQLModel
+from pydantic.main import BaseModel
 
+from datajunction_server.database.node import Node
 from datajunction_server.models.engine import Dialect
 from datajunction_server.models.node import (
     DimensionAttributeOutput,
     MetricMetadataOutput,
-    Node,
 )
 from datajunction_server.models.query import ColumnMetadata
-from datajunction_server.sql.dag import get_dimensions
+from datajunction_server.sql.parsing.backends.antlr4 import parse
 from datajunction_server.transpilation import get_transpilation_plugin
 from datajunction_server.typing import UTCDatetime
 from datajunction_server.utils import get_settings
 
 
-class Metric(SQLModel):
+class Metric(BaseModel):
     """
     Class for a metric.
     """
@@ -34,27 +34,37 @@ class Metric(SQLModel):
     updated_at: UTCDatetime
 
     query: str
+    upstream_node: str
+    expression: str
 
     dimensions: List[DimensionAttributeOutput]
     metric_metadata: Optional[MetricMetadataOutput] = None
+    required_dimensions: List[str]
 
     @classmethod
-    def parse_node(cls, node: Node) -> "Metric":
+    def parse_node(cls, node: Node, dims: List[DimensionAttributeOutput]) -> "Metric":
         """
         Parses a node into a metric.
         """
-
+        query_ast = parse(node.current.query)
         return cls(
-            **node.dict(),
+            id=node.id,
+            name=node.name,
+            display_name=node.current.display_name,
+            current_version=node.current_version,
             description=node.current.description,
+            created_at=node.created_at,
             updated_at=node.current.updated_at,
             query=node.current.query,
-            dimensions=get_dimensions(node),
+            upstream_node=node.current.parents[0].name,
+            expression=str(query_ast.select.projection[0]),
+            dimensions=dims,
             metric_metadata=node.current.metric_metadata,
+            required_dimensions=[dim.name for dim in node.current.required_dimensions],
         )
 
 
-class TranslatedSQL(SQLModel):
+class TranslatedSQL(BaseModel):
     """
     Class for SQL generated from a given metric.
     """

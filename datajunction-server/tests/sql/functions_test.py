@@ -4,7 +4,7 @@ Tests for ``datajunction_server.sql.functions``.
 """
 
 import pytest
-from sqlmodel import Session
+from sqlalchemy.orm import Session
 
 import datajunction_server.sql.functions as F
 import datajunction_server.sql.parsing.types as ct
@@ -1667,6 +1667,20 @@ def test_hypot_func(session: Session):
     assert query.select.projection[1].type == ct.FloatType()  # type: ignore
 
 
+def test_if(session: Session):
+    """
+    Test the `if` functions
+    """
+    query = parse(
+        "SELECT if(col1 = 'x', NULL, 1) FROM (SELECT ('aee'), ('bee') AS col1)",
+    )
+    exc = DJException()
+    ctx = ast.CompileContext(session=session, exception=exc)
+    query.compile(ctx)
+    assert not exc.errors
+    assert query.select.projection[0].type == ct.IntegerType()  # type: ignore
+
+
 def test_ilike_like_func(session: Session):
     """
     Test the `ilike`, `like` functions
@@ -2610,6 +2624,83 @@ def test_overlay_func(session: Session):
     assert query.select.projection[0].type == ct.StringType()  # type: ignore
 
 
+def test_percentile(session: Session):
+    """
+    Test the `percentile` function
+    """
+    query = parse("SELECT percentile(col, 0.3) FROM (SELECT (0), (10) AS col)")
+    exc = DJException()
+    ctx = ast.CompileContext(session=session, exception=exc)
+    query.compile(ctx)
+    assert not exc.errors
+    assert query.select.projection[0].type == ct.FloatType()  # type: ignore
+
+    query = parse(
+        "SELECT percentile(col, array(0.25, 0.75)) FROM (SELECT (0), (10) AS col)",
+    )
+    exc = DJException()
+    ctx = ast.CompileContext(session=session, exception=exc)
+    query.compile(ctx)
+    assert not exc.errors
+    assert query.select.projection[0].type == ct.ListType(element_type=ct.FloatType())  # type: ignore
+
+    query = parse(
+        "SELECT percentile(col, 0.5) FROM ("
+        "SELECT (INTERVAL '0' MONTH), (INTERVAL '10' MONTH) AS col)",
+    )
+    exc = DJException()
+    ctx = ast.CompileContext(session=session, exception=exc)
+    query.compile(ctx)
+    assert not exc.errors
+    assert query.select.projection[0].type == ct.FloatType()  # type: ignore
+
+    query = parse(
+        "SELECT percentile(col, 0.5, 3) FROM ("
+        "SELECT (INTERVAL '0' MONTH), (INTERVAL '10' MONTH) AS col)",
+    )
+    exc = DJException()
+    ctx = ast.CompileContext(session=session, exception=exc)
+    query.compile(ctx)
+    assert not exc.errors
+    assert query.select.projection[0].type == ct.FloatType()  # type: ignore
+
+    query = parse(
+        "SELECT percentile(col, array(0.2, 0.5)) "
+        "FROM (SELECT (INTERVAL '0' MONTH), (INTERVAL '10' MONTH) AS col)",
+    )
+    exc = DJException()
+    ctx = ast.CompileContext(session=session, exception=exc)
+    query.compile(ctx)
+    assert not exc.errors
+    assert query.select.projection[0].type == ct.ListType(ct.FloatType())  # type: ignore
+
+    query = parse(
+        "SELECT percentile(col, array(0.2, 0.5), 2) "
+        "FROM (SELECT (INTERVAL '0' MONTH), (INTERVAL '10' MONTH) AS col)",
+    )
+    exc = DJException()
+    ctx = ast.CompileContext(session=session, exception=exc)
+    query.compile(ctx)
+    assert not exc.errors
+    assert query.select.projection[0].type == ct.ListType(ct.FloatType())  # type: ignore
+
+
+def test_random(session: Session):
+    """
+    Test `random`, `rand` and `randn`
+    """
+    query = parse(
+        "SELECT random(), random(0), random(null), rand(), rand(0), "
+        "rand(null), randn(), randn(0), randn(null)",
+    )
+    exc = DJException()
+    ctx = ast.CompileContext(session=session, exception=exc)
+    query.compile(ctx)
+    assert not exc.errors
+    for column in query.select.projection:
+        assert column.type == ct.FloatType()  # type: ignore
+
+
 def test_rank(session: Session):
     """
     Test `rank`
@@ -2673,6 +2764,44 @@ def test_round(session: Session):
     query.compile(ctx)
     assert not exc.errors
     assert query.select.projection[0].type == ct.IntegerType()  # type: ignore
+
+
+def test_sequence(session: Session):
+    """
+    Test `sequence`
+    """
+    query = parse("SELECT sequence(1, 10)")
+    exc = DJException()
+    ctx = ast.CompileContext(session=session, exception=exc)
+    query.compile(ctx)
+    assert not exc.errors
+    assert query.select.projection[0].type == ct.ListType(element_type=ct.IntegerType())  # type: ignore
+
+    query = parse("SELECT sequence(1, 10, 2)")
+    exc = DJException()
+    ctx = ast.CompileContext(session=session, exception=exc)
+    query.compile(ctx)
+    assert not exc.errors
+    assert query.select.projection[0].type == ct.ListType(element_type=ct.IntegerType())  # type: ignore
+
+    query = parse(
+        "SELECT sequence(to_date('2018-01-01'), to_date('2018-03-01'), interval 1 month)",
+    )
+    exc = DJException()
+    ctx = ast.CompileContext(session=session, exception=exc)
+    query.compile(ctx)
+    assert not exc.errors
+    assert query.select.projection[0].type == ct.ListType(element_type=ct.DateType())  # type: ignore
+
+    query = parse(
+        "SELECT sequence(to_timestamp('2018-01-01 00:00:00'), "
+        "to_timestamp('2018-01-01 12:00:00'), interval 1 hour)",
+    )
+    exc = DJException()
+    ctx = ast.CompileContext(session=session, exception=exc)
+    query.compile(ctx)
+    assert not exc.errors
+    assert query.select.projection[0].type == ct.ListType(element_type=ct.TimestampType())  # type: ignore
 
 
 def test_size(session: Session):

@@ -49,9 +49,10 @@ describe('AddEditNodePage submission failed', () => {
         'Some Test Metric',
         '',
         'SELECT * FROM test',
-        'draft',
+        'published',
         'default',
         null,
+        undefined,
         undefined,
         undefined,
       );
@@ -93,16 +94,14 @@ describe('AddEditNodePage submission failed', () => {
       expect(mockDjClient.DataJunctionAPI.tagsNode).toBeCalled();
       expect(mockDjClient.DataJunctionAPI.tagsNode).toBeCalledWith(
         'default.num_repair_orders',
-        [{ display_name: 'Purpose', name: 'purpose' }],
+        ['purpose'],
       );
       expect(mockDjClient.DataJunctionAPI.tagsNode).toReturnWith({
         json: { message: 'Some tags were not found' },
         status: 404,
       });
 
-      expect(
-        await screen.getByText('Update failed, Some tags were not found'),
-      ).toBeInTheDocument();
+      expect(await screen.getByText('Update failed')).toBeInTheDocument();
     });
   }, 60000);
 });

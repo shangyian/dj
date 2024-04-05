@@ -2,13 +2,14 @@
 Errors and warnings.
 """
 
-from enum import Enum
 from typing import Any, Dict, List, Literal, Optional, TypedDict
 
 from sqlmodel import SQLModel
 
+from djqs.enum import IntEnum
 
-class ErrorCode(int, Enum):
+
+class ErrorCode(IntEnum):
     """
     Error codes.
     """
@@ -210,4 +211,10 @@ class DJInternalErrorException(DJException):
 class DJInvalidTableRef(DJException):
     """
     Raised for invalid table values
+    """
+
+
+class DJTableNotFound(DJException):
+    """
+    Raised for tables that cannot be found
     """

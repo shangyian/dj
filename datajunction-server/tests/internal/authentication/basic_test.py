@@ -3,7 +3,7 @@ Tests for basic auth helper functions
 """
 import pytest
 from fastapi.testclient import TestClient
-from sqlmodel import Session
+from sqlalchemy.orm import Session
 
 from datajunction_server.constants import AUTH_COOKIE
 from datajunction_server.errors import DJException
@@ -19,7 +19,7 @@ def test_login_with_username_and_password(client: TestClient):
         data={"email": "dj@datajunction.io", "username": "dj", "password": "dj"},
     )
     response = client.post("/basic/login/", data={"username": "dj", "password": "dj"})
-    assert response.ok
+    assert response.status_code in (200, 201)
     assert response.cookies.get(AUTH_COOKIE)
 
 
@@ -127,7 +127,7 @@ def test_whoami(client: TestClient):
     Test the /whoami/ endpoint
     """
     response = client.get("/whoami/")
-    assert response.ok
+    assert response.status_code in (200, 201)
     assert response.json() == {
         "id": 1,
         "username": "dj",

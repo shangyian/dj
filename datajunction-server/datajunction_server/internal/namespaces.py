@@ -2,26 +2,35 @@
 Helper methods for namespaces endpoints.
 """
 import os
+import re
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
-from sqlalchemy import or_
+from sqlalchemy import or_, select
+from sqlalchemy.orm import Session
 from sqlalchemy.sql.operators import is_
-from sqlmodel import Session, col, select
 
 from datajunction_server.api.helpers import get_node_namespace, hard_delete_node
+from datajunction_server.database.history import ActivityType, EntityType, History
+from datajunction_server.database.namespace import NodeNamespace
+from datajunction_server.database.node import Node, NodeRevision
+from datajunction_server.database.user import User
 from datajunction_server.errors import (
     DJActionNotAllowedException,
     DJException,
     DJInvalidInputException,
 )
-from datajunction_server.models import History, User
-from datajunction_server.models.cube import CubeRevisionMetadata
-from datajunction_server.models.history import ActivityType, EntityType
-from datajunction_server.models.node import Node, NodeNamespace, NodeRevision
+from datajunction_server.internal.nodes import get_cube_revision_metadata
+from datajunction_server.models.node import NodeMinimumDetail
 from datajunction_server.models.node_type import NodeType
 from datajunction_server.typing import UTCDatetime
 from datajunction_server.utils import SEPARATOR
+
+# A list of namespace names that cannot be used because they are
+# part of a list of reserved SQL keywords
+RESERVED_NAMESPACE_NAMES = [
+    "user",
+]
 
 
 def get_nodes_in_namespace(
@@ -29,34 +38,50 @@ def get_nodes_in_namespace(
     namespace: str,
     node_type: NodeType = None,
     include_deactivated: bool = False,
-) -> List[Dict]:
+) -> List[NodeMinimumDetail]:
     """
     Gets a list of node names in the namespace
     """
     get_node_namespace(session, namespace)
-    list_nodes_query = select(
-        Node.name,
-        NodeRevision.display_name,
-        NodeRevision.description,
-        Node.type,
-        Node.current_version.label(  # type: ignore # pylint: disable=no-member
-            "version",
-        ),
-        NodeRevision.status,
-        NodeRevision.mode,
-        NodeRevision.updated_at,
-    ).where(
-        or_(
-            col(Node.namespace).like(f"{namespace}.%"),  # pylint: disable=no-member
-            Node.namespace == namespace,
-        ),
-        Node.current_version == NodeRevision.version,
-        Node.name == NodeRevision.name,
-        Node.type == node_type if node_type else True,
+    list_nodes_query = (
+        select(
+            Node.name,
+            NodeRevision.display_name,
+            NodeRevision.description,
+            Node.type,
+            Node.current_version.label(  # type: ignore # pylint: disable=no-member
+                "version",
+            ),
+            NodeRevision.status,
+            NodeRevision.mode,
+            NodeRevision.updated_at,
+        )
+        .where(
+            or_(
+                Node.namespace.like(f"{namespace}.%"),  # pylint: disable=no-member
+                Node.namespace == namespace,
+            ),
+            Node.current_version == NodeRevision.version,
+            Node.name == NodeRevision.name,
+            Node.type == node_type if node_type else True,
+        )
+        .order_by(Node.id)
     )
     if include_deactivated is False:
         list_nodes_query = list_nodes_query.where(is_(Node.deactivated_at, None))
-    return session.exec(list_nodes_query).all()
+    return [
+        NodeMinimumDetail(
+            name=row.name,
+            display_name=row.display_name,
+            description=row.description,
+            version=row.version,
+            type=row.type,
+            status=row.status,
+            mode=row.mode,
+            updated_at=row.updated_at,
+        )
+        for row in session.execute(list_nodes_query).all()
+    ]
 
 
 def get_nodes_in_namespace_detailed(
@@ -70,14 +95,14 @@ def get_nodes_in_namespace_detailed(
     get_node_namespace(session, namespace)
     list_nodes_query = select(Node).where(
         or_(
-            col(Node.namespace).like(f"{namespace}.%"),  # pylint: disable=no-member
+            Node.namespace.like(f"{namespace}.%"),  # pylint: disable=no-member
             Node.namespace == namespace,
         ),
         Node.current_version == NodeRevision.version,
         Node.name == NodeRevision.name,
         Node.type == node_type if node_type else True,
     )
-    return session.exec(list_nodes_query).all()
+    return session.execute(list_nodes_query).scalars().all()
 
 
 def list_namespaces_in_hierarchy(  # pylint: disable=too-many-arguments
@@ -89,13 +114,13 @@ def list_namespaces_in_hierarchy(  # pylint: disable=too-many-arguments
     """
     statement = select(NodeNamespace).where(
         or_(
-            col(NodeNamespace.namespace).like(  # pylint: disable=no-member
+            NodeNamespace.namespace.like(  # pylint: disable=no-member
                 f"{namespace}.%",
             ),
             NodeNamespace.namespace == namespace,
         ),
     )
-    namespaces = session.exec(statement).all()
+    namespaces = session.execute(statement).scalars().all()
     if len(namespaces) == 0:
         raise DJException(
             message=(f"Namespace `{namespace}` does not exist."),
@@ -164,10 +189,14 @@ def validate_namespace(namespace: str):
     """
     parts = namespace.split(SEPARATOR)
     for part in parts:
-        if not part or (part and part[0].isdigit()):
+        if (
+            not part
+            or not re.match("^[a-zA-Z][a-zA-Z0-9_]*$", part)
+            or part in RESERVED_NAMESPACE_NAMES
+        ):
             raise DJInvalidInputException(
-                f"{namespace} is not a valid namespace. Namespace parts cannot start with "
-                "numbers or be empty.",
+                f"{namespace} is not a valid namespace. Namespace parts cannot start with numbers"
+                f", be empty, or use the reserved keyword [{', '.join(RESERVED_NAMESPACE_NAMES)}]",
             )
 
 
@@ -223,14 +252,20 @@ def hard_delete_namespace(
     """
     Hard delete a node namespace.
     """
-    node_names = session.exec(
-        select(Node.name).where(
-            or_(
-                col(Node.namespace).like(f"{namespace}.%"),  # pylint: disable=no-member
-                Node.namespace == namespace,
-            ),
-        ),
-    ).all()
+    node_names = (
+        session.execute(
+            select(Node.name)
+            .where(
+                or_(
+                    Node.namespace.like(f"{namespace}.%"),  # pylint: disable=no-member
+                    Node.namespace == namespace,
+                ),
+            )
+            .order_by(Node.name),
+        )
+        .scalars()
+        .all()
+    )
 
     if not cascade and node_names:
         raise DJActionNotAllowedException(
@@ -257,6 +292,7 @@ def hard_delete_namespace(
             "status": "deleted",
         }
         session.delete(_namespace)
+    session.commit()
     return impacts
 
 
@@ -286,6 +322,7 @@ def _source_project_config(node: Node, namespace_requested: str) -> Dict:
     return {
         "filename": filename,
         "directory": directory,
+        "display_name": node.current.display_name,
         "description": node.current.description,
         "table": f"{node.current.catalog}.{node.current.schema_}.{node.current.table}",
         "columns": [
@@ -312,6 +349,7 @@ def _transform_project_config(node: Node, namespace_requested: str) -> Dict:
     return {
         "filename": filename,
         "directory": directory,
+        "display_name": node.current.display_name,
         "description": node.current.description,
         "query": node.current.query,
         "dimension_links": {
@@ -334,6 +372,7 @@ def _dimension_project_config(node: Node, namespace_requested: str) -> Dict:
     return {
         "filename": filename,
         "directory": directory,
+        "display_name": node.current.display_name,
         "description": node.current.description,
         "query": node.current.query,
         "primary_key": [pk.name for pk in node.current.primary_key()],
@@ -357,12 +396,17 @@ def _metric_project_config(node: Node, namespace_requested: str) -> Dict:
     return {
         "filename": filename,
         "directory": directory,
+        "display_name": node.current.display_name,
         "description": node.current.description,
         "query": node.current.query,
     }
 
 
-def _cube_project_config(node: Node, namespace_requested: str) -> Dict:
+def _cube_project_config(
+    session: Session,
+    node: Node,
+    namespace_requested: str,
+) -> Dict:
     """
     Returns a project config definition for a cube node
     """
@@ -371,7 +415,7 @@ def _cube_project_config(node: Node, namespace_requested: str) -> Dict:
         node_type=NodeType.CUBE,
         namespace_requested=namespace_requested,
     )
-    cube_revision = CubeRevisionMetadata.from_orm(node.current)
+    cube_revision = get_cube_revision_metadata(session, node.name)
     metrics = []
     dimensions = []
     for element in cube_revision.cube_elements:
@@ -382,13 +426,18 @@ def _cube_project_config(node: Node, namespace_requested: str) -> Dict:
     return {
         "filename": filename,
         "directory": directory,
+        "display_name": cube_revision.display_name,
         "description": cube_revision.description,
         "metrics": metrics,
         "dimensions": dimensions,
     }
 
 
-def get_project_config(nodes: List[Node], namespace_requested: str) -> List[Dict]:
+def get_project_config(
+    session: Session,
+    nodes: List[Node],
+    namespace_requested: str,
+) -> List[Dict]:
     """
     Returns a project config definition
     """
@@ -425,6 +474,7 @@ def get_project_config(nodes: List[Node], namespace_requested: str) -> List[Dict
         else:
             project_components.append(
                 _cube_project_config(
+                    session=session,
                     node=node,
                     namespace_requested=namespace_requested,
                 ),

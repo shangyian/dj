@@ -12,16 +12,21 @@ import pytest
 from cachelib.simple import SimpleCache
 from fastapi.testclient import TestClient
 from pytest_mock import MockerFixture
-from sqlmodel import Session, SQLModel, create_engine
-from sqlmodel.pool import StaticPool
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session
+from testcontainers.core.waiting_utils import wait_for_logs
+from testcontainers.postgres import PostgresContainer
 
 from datajunction_server.api.main import app
 from datajunction_server.config import Settings
+from datajunction_server.database.base import Base
+from datajunction_server.database.column import Column
+from datajunction_server.database.engine import Engine
+from datajunction_server.database.user import User
 from datajunction_server.errors import DJQueryServiceClientException
-from datajunction_server.models import Column, Engine
 from datajunction_server.models.materialization import MaterializationInfo
 from datajunction_server.models.query import QueryCreate, QueryWithResults
-from datajunction_server.models.user import OAuthProvider, User
+from datajunction_server.models.user import OAuthProvider
 from datajunction_server.service_clients import QueryServiceClient
 from datajunction_server.typing import QueryState
 from datajunction_server.utils import (
@@ -86,19 +91,41 @@ def duckdb_conn() -> duckdb.DuckDBPyConnection:  # pylint: disable=c-extension-n
             yield conn
 
 
-@pytest.fixture
-def session() -> Iterator[Session]:
+@pytest.fixture(scope="session")
+def postgres_container() -> PostgresContainer:
     """
-    Create an in-memory SQLite session to test models.
+    Setup postgres container
     """
-    engine = create_engine(
-        "sqlite://",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
+    postgres = PostgresContainer(
+        image="postgres:latest",
+        user="dj",
+        password="dj",
+        dbname="dj",
+        port=5432,
+        driver="psycopg",
     )
-    SQLModel.metadata.create_all(engine)
+    with postgres:
+        wait_for_logs(
+            postgres,
+            r"UTC \[1\] LOG:  database system is ready to accept connections",
+            10,
+        )
+        yield postgres
+
+
+@pytest.fixture
+def session(postgres_container: PostgresContainer) -> Iterator[Session]:
+    """
+    Create a Postgres session to test models.
+    """
+    url = postgres_container.get_connection_url()
+    engine = create_engine(
+        url=url,
+    )
+    Base.metadata.create_all(engine)
     with Session(engine, autoflush=False) as session:
         yield session
+    Base.metadata.drop_all(engine)
 
 
 @pytest.fixture
@@ -249,7 +276,7 @@ def post_and_raise_if_error(client: TestClient, endpoint: str, json: dict):
     Post the payload to the client and raise if there's an error
     """
     response = client.post(endpoint, json=json)
-    if not response.ok:
+    if response.status_code >= 400:
         raise HTTPException(response.text)
 
 
@@ -508,6 +535,11 @@ def mock_user_dj() -> Iterator[None]:
     """
     with patch(
         "datajunction_server.internal.access.authentication.http.get_user",
-        return_value=User(id=1, username="dj", oauth_provider=OAuthProvider.BASIC),
+        return_value=User(
+            id=1,
+            username="dj",
+            oauth_provider=OAuthProvider.BASIC,
+            is_admin=False,
+        ),
     ):
         yield

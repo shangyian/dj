@@ -15,9 +15,25 @@ const NodeLineage = djNode => {
         col.attributes.some(attr => attr.attribute_type.name === 'primary_key'),
       )
       .map(col => col.name);
-    const column_names = node.columns.map(col => {
-      return { name: col.name, type: col.type };
-    });
+    const dimensionLinkForeignKeys = node.dimension_links
+      ? node.dimension_links.flatMap(link =>
+          Object.keys(link.foreign_keys).map(key => key.split('.').slice(-1)),
+        )
+      : [];
+    const column_names = node.columns
+      .map(col => {
+        return {
+          name: col.name,
+          type: col.type,
+          dimension: col.dimension !== null ? col.dimension.name : null,
+          order: primary_key.includes(col.name)
+            ? -1
+            : dimensionLinkForeignKeys.includes(col.name)
+            ? 0
+            : 1,
+        };
+      })
+      .sort((a, b) => a.order - b.order);
     return {
       id: String(node.name),
       type: 'DJNode',
@@ -38,28 +54,37 @@ const NodeLineage = djNode => {
   };
 
   const dimensionEdges = node => {
-    return node.columns
-      .filter(col => col.dimension)
-      .map(col => {
-        return {
-          id: col.dimension.name + '->' + node.name + '.' + col.name,
-          source: col.dimension.name,
-          sourceHandle: col.dimension.name,
-          target: node.name,
-          targetHandle: node.name + '.' + col.name,
-          draggable: true,
-          markerStart: {
-            type: MarkerType.Arrow,
-            width: 20,
-            height: 20,
-            color: '#b0b9c2',
-          },
-          style: {
-            strokeWidth: 3,
-            stroke: '#b0b9c2',
-          },
-        };
-      });
+    return node.dimension_links === undefined
+      ? []
+      : node.dimension_links.flatMap(link => {
+          return Object.keys(link.foreign_keys).map(fk => {
+            return {
+              id:
+                link.dimension.name +
+                '->' +
+                node.name +
+                '=' +
+                link.foreign_keys[fk] +
+                '->' +
+                fk,
+              source: link.dimension.name,
+              sourceHandle: link.foreign_keys[fk],
+              target: node.name,
+              targetHandle: fk,
+              draggable: true,
+              markerStart: {
+                type: MarkerType.Arrow,
+                width: 20,
+                height: 20,
+                color: '#b0b9c2',
+              },
+              style: {
+                strokeWidth: 3,
+                stroke: '#b0b9c2',
+              },
+            };
+          });
+        });
   };
 
   const parentEdges = node => {

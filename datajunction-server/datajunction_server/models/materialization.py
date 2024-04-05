@@ -3,26 +3,22 @@ import enum
 from typing import TYPE_CHECKING, Dict, List, Optional, Union
 
 from pydantic import AnyHttpUrl, BaseModel, validator
-from sqlalchemy import JSON
-from sqlalchemy import Column as SqlaColumn
-from sqlalchemy import DateTime, String
-from sqlalchemy.types import Enum
-from sqlmodel import Field, Relationship, SQLModel, UniqueConstraint
 
+from datajunction_server.enum import StrEnum
 from datajunction_server.errors import DJInvalidInputException
-from datajunction_server.models.base import BaseSQLModel
+from datajunction_server.models.column import SemanticType
 from datajunction_server.models.node_type import NodeType
 from datajunction_server.models.partition import (
-    Backfill,
     BackfillOutput,
     PartitionColumnOutput,
     PartitionType,
 )
 from datajunction_server.models.query import ColumnMetadata
-from datajunction_server.typing import UTCDatetime
+from datajunction_server.naming import amenable_name
+from datajunction_server.sql.parsing.types import TimestampType
 
 if TYPE_CHECKING:
-    from datajunction_server.models import NodeRevision
+    from datajunction_server.database.node import NodeRevision
 
 DRUID_AGG_MAPPING = {
     ("bigint", "sum"): "longSum",
@@ -44,7 +40,7 @@ DRUID_AGG_MAPPING = {
 }
 
 
-class MaterializationStrategy(str, enum.Enum):
+class MaterializationStrategy(StrEnum):
     """
     Materialization strategies
     """
@@ -117,7 +113,7 @@ class MaterializationInfo(BaseModel):
     urls: List[AnyHttpUrl]
 
 
-class MaterializationConfigOutput(SQLModel):
+class MaterializationConfigOutput(BaseModel):
     """
     Output for materialization config.
     """
@@ -129,6 +125,9 @@ class MaterializationConfigOutput(SQLModel):
     backfills: List[BackfillOutput]
     strategy: Optional[str]
 
+    class Config:  # pylint: disable=missing-class-docstring, too-few-public-methods
+        orm_mode = True
+
 
 class MaterializationConfigInfoUnified(
     MaterializationInfo,
@@ -139,7 +138,7 @@ class MaterializationConfigInfoUnified(
     """
 
 
-class SparkConf(BaseSQLModel):
+class SparkConf(BaseModel):
     """Spark configuration"""
 
     __root__: Dict[str, str] = {}
@@ -213,7 +212,7 @@ class GenericMaterializationConfig(GenericMaterializationConfigInput):
         ]
 
 
-class DruidConf(BaseSQLModel):
+class DruidConf(BaseModel):
     """Druid configuration"""
 
     granularity: Optional[str]
@@ -223,7 +222,7 @@ class DruidConf(BaseSQLModel):
     parse_spec_format: Optional[str]
 
 
-class Measure(SQLModel):
+class Measure(BaseModel):
     """
     A measure with a simple aggregation
     """
@@ -242,7 +241,7 @@ class Measure(SQLModel):
         return hash(tuple(self.__dict__.items()))  # pragma: no cover
 
 
-class MetricMeasures(SQLModel):
+class MetricMeasures(BaseModel):
     """
     Represent a metric as a set of measures, along with the expression for
     combining the measures to make the metric.
@@ -260,6 +259,7 @@ class GenericCubeConfigInput(GenericMaterializationConfigInput):
 
     dimensions: Optional[List[str]]
     measures: Optional[Dict[str, MetricMeasures]]
+    metrics: Optional[List[ColumnMetadata]]
 
 
 class GenericCubeConfig(GenericCubeConfigInput, GenericMaterializationConfig):
@@ -279,7 +279,7 @@ class DruidCubeConfigInput(GenericCubeConfigInput):
     druid: Optional[DruidConf]
 
 
-class DruidCubeConfig(DruidCubeConfigInput, GenericCubeConfig):
+class DruidMeasuresCubeConfig(DruidCubeConfigInput, GenericCubeConfig):
     """
     Specific cube materialization implementation with Spark and Druid ingestion and
     optional prefix and/or suffix to include with the materialized entity's name.
@@ -289,6 +289,12 @@ class DruidCubeConfig(DruidCubeConfigInput, GenericCubeConfig):
         """
         Returns the Druid metrics spec for ingestion
         """
+        self.dimensions += [  # type: ignore  # pylint: disable=no-member
+            measure.field_name
+            for measure_group in self.measures.values()  # type: ignore
+            for measure in measure_group.measures
+            if (measure.type.lower(), measure.agg.lower()) not in DRUID_AGG_MAPPING
+        ]
         return {
             measure.name: {
                 "fieldName": measure.field_name,
@@ -297,25 +303,44 @@ class DruidCubeConfig(DruidCubeConfigInput, GenericCubeConfig):
             }
             for measure_group in self.measures.values()  # type: ignore
             for measure in measure_group.measures
+            if (measure.type.lower(), measure.agg.lower()) in DRUID_AGG_MAPPING
         }
 
     def build_druid_spec(self, node_revision: "NodeRevision"):
         """
         Builds the Druid ingestion spec from a materialization config.
         """
-        from datajunction_server.utils import (  # pylint: disable=import-outside-toplevel
-            amenable_name,
-        )
-
         node_name = node_revision.name
         metrics_spec = list(self.metrics_spec().values())
+
+        # Either a temporal partition is configured or a timestamp column must exist on the cube
         user_defined_temporal_partitions = node_revision.temporal_partition_columns()
-        user_defined_temporal_partition = user_defined_temporal_partitions[0]
-        output_temporal_partition_column = [
-            col.name
-            for col in self.columns  # type: ignore
-            if col.semantic_entity == user_defined_temporal_partition.name
-        ][0]
+        timestamp_columns = [
+            col.name for col in node_revision.columns if col.type == TimestampType()
+        ]
+        if not user_defined_temporal_partitions and not timestamp_columns:
+            raise DJInvalidInputException(  # pragma: no cover
+                "There must be at least one timestamp column or temporal partition configured"
+                " on this cube or it cannot be materialized to Druid.",
+            )
+
+        # Select which timestamp column to use: the user-defined temporal partition
+        # if it exists or a timestamp column if it doesn't
+        user_defined_temporal_partition = None
+        if user_defined_temporal_partitions:
+            user_defined_temporal_partition = user_defined_temporal_partitions[0]
+            timestamp_column = [
+                col.name
+                for col in self.columns  # type: ignore
+                if col.semantic_entity == user_defined_temporal_partition.name
+            ][0]
+        else:
+            timestamp_column = [
+                col.name
+                for col in self.columns  # type: ignore
+                if col.semantic_type == SemanticType.TIMESTAMP
+            ][0]
+
         druid_datasource_name = (
             self.prefix  # type: ignore
             + amenable_name(node_name)  # type: ignore
@@ -329,17 +354,30 @@ class DruidCubeConfig(DruidCubeConfigInput, GenericCubeConfig):
                 "parser": {
                     "parseSpec": {
                         "format": "parquet",
-                        "dimensionsSpec": {"dimensions": self.dimensions},
+                        "dimensionsSpec": {
+                            "dimensions": sorted(
+                                # pylint: disable=no-member
+                                list(set(self.dimensions)),  # type: ignore
+                            ),
+                        },
                         "timestampSpec": {
-                            "column": output_temporal_partition_column,
-                            "format": user_defined_temporal_partition.partition.format,
+                            "column": timestamp_column,
+                            "format": (
+                                user_defined_temporal_partition.partition.format
+                                if user_defined_temporal_partition
+                                else "millis"
+                            ),
                         },
                     },
                 },
                 "metricsSpec": metrics_spec,
                 "granularitySpec": {
                     "type": "uniform",
-                    "segmentGranularity": user_defined_temporal_partition.partition.granularity,
+                    "segmentGranularity": (
+                        user_defined_temporal_partition.partition.granularity
+                        if user_defined_temporal_partition
+                        else "DAY"
+                    ),
                     "intervals": [],  # this should be set at runtime
                 },
             },
@@ -355,74 +393,30 @@ class DruidCubeConfig(DruidCubeConfigInput, GenericCubeConfig):
         return druid_spec
 
 
-class Materialization(BaseSQLModel, table=True):  # type: ignore
+class DruidMetricsCubeConfig(
+    DruidMeasuresCubeConfig,
+):  # pylint: disable=too-many-ancestors
     """
-    Materialization configured for a node.
+    Specific cube materialization implementation with Spark and Druid ingestion and
+    optional prefix and/or suffix to include with the materialized entity's name.
     """
 
-    __table_args__ = (
-        UniqueConstraint(
-            "name",
-            "node_revision_id",
-            name="name_node_revision_uniq",
-        ),
-    )
-
-    id: Optional[int] = Field(
-        default=None,
-        primary_key=True,
-        sa_column_kwargs={
-            "autoincrement": True,
-        },
-    )
-
-    node_revision_id: int = Field(foreign_key="noderevision.id")
-    node_revision: "NodeRevision" = Relationship(
-        back_populates="materializations",
-    )
-
-    name: str
-
-    strategy: MaterializationStrategy = Field(
-        sa_column=SqlaColumn(Enum(MaterializationStrategy)),
-    )
-
-    # A cron schedule to materialize this node by
-    schedule: str
-
-    # Arbitrary config relevant to the materialization job
-    config: Union[GenericMaterializationConfig, DruidCubeConfig] = Field(
-        default={},
-        sa_column=SqlaColumn(JSON),
-    )
-
-    # The name of the plugin that handles materialization, if any
-    job: str = Field(
-        default="MaterializationJob",
-        sa_column=SqlaColumn("job", String),
-    )
-
-    deactivated_at: UTCDatetime = Field(
-        nullable=True,
-        sa_column=SqlaColumn(DateTime(timezone=True)),
-        default=None,
-    )
-
-    backfills: List[Backfill] = Relationship(
-        back_populates="materialization",
-        sa_relationship_kwargs={
-            "primaryjoin": "Materialization.id==Backfill.materialization_id",
-            "cascade": "all, delete",
-        },
-    )
-
-    @validator("config")
-    def config_validator(cls, value):  # pylint: disable=no-self-argument
-        """Changes `config` to a dict prior to saving"""
-        return value.dict()
+    def metrics_spec(self) -> Dict:
+        """
+        Returns the Druid metrics spec for ingestion
+        """
+        return {
+            metric.name: {
+                "fieldName": metric.name,
+                "name": metric.name,
+                "type": DRUID_AGG_MAPPING[(metric.type.lower(), "sum")],
+            }
+            for metric in self.metrics  # type: ignore
+            if (metric.type.lower(), "sum") in DRUID_AGG_MAPPING
+        }
 
 
-class MaterializationJobType(BaseSQLModel):
+class MaterializationJobType(BaseModel):
     """
     Materialization job types. These job types will map to their implementations
     under the subclasses of `MaterializationJob`.
@@ -452,17 +446,29 @@ class MaterializationJobTypeEnum(enum.Enum):
         job_class="SparkSqlMaterializationJob",
     )
 
-    DRUID_CUBE = MaterializationJobType(
-        name="druid_cube",
-        label="Druid Cube",
+    DRUID_MEASURES_CUBE = MaterializationJobType(
+        name="druid_measures_cube",
+        label="Druid Measures Cube (Pre-Agg Cube)",
         description=(
-            "Used to materialize a cube to Druid for low-latency access to a set of metrics "
-            "and dimensions. While the logical cube definition is at the level of metrics "
-            "and dimensions, a materialized Druid cube will reference measures and dimensions,"
+            "Used to materialize a cube's measures to Druid for low-latency access to a set of "
+            "metrics and dimensions. While the logical cube definition is at the level of metrics "
+            "and dimensions, this materialized Druid cube will contain measures and dimensions,"
             " with rollup configured on the measures where appropriate."
         ),
         allowed_node_types=[NodeType.CUBE],
-        job_class="DruidCubeMaterializationJob",
+        job_class="DruidMeasuresCubeMaterializationJob",
+    )
+
+    DRUID_METRICS_CUBE = MaterializationJobType(
+        name="druid_metrics_cube",
+        label="Druid Metrics Cube (Post-Agg Cube)",
+        description=(
+            "Used to materialize a cube of metrics and dimensions to Druid for low-latency access."
+            " The materialized cube is at the metric level, meaning that all metrics will be "
+            "aggregated to the level of the cube's dimensions."
+        ),
+        allowed_node_types=[NodeType.CUBE],
+        job_class="DruidMetricsCubeMaterializationJob",
     )
 
     @classmethod
@@ -471,7 +477,7 @@ class MaterializationJobTypeEnum(enum.Enum):
         return [job_type for job_type in cls if job_type.value.job_class == job_name][0]
 
 
-class UpsertMaterialization(BaseSQLModel):
+class UpsertMaterialization(BaseModel):
     """
     An upsert object for materialization configs
     """

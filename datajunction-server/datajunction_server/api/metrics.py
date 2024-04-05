@@ -6,26 +6,27 @@ from http import HTTPStatus
 from typing import List, Optional
 
 from fastapi import Depends, HTTPException, Query
-from sqlalchemy.exc import NoResultFound
+from sqlalchemy import select
+from sqlalchemy.orm import Session
 from sqlalchemy.sql.operators import is_
-from sqlmodel import Session, select
 
 from datajunction_server.api.helpers import get_node_by_name
 from datajunction_server.api.nodes import list_nodes
+from datajunction_server.database.node import Node
+from datajunction_server.database.user import User
 from datajunction_server.errors import DJError, DJException, ErrorCode
 from datajunction_server.internal.access.authentication.http import SecureAPIRouter
 from datajunction_server.internal.access.authorization import validate_access
-from datajunction_server.models import User, access
+from datajunction_server.models import access
 from datajunction_server.models.metric import Metric
 from datajunction_server.models.node import (
     DimensionAttributeOutput,
     MetricDirection,
     MetricMetadataOptions,
     MetricUnit,
-    Node,
 )
 from datajunction_server.models.node_type import NodeType
-from datajunction_server.sql.dag import get_shared_dimensions
+from datajunction_server.sql.dag import get_dimensions, get_shared_dimensions
 from datajunction_server.utils import get_current_user, get_session, get_settings
 
 settings = get_settings()
@@ -85,7 +86,8 @@ def get_a_metric(name: str, *, session: Session = Depends(get_session)) -> Metri
     Return a metric by name.
     """
     node = get_metric(session, name)
-    metric = Metric.parse_node(node)
+    dims = get_dimensions(session, node.current.parents[0])
+    metric = Metric.parse_node(node, dims)
     return metric
 
 
@@ -93,7 +95,7 @@ def get_a_metric(name: str, *, session: Session = Depends(get_session)) -> Metri
     "/metrics/common/dimensions/",
     response_model=List[DimensionAttributeOutput],
 )
-async def get_common_dimensions(
+def get_common_dimensions(
     metric: List[str] = Query(
         title="List of metrics to find common dimensions for",
         default=[],
@@ -103,32 +105,29 @@ async def get_common_dimensions(
     """
     Return common dimensions for a set of metrics.
     """
-    metric_nodes = []
     errors = []
-    for node_name in metric:
-        statement = (
-            select(Node)
-            .where(Node.name == node_name)
-            .where(is_(Node.deactivated_at, None))
-        )
-        try:
-            node = session.exec(statement).one()
-            if node.type != NodeType.METRIC:
-                errors.append(
-                    DJError(
-                        message=f"Not a metric node: {node_name}",
-                        code=ErrorCode.NODE_TYPE_ERROR,
-                    ),
-                )
-            metric_nodes.append(node)
-        except NoResultFound:
+    statement = (
+        select(Node)
+        .where(Node.name.in_(metric))  # type: ignore  # pylint: disable=no-member
+        .where(is_(Node.deactivated_at, None))
+    )
+    metric_nodes = session.execute(statement).scalars().all()
+    for node in metric_nodes:
+        if node.type != NodeType.METRIC:
             errors.append(
                 DJError(
-                    message=f"Metric node not found: {node_name}",
-                    code=ErrorCode.UNKNOWN_NODE,
+                    message=f"Not a metric node: {node.name}",
+                    code=ErrorCode.NODE_TYPE_ERROR,
                 ),
             )
+    if not metric_nodes:
+        errors.append(
+            DJError(
+                message=f"Metric nodes not found: {','.join(metric)}",
+                code=ErrorCode.UNKNOWN_NODE,
+            ),
+        )
 
     if errors:
         raise DJException(errors=errors)
-    return get_shared_dimensions(metric_nodes)
+    return get_shared_dimensions(session, metric_nodes)

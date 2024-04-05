@@ -1,6 +1,7 @@
 @import url('https://fonts.googleapis.com/css?family=Jost');
 @import url('https://fonts.googleapis.com/css2?family=Raleway:wght@300;600&display=swap');
 @import url('https://fonts.googleapis.com/css?family=Lato');
+@import url('https://fonts.googleapis.com/css?family=Consolas');
 
 body {
   margin: 0;
@@ -240,7 +241,7 @@ table {
 }
 tr {
   display: table-row;
-  vertical-align: inherit;
+  vertical-align: top;
   border-color: inherit;
 }
 .card-table {
@@ -338,7 +339,7 @@ tr {
 .table thead th,
 td,
 tbody th {
-  vertical-align: middle;
+  vertical-align: top;
   text-align: left;
 }
 .table [data-sort],
@@ -370,6 +371,7 @@ tbody th {
   border-bottom: 0;
   padding: 1rem;
   max-width: 25rem;
+  vertical-align: top;
 }
 .card-inner-table td,
 .card-inner-table th {
@@ -1090,4 +1092,24 @@ pre {
 
 .partitionLink:hover {
   text-decoration: none;
+}
+
+.dimensionsList {
+  padding: 12px;
+  opacity: 1;
+  border-radius: 0.5rem;
+  line-height: 1.55rem;
+  font-size: 0.95rem;
+}
+
+.DimensionAttribute {
+  background: #effcff;
+  padding: 5px;
+  font-family: Consolas, serif;
+}
+
+.PrimaryKey {
+  margin-right: 10px;
+  font-size: 100%;
+  margin-bottom: 5px;
 }

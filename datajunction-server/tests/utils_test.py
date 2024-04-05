@@ -3,10 +3,13 @@ Tests for ``datajunction_server.utils``.
 """
 
 import logging
+from unittest.mock import patch
 
 import pytest
 from pytest_mock import MockerFixture
-from sqlalchemy.engine.url import make_url
+from sqlalchemy.orm import Session
+from starlette.background import BackgroundTasks
+from testcontainers.postgres import PostgresContainer
 from yarl import URL
 
 from datajunction_server.config import Settings
@@ -38,14 +41,13 @@ def test_get_session(mocker: MockerFixture) -> None:
     """
     Test ``get_session``.
     """
-    mocker.patch("datajunction_server.utils.get_engine")
-    Session = mocker.patch(  # pylint: disable=invalid-name
-        "datajunction_server.utils.Session",
-    )
-
-    session = next(get_session())
-
-    assert session == Session().__enter__.return_value
+    with patch(
+        "fastapi.BackgroundTasks",
+        mocker.MagicMock(autospec=BackgroundTasks),
+    ) as background_tasks:
+        background_tasks.side_effect = lambda x, y: None
+        session = next(get_session(background_tasks))
+        assert isinstance(session, Session)
 
 
 def test_get_settings(mocker: MockerFixture) -> None:
@@ -80,13 +82,21 @@ def test_get_issue_url() -> None:
     )
 
 
-def test_get_engine(mocker: MockerFixture, settings: Settings) -> None:
+def test_get_engine(
+    mocker: MockerFixture,
+    settings: Settings,
+    postgres_container: PostgresContainer,
+) -> None:
     """
     Test ``get_engine``.
     """
+    connection_url = postgres_container.get_connection_url()
+    settings.index = connection_url
     mocker.patch("datajunction_server.utils.get_settings", return_value=settings)
     engine = get_engine()
-    assert engine.url == make_url("sqlite://")
+    assert engine.pool.size() == settings.db_pool_size
+    assert engine.pool.timeout() == settings.db_pool_timeout
+    assert engine.pool.overflow() == -settings.db_max_overflow
 
 
 def test_get_query_service_client(mocker: MockerFixture, settings: Settings) -> None:

@@ -1,29 +1,27 @@
-# pylint: disable=too-many-lines
+# pylint: disable=too-many-lines,too-many-arguments
 """
 Node related APIs.
 """
 import logging
 import os
 from http import HTTPStatus
-from typing import List, Optional, Union, cast
+from typing import List, Optional
 
 from fastapi import BackgroundTasks, Depends, Query, Response
 from fastapi.responses import JSONResponse
 from fastapi_cache.decorator import cache
+from sqlalchemy import select
+from sqlalchemy.orm import Session
 from sqlalchemy.sql.operators import is_
-from sqlmodel import Session, select
 from starlette.requests import Request
 
-from datajunction_server.api.catalogs import UNKNOWN_CATALOG_ID
 from datajunction_server.api.helpers import (
     activate_node,
     deactivate_node,
     get_catalog_by_name,
     get_column,
-    get_downstream_nodes,
     get_node_by_name,
     get_node_namespace,
-    get_upstream_nodes,
     hard_delete_node,
     raise_if_node_exists,
     revalidate_node,
@@ -32,7 +30,17 @@ from datajunction_server.api.helpers import (
 from datajunction_server.api.namespaces import create_node_namespace
 from datajunction_server.api.tags import get_tags_by_name
 from datajunction_server.constants import NODE_LIST_MAX
-from datajunction_server.errors import DJException, DJInvalidInputException
+from datajunction_server.database.column import Column
+from datajunction_server.database.history import ActivityType, EntityType, History
+from datajunction_server.database.node import Node, NodeRevision
+from datajunction_server.database.partition import Partition
+from datajunction_server.database.user import User
+from datajunction_server.errors import (
+    DJActionNotAllowedException,
+    DJDoesNotExistException,
+    DJException,
+    DJInvalidInputException,
+)
 from datajunction_server.internal.access.authentication.http import SecureAPIRouter
 from datajunction_server.internal.access.authorization import (
     validate_access,
@@ -40,37 +48,36 @@ from datajunction_server.internal.access.authorization import (
 )
 from datajunction_server.internal.nodes import (
     _create_node_from_inactive,
+    copy_to_new_node,
     create_cube_node_revision,
     create_node_revision,
     get_column_level_lineage,
     get_node_column,
+    remove_dimension_link,
     save_column_level_lineage,
     save_node,
     set_node_column_attributes,
     update_any_node,
+    upsert_complex_dimension_link,
 )
 from datajunction_server.models import access
 from datajunction_server.models.attribute import AttributeTypeIdentifier
-from datajunction_server.models.base import generate_display_name
-from datajunction_server.models.column import Column
-from datajunction_server.models.history import (
-    ActivityType,
-    EntityType,
-    History,
-    status_change_history,
+from datajunction_server.models.dimensionlink import (
+    JoinType,
+    LinkDimensionIdentifier,
+    LinkDimensionInput,
 )
 from datajunction_server.models.node import (
     ColumnOutput,
     CreateCubeNode,
     CreateNode,
     CreateSourceNode,
+    DAGNodeOutput,
     DimensionAttributeOutput,
     LineageColumn,
-    Node,
     NodeIndexItem,
     NodeMode,
     NodeOutput,
-    NodeRevision,
     NodeRevisionBase,
     NodeRevisionOutput,
     NodeStatus,
@@ -80,13 +87,15 @@ from datajunction_server.models.node import (
 from datajunction_server.models.node_type import NodeType
 from datajunction_server.models.partition import (
     Granularity,
-    Partition,
     PartitionInput,
     PartitionType,
 )
-from datajunction_server.models.user import User
 from datajunction_server.service_clients import QueryServiceClient
-from datajunction_server.sql.dag import get_dimensions, get_nodes_with_dimension
+from datajunction_server.sql.dag import (
+    get_dimensions,
+    get_downstream_nodes,
+    get_upstream_nodes,
+)
 from datajunction_server.sql.parsing.backends.antlr4 import parse
 from datajunction_server.utils import (
     Version,
@@ -104,7 +113,7 @@ router = SecureAPIRouter(tags=["nodes"])
 
 @router.post("/nodes/validate/", response_model=NodeValidation)
 def validate_node(
-    data: Union[NodeRevisionBase, NodeRevision],
+    data: NodeRevisionBase,
     response: Response,
     session: Session = Depends(get_session),
 ) -> NodeValidation:
@@ -198,7 +207,7 @@ def list_nodes(
         )
     if node_type:
         statement = statement.where(Node.type == node_type)
-    nodes = session.exec(statement).unique().all()
+    nodes = session.execute(statement).unique().scalars().all()
     return [
         approval.access_object.name
         for approval in validate_access_requests(
@@ -246,7 +255,7 @@ def list_all_nodes_with_details(
     )  # Very high limit as a safeguard
     results = [
         NodeIndexItem(name=row[0], display_name=row[1], description=row[2], type=row[3])
-        for row in session.exec(nodes_query).all()
+        for row in session.execute(nodes_query).all()
     ]
     if len(results) == NODE_LIST_MAX:  # pragma: no cover
         _logger.warning(
@@ -274,13 +283,13 @@ def list_all_nodes_with_details(
     return [row for row in results if row.name in approvals]
 
 
-@router.get("/nodes/{name}/", response_model=NodeOutput)
+@router.get("/nodes/{name}/")
 def get_node(name: str, *, session: Session = Depends(get_session)) -> NodeOutput:
     """
     Show the active version of the specified node.
     """
     node = get_node_by_name(session, name, with_current=True)
-    return node  # type: ignore
+    return NodeOutput.from_orm(node)
 
 
 @router.delete("/nodes/{name}/")
@@ -385,6 +394,7 @@ def create_source(
     node = Node(
         name=data.name,
         namespace=data.namespace,
+        display_name=data.display_name or f"{data.catalog}.{data.schema_}.{data.table}",
         type=NodeType.SOURCE,
         current_version=0,
     )
@@ -402,16 +412,14 @@ def create_source(
                     raise_if_not_exists=False,
                 )
             ),
+            order=idx,
         )
-        for column_data in data.columns
+        for idx, column_data in enumerate(data.columns)
     ]
 
     node_revision = NodeRevision(
         name=data.name,
-        namespace=data.namespace,
-        display_name=data.display_name
-        if data.display_name
-        else generate_display_name(data.name),
+        display_name=data.display_name or f"{catalog.name}.{data.schema_}.{data.table}",
         description=data.description,
         type=NodeType.SOURCE,
         status=NodeStatus.VALID,
@@ -421,11 +429,11 @@ def create_source(
         columns=columns,
         parents=[],
     )
+    node.display_name = node_revision.display_name
 
     # Point the node to the new node revision.
     save_node(session, node_revision, node, data.mode, current_user=current_user)
-
-    return node  # type: ignore
+    return node
 
 
 @router.post(
@@ -523,7 +531,7 @@ def create_node(
                 )
     session.refresh(node)
     session.refresh(node.current)
-    return node  # type: ignore
+    return node
 
 
 @router.post(
@@ -575,7 +583,7 @@ def create_cube(
     )
     node_revision = create_cube_node_revision(session=session, data=data)
     save_node(session, node_revision, node, data.mode, current_user=current_user)
-    return node  # type: ignore
+    return node
 
 
 @router.post(
@@ -583,7 +591,7 @@ def create_cube(
     response_model=NodeOutput,
     status_code=201,
 )
-def register_table(  # pylint: disable=too-many-arguments
+def register_table(
     catalog: str,
     schema_: str,
     table: str,
@@ -627,7 +635,7 @@ def register_table(  # pylint: disable=too-many-arguments
             table=table,
             name=name,
             display_name=name,
-            columns=columns,
+            columns=[ColumnOutput.from_orm(col) for col in columns],
             description="This source node was automatically created as a registered table.",
             mode=NodeMode.PUBLISHED,
         ),
@@ -637,11 +645,11 @@ def register_table(  # pylint: disable=too-many-arguments
 
 
 @router.post("/nodes/{name}/columns/{column}/", status_code=201)
-def link_dimension(  # pylint: disable=too-many-arguments
+def link_dimension(
     name: str,
     column: str,
     dimension: str,
-    dimension_column: Optional[str] = None,
+    dimension_column: Optional[str] = None,  # pylint: disable=unused-argument
     session: Session = Depends(get_session),
     current_user: Optional[User] = Depends(get_current_user),
 ) -> JSONResponse:
@@ -654,16 +662,10 @@ def link_dimension(  # pylint: disable=too-many-arguments
         name=dimension,
         node_type=NodeType.DIMENSION,
     )
-    if (
-        dimension_node.current.catalog_id != UNKNOWN_CATALOG_ID
-        and dimension_node.current.catalog is not None
-        and node.current.catalog.name != dimension_node.current.catalog.name
-    ):
-        raise DJException(
-            message=(
-                "Cannot add dimension to column, because catalogs do not match: "
-                f"{node.current.catalog.name}, {dimension_node.current.catalog.name}"
-            ),
+    primary_key_columns = dimension_node.current.primary_key()
+    if len(primary_key_columns) > 1:
+        raise DJActionNotAllowedException(  # pragma: no cover
+            "Cannot use this endpoint to link a dimension with a compound primary key.",
         )
 
     target_column = get_column(node.current, column)
@@ -680,115 +682,155 @@ def link_dimension(  # pylint: disable=too-many-arguments
                 " These column types are incompatible and the dimension cannot be linked",
             )
 
-    target_column.dimension = dimension_node
-    target_column.dimension_id = dimension_node.id
-    target_column.dimension_column = dimension_column
-
-    session.add(node)
-    session.add(
-        History(
-            entity_type=EntityType.LINK,
-            entity_name=node.name,
-            node=node.name,
-            activity_type=ActivityType.CREATE,
-            details={
-                "column": target_column.name,
-                "dimension": dimension_node.name,
-                "dimension_column": dimension_column or "",
-            },
-            user=current_user.username if current_user else None,
-        ),
+    link_input = LinkDimensionInput(
+        dimension_node=dimension,
+        join_type=JoinType.LEFT,
+        join_on=f"{name}.{column} = {dimension_node.name}.{primary_key_columns[0].name}",
     )
-    session.commit()
-    session.refresh(node)
+    activity_type = upsert_complex_dimension_link(
+        session,
+        name,
+        link_input,
+        current_user,
+    )
     return JSONResponse(
         status_code=201,
         content={
             "message": (
                 f"Dimension node {dimension} has been successfully "
-                f"linked to column {column} on node {name}"
+                f"linked to node {name} using column {column}."
+            )
+            if activity_type == ActivityType.CREATE
+            else (
+                f"The dimension link between {name} and {dimension} "
+                "has been successfully updated."
             ),
         },
     )
 
 
+@router.post("/nodes/{node_name}/link/", status_code=201)
+def add_complex_dimension_link(  # pylint: disable=too-many-locals
+    node_name: str,
+    link_input: LinkDimensionInput,
+    session: Session = Depends(get_session),
+    current_user: Optional[User] = Depends(get_current_user),
+) -> JSONResponse:
+    """
+    Links a source, dimension, or transform node to a dimension with a custom join query.
+    If a link already exists, updates the link definition.
+    """
+    activity_type = upsert_complex_dimension_link(
+        session,
+        node_name,
+        link_input,
+        current_user,
+    )
+    return JSONResponse(
+        status_code=201,
+        content={
+            "message": (
+                f"Dimension node {link_input.dimension_node} has been successfully "
+                f"linked to node {node_name}."
+            )
+            if activity_type == ActivityType.CREATE
+            else (
+                f"The dimension link between {node_name} and {link_input.dimension_node} "
+                "has been successfully updated."
+            ),
+        },
+    )
+
+
+@router.delete("/nodes/{node_name}/link/", status_code=201)
+def remove_complex_dimension_link(  # pylint: disable=too-many-locals
+    node_name: str,
+    link_identifier: LinkDimensionIdentifier,
+    session: Session = Depends(get_session),
+    current_user: Optional[User] = Depends(get_current_user),
+) -> JSONResponse:
+    """
+    Removes a complex dimension link based on the dimension node and its role (if any).
+    """
+    return remove_dimension_link(session, node_name, link_identifier, current_user)
+
+
 @router.delete("/nodes/{name}/columns/{column}/", status_code=201)
-def delete_dimension_link(  # pylint: disable=too-many-arguments
+def delete_dimension_link(
     name: str,
-    column: str,
+    column: str,  # pylint: disable=unused-argument
     dimension: str,
-    dimension_column: Optional[str] = None,
+    dimension_column: Optional[str] = None,  # pylint: disable=unused-argument
     session: Session = Depends(get_session),
     current_user: Optional[User] = Depends(get_current_user),
 ) -> JSONResponse:
     """
     Remove the link between a node column and a dimension node
     """
-    node = get_node_by_name(session=session, name=name)
-    target_column = get_column(node.current, column)
-    if (not target_column.dimension or target_column.dimension.name != dimension) and (
-        not target_column.dimension_column
-        or target_column.dimension_column != dimension_column
-    ):
-        return JSONResponse(
-            status_code=304,
-            content={
-                "message": (
-                    f"No change was made to {column} on node {name} as the "
-                    f"specified dimension link to {dimension} on "
-                    f"{dimension_column} was not found."
-                ),
-            },
-        )
-
-    # Find cubes that are affected by this dimension link removal and update their statuses
-    affected_cubes = get_nodes_with_dimension(
+    return remove_dimension_link(
         session,
-        target_column.dimension,
-        [NodeType.CUBE],
+        name,
+        LinkDimensionIdentifier(dimension_node=dimension, role=None),
+        current_user,
     )
-    if affected_cubes:
-        for cube in affected_cubes:
-            if cube.status != NodeStatus.INVALID:  # pragma: no cover
-                cube.status = NodeStatus.INVALID
-                session.add(cube)
-                session.add(
-                    status_change_history(
-                        node,
-                        NodeStatus.VALID,
-                        NodeStatus.INVALID,
-                        current_user=current_user,
+
+
+@router.post("/nodes/{name}/migrate_dim_link", status_code=201)  # pragma: no cover
+def migrate_dimension_link(  # pragma: no cover
+    name: str,
+    session: Session = Depends(get_session),
+    current_user: Optional[User] = Depends(get_current_user),
+) -> JSONResponse:
+    """
+    Migrate dimension link from column-level to node-level
+    """
+    node = get_node_by_name(session=session, name=name)
+    migrated, errors = [], []
+    _logger.info("Migrating dimension links for %s", name)
+    for column in node.current.columns:
+        if column.dimension:
+            try:
+                _logger.info(
+                    "Started migration for column %s, dimension %s",
+                    column.name,
+                    column.dimension.name,
+                )
+                dimension_node = column.dimension
+                primary_key_columns = dimension_node.current.primary_key()
+                link_input = LinkDimensionInput(
+                    dimension_node=dimension_node.name,
+                    join_type=JoinType.LEFT,
+                    join_on=(
+                        f"{name}.{column.name} = "
+                        f"{dimension_node.name}.{primary_key_columns[0].name}"
                     ),
                 )
-
-    target_column.dimension = None  # type: ignore
-    target_column.dimension_id = None
-    target_column.dimension_column = None
-    session.add(node)
-    session.add(
-        History(
-            entity_type=EntityType.LINK,
-            entity_name=node.name,
-            node=node.name,
-            activity_type=ActivityType.DELETE,
-            details={
-                "column": column,
-                "dimension": dimension,
-                "dimension_column": dimension_column or "",
-            },
-            user=current_user.username if current_user else None,
-        ),
-    )
-    session.commit()
-    session.refresh(node)
+                upsert_complex_dimension_link(
+                    session,
+                    name,
+                    link_input,
+                    current_user,
+                )
+                column.dimension = None  # type: ignore
+                column.dimension_id = None
+                column.dimension_column = None
+                session.add(node)
+                session.commit()
+                session.refresh(node)
+                _logger.info(
+                    "Finished migration for column %s, dimension %s",
+                    column.name,
+                    dimension_node.name,
+                )
+                migrated.append((column.name, dimension_node.name))
+            except Exception as e:  # pylint: disable=broad-exception-caught
+                errors.append((column.name, dimension_node.name, str(e)))
 
     return JSONResponse(
         status_code=201,
         content={
-            "message": (
-                f"The dimension link on the node {name}'s {column} to "
-                f"{dimension} has been successfully removed."
-            ),
+            "finished": migrated,
+            "errors": errors,
         },
     )
 
@@ -863,29 +905,65 @@ def refresh_source_node(
     current_revision = source_node.current
 
     # Get the latest columns for the source node's table from the query service
-    columns = query_service_client.get_columns_for_table(
-        current_revision.catalog.name,
-        current_revision.schema_,  # type: ignore
-        current_revision.table,  # type: ignore
-        current_revision.catalog.engines[0]
-        if len(current_revision.catalog.engines) >= 1
-        else None,
-    )
+    new_columns = []
+    try:
+        new_columns = query_service_client.get_columns_for_table(
+            current_revision.catalog.name,
+            current_revision.schema_,  # type: ignore
+            current_revision.table,  # type: ignore
+            current_revision.catalog.engines[0]
+            if len(current_revision.catalog.engines) >= 1
+            else None,
+        )
+    except DJDoesNotExistException:
+        # continue with the update, if the table was not found
+        pass
 
-    # Check if any of the columns have changed (only continue with update if they have)
-    column_changes = {col.identifier() for col in current_revision.columns} != {
-        col.identifier() for col in columns
-    }
-    if not column_changes:
-        return source_node
+    refresh_details = {}
+    if new_columns:
+        # check if any of the columns have changed (only continue with update if they have)
+        column_changes = {col.identifier() for col in current_revision.columns} != {
+            col.identifier() for col in new_columns
+        }
+
+        # FIXME: there is a bug with type translation (bigint != long) - fix it. # pylint: disable=fixme
+
+        # if the columns haven't changed and the node has a table, we can skip the update
+        if not column_changes:
+            if not source_node.missing_table:
+                return source_node
+            # if the columns haven't changed but the node has a missing table, we should fix it
+            source_node.missing_table = False
+            refresh_details["missing_table"] = "False"
+    else:
+        # since we don't see any columns, we'll assume the table is gone
+        source_node.missing_table = True
+        new_columns = current_revision.columns
+        refresh_details["missing_table"] = "True"
 
     # Create a new node revision with the updated columns and bump the version
     old_version = Version.parse(source_node.current_version)
-    new_revision = NodeRevision.parse_obj(current_revision.dict(exclude={"id"}))
+    new_revision = NodeRevision(
+        name=current_revision.name,
+        type=current_revision.type,
+        node_id=current_revision.node_id,
+        display_name=current_revision.display_name,
+        description=current_revision.description,
+        mode=current_revision.mode,
+        catalog_id=current_revision.catalog_id,
+        schema_=current_revision.schema_,
+        table=current_revision.table,
+        status=current_revision.status,
+    )
     new_revision.version = str(old_version.next_major_version())
     new_revision.columns = [
-        Column(name=column.name, type=column.type, node_revisions=[new_revision])
-        for column in columns
+        Column(
+            name=column.name,
+            type=column.type,
+            node_revisions=[new_revision],
+            order=idx,
+        )
+        for idx, column in enumerate(new_columns)
     ]
 
     # Keep the dimension links and attributes on the columns from the node's
@@ -899,15 +977,14 @@ def refresh_source_node(
     session.add(new_revision)
     session.add(source_node)
 
+    refresh_details["version"] = new_revision.version
     session.add(
         History(
             entity_type=EntityType.NODE,
             entity_name=source_node.name,
             node=source_node.name,
             activity_type=ActivityType.REFRESH,
-            details={
-                "version": new_revision.version,
-            },
+            details=refresh_details,
             user=current_user.username if current_user else None,
         ),
     )
@@ -966,12 +1043,15 @@ def calculate_node_similarity(
 
 @router.get(
     "/nodes/{name}/downstream/",
-    response_model=List[NodeOutput],
+    response_model=List[DAGNodeOutput],
     name="List Downstream Nodes For A Node",
 )
 def list_downstream_nodes(
-    name: str, *, node_type: NodeType = None, session: Session = Depends(get_session)
-) -> List[NodeOutput]:
+    name: str,
+    *,
+    node_type: NodeType = None,
+    session: Session = Depends(get_session),
+) -> List[DAGNodeOutput]:
     """
     List all nodes that are downstream from the given node, filterable by type.
     """
@@ -980,35 +1060,49 @@ def list_downstream_nodes(
 
 @router.get(
     "/nodes/{name}/upstream/",
-    response_model=List[NodeOutput],
+    response_model=List[DAGNodeOutput],
     name="List Upstream Nodes For A Node",
 )
 def list_upstream_nodes(
-    name: str, *, node_type: NodeType = None, session: Session = Depends(get_session)
-) -> List[NodeOutput]:
+    name: str,
+    *,
+    node_type: NodeType = None,
+    session: Session = Depends(get_session),
+) -> List[DAGNodeOutput]:
     """
     List all nodes that are upstream from the given node, filterable by type.
     """
-    return get_upstream_nodes(session, name, node_type)  # type: ignore
+    return get_upstream_nodes(session, name, node_type)
 
 
 @router.get(
     "/nodes/{name}/dag/",
-    response_model=List[NodeOutput],
     name="List All Connected Nodes (Upstreams + Downstreams)",
 )
 def list_node_dag(
     name: str, *, session: Session = Depends(get_session)
-) -> List[NodeOutput]:
+) -> List[DAGNodeOutput]:
     """
     List all nodes that are part of the DAG of the given node. This means getting all upstreams,
     downstreams, and linked dimension nodes.
     """
-    node = get_node_by_name(session, name)
-    dimension_nodes = get_dimensions(node, attributes=False)
-    downstreams = get_downstream_nodes(session, name)
-    upstreams = get_upstream_nodes(session, name)
-    return list(set(cast(List[Node], dimension_nodes) + downstreams + upstreams))  # type: ignore
+    node = get_node_by_name(session, name, with_current=True)
+    dimension_nodes = (
+        get_dimensions(session, node.current.parents[0], with_attributes=False)
+        + node.current.parents
+        if node.type == NodeType.METRIC
+        else get_dimensions(session, node, with_attributes=False)
+    )
+    dimension_nodes += [node]
+    downstreams = get_downstream_nodes(
+        session,
+        name,
+        include_deactivated=False,
+        include_cubes=False,
+    )
+    upstreams = get_upstream_nodes(session, name, include_deactivated=False)
+    dag_nodes = set(dimension_nodes + downstreams + upstreams)
+    return [DAGNodeOutput.from_orm(node) for node in dag_nodes]
 
 
 @router.get(
@@ -1023,7 +1117,7 @@ def list_all_dimension_attributes(
     List all available dimension attributes for the given node.
     """
     node = get_node_by_name(session, name)
-    return get_dimensions(node, attributes=True)
+    return get_dimensions(session, node, with_attributes=True)
 
 
 @router.get(
@@ -1143,3 +1237,43 @@ def set_column_partition(  # pylint: disable=too-many-locals
     session.commit()
     session.refresh(column)
     return column
+
+
+@router.post(
+    "/nodes/{node_name}/copy",
+    response_model=DAGNodeOutput,
+    name="Copy A Node",
+)
+def copy_node(
+    node_name: str,
+    *,
+    new_name: str,
+    session: Session = Depends(get_session),
+    current_user: Optional[User] = Depends(get_current_user),
+) -> DAGNodeOutput:
+    """
+    Copy this node to a new name.
+    """
+    # Check to make sure that the new node's namespace exists
+    new_node_namespace = ".".join(new_name.split(".")[:-1])
+    get_node_namespace(session, new_node_namespace, raise_if_not_exists=True)
+
+    # Check if there is already a node with the new name
+    existing_new_node = get_node_by_name(
+        session,
+        new_name,
+        raise_if_not_exists=False,
+        include_inactive=True,
+    )
+    if existing_new_node:
+        if existing_new_node.deactivated_at:
+            hard_delete_node(new_name, session, current_user)
+        else:
+            raise DJInvalidInputException(
+                f"A node with name {new_name} already exists.",
+            )
+
+    # Copy existing node to the new name
+    existing_node = get_node_by_name(session, node_name)
+    new_node = copy_to_new_node(session, existing_node, new_name, current_user)
+    return new_node

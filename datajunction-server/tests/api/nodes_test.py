@@ -5,25 +5,23 @@ Tests for the nodes API.
 import re
 from typing import Any, Dict
 from unittest import mock
-from unittest.mock import call
+from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlmodel import Session, select
+from pytest_mock import MockerFixture
+from sqlalchemy import select
+from sqlalchemy.orm import Session
 
-from datajunction_server.api.helpers import get_upstream_nodes
+from datajunction_server.database import Catalog
+from datajunction_server.database.column import Column
+from datajunction_server.database.node import Node, NodeRelationship, NodeRevision
+from datajunction_server.errors import DJDoesNotExistException
 from datajunction_server.internal.materializations import decompose_expression
-from datajunction_server.models import Database, Table
-from datajunction_server.models.column import Column
-from datajunction_server.models.node import (
-    Node,
-    NodeRelationship,
-    NodeRevision,
-    NodeStatus,
-)
+from datajunction_server.models.node import NodeStatus
 from datajunction_server.models.node_type import NodeType
-from datajunction_server.models.partition import PartitionBackfill
 from datajunction_server.service_clients import QueryServiceClient
+from datajunction_server.sql.dag import get_upstream_nodes
 from datajunction_server.sql.parsing import ast, types
 from datajunction_server.sql.parsing.types import IntegerType, StringType, TimestampType
 from tests.sql.utils import compare_query_strings
@@ -98,7 +96,7 @@ def test_read_nodes(session: Session, client: TestClient) -> None:
         query="SELECT 42 AS answer",
         type=node2.type,
         columns=[
-            Column(name="answer", type=IntegerType()),
+            Column(name="answer", type=IntegerType(), order=0),
         ],
     )
     node3 = Node(name="a-metric", type=NodeType.METRIC, current_version="1")
@@ -108,7 +106,7 @@ def test_read_nodes(session: Session, client: TestClient) -> None:
         version="1",
         query="SELECT COUNT(*) FROM my_table",
         columns=[
-            Column(name="_col0", type=IntegerType()),
+            Column(name="_col0", type=IntegerType(), order=0),
         ],
         type=node3.type,
     )
@@ -137,7 +135,7 @@ def test_get_nodes_with_details(client_with_examples: TestClient):
     Test getting all nodes with some details
     """
     response = client_with_examples.get("/nodes/details/")
-    assert response.ok
+    assert response.status_code in (200, 201)
     data = response.json()
     assert {d["name"] for d in data} == {
         "default.country_dim",
@@ -297,29 +295,21 @@ class TestNodeCRUD:  # pylint: disable=too-many-public-methods
         }
 
     @pytest.fixture
-    def database(self, session: Session) -> Database:
+    def catalog(self, session: Session) -> Catalog:
         """
         A database fixture.
         """
 
-        database = Database(name="postgres", URI="postgres://")
-        session.add(database)
+        catalog = Catalog(name="prod", uuid=uuid4())
+        session.add(catalog)
         session.commit()
-        return database
+        return catalog
 
     @pytest.fixture
-    def source_node(self, session: Session, database: Database) -> Node:
+    def source_node(self, session: Session) -> Node:
         """
         A source node fixture.
         """
-        table = Table(
-            database=database,
-            table="A",
-            columns=[
-                Column(name="ds", type=StringType()),
-                Column(name="user_id", type=IntegerType()),
-            ],
-        )
         node = Node(
             name="basic.source.users",
             type=NodeType.SOURCE,
@@ -328,17 +318,16 @@ class TestNodeCRUD:  # pylint: disable=too-many-public-methods
         node_revision = NodeRevision(
             node=node,
             name=node.name,
-            catalog_id=-100,
+            catalog_id=1,
             type=node.type,
             version="v1",
-            tables=[table],
             columns=[
-                Column(name="id", type=IntegerType()),
-                Column(name="full_name", type=StringType()),
-                Column(name="age", type=IntegerType()),
-                Column(name="country", type=StringType()),
-                Column(name="gender", type=StringType()),
-                Column(name="preferred_language", type=StringType()),
+                Column(name="id", type=IntegerType(), order=0),
+                Column(name="full_name", type=StringType(), order=1),
+                Column(name="age", type=IntegerType(), order=2),
+                Column(name="country", type=StringType(), order=3),
+                Column(name="gender", type=StringType(), order=4),
+                Column(name="preferred_language", type=StringType(), order=5),
             ],
         )
         session.add(node_revision)
@@ -394,16 +383,27 @@ class TestNodeCRUD:  # pylint: disable=too-many-public-methods
             "/nodes/default.hard_hats/columns/title/"
             "?dimension=default.title&dimension_column=title",
         )
-        assert response.ok
+        assert response.status_code in (200, 201)
         response = client_with_roads.get("/nodes/default.hard_hats/")
         assert {
             "attributes": [],
-            "dimension": {"name": "default.title"},
+            "dimension": None,
             "display_name": "Title",
             "name": "title",
             "type": "string",
             "partition": None,
         } in response.json()["columns"]
+
+        assert response.json()["dimension_links"] == [
+            {
+                "dimension": {"name": "default.title"},
+                "foreign_keys": {"default.hard_hats.title": "default.title.title"},
+                "join_cardinality": "many_to_one",
+                "join_sql": "default.hard_hats.title = default.title.title",
+                "join_type": "left",
+                "role": None,
+            },
+        ]
 
     def test_deleting_node(
         self,
@@ -417,7 +417,7 @@ class TestNodeCRUD:  # pylint: disable=too-many-public-methods
         assert response.status_code == 200
         # Check that then retrieving the node returns an error
         response = client_with_basic.get("/nodes/basic.source.users/")
-        assert not response.ok
+        assert response.status_code >= 400
         assert response.json() == {
             "message": "A node with name `basic.source.users` does not exist.",
             "errors": [],
@@ -471,7 +471,7 @@ class TestNodeCRUD:  # pylint: disable=too-many-public-methods
                 "table": "dim_users",
             },
         )
-        assert response.ok
+        assert response.status_code in (200, 201)
 
         # The deletion action should be recorded in the node's history
         response = client_with_basic.get("/history?node=basic.source.users")
@@ -535,9 +535,9 @@ class TestNodeCRUD:  # pylint: disable=too-many-public-methods
         Test deleting a source that's upstream from a metric
         """
         response = client.post("/catalogs/", json={"name": "warehouse"})
-        assert response.ok
+        assert response.status_code in (200, 201)
         response = client.post("/namespaces/default/")
-        assert response.ok
+        assert response.status_code in (200, 201)
         response = client.post(
             "/nodes/source/",
             json={
@@ -560,7 +560,7 @@ class TestNodeCRUD:  # pylint: disable=too-many-public-methods
                 "table": "users",
             },
         )
-        assert response.ok
+        assert response.status_code in (200, 201)
         response = client.post(
             "/nodes/metric/",
             json={
@@ -570,10 +570,10 @@ class TestNodeCRUD:  # pylint: disable=too-many-public-methods
                 "name": "default.num_users",
             },
         )
-        assert response.ok
+        assert response.status_code in (200, 201)
         # Delete the source node
         response = client.delete("/nodes/default.users/")
-        assert response.ok
+        assert response.status_code in (200, 201)
         # The downstream metric should have an invalid status
         assert (
             client.get("/nodes/default.num_users/").json()["status"]
@@ -594,10 +594,10 @@ class TestNodeCRUD:  # pylint: disable=too-many-public-methods
 
         # Restore the source node
         response = client.post("/nodes/default.users/restore/")
-        assert response.ok
+        assert response.status_code in (200, 201)
         # Retrieving the restored node should work
         response = client.get("/nodes/default.users/")
-        assert response.ok
+        assert response.status_code in (200, 201)
         # The downstream metric should have been changed to valid
         response = client.get("/nodes/default.num_users/")
         assert response.json()["status"] == NodeStatus.VALID
@@ -628,9 +628,9 @@ class TestNodeCRUD:  # pylint: disable=too-many-public-methods
         Test deleting a transform that's upstream from a metric
         """
         response = client.post("/catalogs/", json={"name": "warehouse"})
-        assert response.ok
+        assert response.status_code in (200, 201)
         response = client.post("/namespaces/default/")
-        assert response.ok
+        assert response.status_code in (200, 201)
         response = client.post(
             "/nodes/source/",
             json={
@@ -653,7 +653,7 @@ class TestNodeCRUD:  # pylint: disable=too-many-public-methods
                 "table": "users",
             },
         )
-        assert response.ok
+        assert response.status_code in (200, 201)
         response = client.post(
             "/nodes/transform/",
             json={
@@ -676,7 +676,7 @@ class TestNodeCRUD:  # pylint: disable=too-many-public-methods
                 "mode": "published",
             },
         )
-        assert response.ok
+        assert response.status_code in (200, 201)
         response = client.post(
             "/nodes/metric/",
             json={
@@ -686,7 +686,7 @@ class TestNodeCRUD:  # pylint: disable=too-many-public-methods
                 "name": "default.num_us_users",
             },
         )
-        assert response.ok
+        assert response.status_code in (200, 201)
         # Create an invalid draft downstream node
         # so we can test that it stays invalid
         # when the upstream node is restored
@@ -699,13 +699,13 @@ class TestNodeCRUD:  # pylint: disable=too-many-public-methods
                 "name": "default.invalid_metric",
             },
         )
-        assert response.ok
+        assert response.status_code in (200, 201)
         response = client.get("/nodes/default.invalid_metric/")
-        assert response.ok
+        assert response.status_code in (200, 201)
         assert response.json()["status"] == NodeStatus.INVALID
         # Delete the transform node
         response = client.delete("/nodes/default.us_users/")
-        assert response.ok
+        assert response.status_code in (200, 201)
         # Retrieving the deleted node should respond that the node doesn't exist
         assert client.get("/nodes/default.us_users/").json()["message"] == (
             "A node with name `default.us_users` does not exist."
@@ -743,10 +743,10 @@ class TestNodeCRUD:  # pylint: disable=too-many-public-methods
 
         # Restore the transform node
         response = client.post("/nodes/default.us_users/restore/")
-        assert response.ok
+        assert response.status_code in (200, 201)
         # Retrieving the restored node should work
         response = client.get("/nodes/default.us_users/")
-        assert response.ok
+        assert response.status_code in (200, 201)
         # Check history of the restored node
         response = client.get("/history?node=default.us_users")
         history = response.json()
@@ -795,9 +795,9 @@ class TestNodeCRUD:  # pylint: disable=too-many-public-methods
         Test deleting a dimension that's linked to columns on other nodes
         """
         response = client.post("/catalogs/", json={"name": "warehouse"})
-        assert response.ok
+        assert response.status_code in (200, 201)
         response = client.post("/namespaces/default/")
-        assert response.ok
+        assert response.status_code in (200, 201)
         response = client.post(
             "/nodes/source/",
             json={
@@ -820,7 +820,7 @@ class TestNodeCRUD:  # pylint: disable=too-many-public-methods
                 "table": "users",
             },
         )
-        assert response.ok
+        assert response.status_code in (200, 201)
         response = client.post(
             "/nodes/dimension/",
             json={
@@ -844,7 +844,7 @@ class TestNodeCRUD:  # pylint: disable=too-many-public-methods
                 "mode": "published",
             },
         )
-        assert response.ok
+        assert response.status_code in (200, 201)
         response = client.post(
             "/nodes/source/",
             json={
@@ -862,7 +862,7 @@ class TestNodeCRUD:  # pylint: disable=too-many-public-methods
                 "table": "messages",
             },
         )
-        assert response.ok
+        assert response.status_code in (200, 201)
         # Create a metric on the source node
         response = client.post(
             "/nodes/metric/",
@@ -873,7 +873,7 @@ class TestNodeCRUD:  # pylint: disable=too-many-public-methods
                 "name": "default.num_messages",
             },
         )
-        assert response.ok
+        assert response.status_code in (200, 201)
 
         # Create a metric on the source node w/ bound dimensions
         response = client.post(
@@ -883,10 +883,10 @@ class TestNodeCRUD:  # pylint: disable=too-many-public-methods
                 "query": "SELECT COUNT(DISTINCT id) FROM default.messages",
                 "mode": "published",
                 "name": "default.num_messages_id",
-                "required_dimensions": ["default.messages.id"],
+                "required_dimensions": ["user_id"],
             },
         )
-        assert response.ok
+        assert response.status_code in (200, 201)
 
         # Create a metric w/ bound dimensions that to not exist
         with pytest.raises(Exception) as exc:
@@ -934,17 +934,17 @@ class TestNodeCRUD:  # pylint: disable=too-many-public-methods
             "/nodes/default.messages/columns/user_id/"
             "?dimension=default.us_users&dimension_column=id",
         )
-        assert response.ok
+        assert response.status_code in (200, 201)
         # The dimension's attributes should now be available to the metric
         response = client.get("/metrics/default.num_messages/")
-        assert response.ok
+        assert response.status_code in (200, 201)
         assert response.json()["dimensions"] == [
             {
                 "is_primary_key": False,
                 "name": "default.us_users.age",
                 "node_display_name": "Default: Us Users",
                 "node_name": "default.us_users",
-                "path": ["default.messages.user_id"],
+                "path": ["default.messages"],
                 "type": "int",
             },
             {
@@ -952,7 +952,7 @@ class TestNodeCRUD:  # pylint: disable=too-many-public-methods
                 "name": "default.us_users.country",
                 "node_display_name": "Default: Us Users",
                 "node_name": "default.us_users",
-                "path": ["default.messages.user_id"],
+                "path": ["default.messages"],
                 "type": "string",
             },
             {
@@ -960,7 +960,7 @@ class TestNodeCRUD:  # pylint: disable=too-many-public-methods
                 "name": "default.us_users.created_at",
                 "node_display_name": "Default: Us Users",
                 "node_name": "default.us_users",
-                "path": ["default.messages.user_id"],
+                "path": ["default.messages"],
                 "type": "timestamp",
             },
             {
@@ -968,7 +968,7 @@ class TestNodeCRUD:  # pylint: disable=too-many-public-methods
                 "name": "default.us_users.full_name",
                 "node_display_name": "Default: Us Users",
                 "node_name": "default.us_users",
-                "path": ["default.messages.user_id"],
+                "path": ["default.messages"],
                 "type": "string",
             },
             {
@@ -976,7 +976,7 @@ class TestNodeCRUD:  # pylint: disable=too-many-public-methods
                 "name": "default.us_users.gender",
                 "node_display_name": "Default: Us Users",
                 "node_name": "default.us_users",
-                "path": ["default.messages.user_id"],
+                "path": ["default.messages"],
                 "type": "string",
             },
             {
@@ -984,7 +984,7 @@ class TestNodeCRUD:  # pylint: disable=too-many-public-methods
                 "name": "default.us_users.id",
                 "node_display_name": "Default: Us Users",
                 "node_name": "default.us_users",
-                "path": ["default.messages.user_id"],
+                "path": ["default.messages"],
                 "type": "int",
             },
             {
@@ -992,7 +992,7 @@ class TestNodeCRUD:  # pylint: disable=too-many-public-methods
                 "name": "default.us_users.post_processing_timestamp",
                 "node_display_name": "Default: Us Users",
                 "node_name": "default.us_users",
-                "path": ["default.messages.user_id"],
+                "path": ["default.messages"],
                 "type": "timestamp",
             },
             {
@@ -1000,7 +1000,7 @@ class TestNodeCRUD:  # pylint: disable=too-many-public-methods
                 "name": "default.us_users.preferred_language",
                 "node_display_name": "Default: Us Users",
                 "node_name": "default.us_users",
-                "path": ["default.messages.user_id"],
+                "path": ["default.messages"],
                 "type": "string",
             },
             {
@@ -1008,7 +1008,7 @@ class TestNodeCRUD:  # pylint: disable=too-many-public-methods
                 "name": "default.us_users.secret_number",
                 "node_display_name": "Default: Us Users",
                 "node_name": "default.us_users",
-                "path": ["default.messages.user_id"],
+                "path": ["default.messages"],
                 "type": "float",
             },
         ]
@@ -1024,34 +1024,34 @@ class TestNodeCRUD:  # pylint: disable=too-many-public-methods
 
         # Delete the dimension node
         response = client.delete("/nodes/default.us_users/")
-        assert response.ok
+        assert response.status_code in (200, 201)
         # Retrieving the deleted node should respond that the node doesn't exist
         assert client.get("/nodes/default.us_users/").json()["message"] == (
             "A node with name `default.us_users` does not exist."
         )
         # The deleted dimension's attributes should no longer be available to the metric
         response = client.get("/metrics/default.num_messages/")
-        assert response.ok
+        assert response.status_code in (200, 201)
         assert [] == response.json()["dimensions"]
         # The metric should still be VALID
         response = client.get("/nodes/default.num_messages/")
         assert response.json()["status"] == NodeStatus.VALID
         # Restore the dimension node
         response = client.post("/nodes/default.us_users/restore/")
-        assert response.ok
+        assert response.status_code in (200, 201)
         # Retrieving the restored node should work
         response = client.get("/nodes/default.us_users/")
-        assert response.ok
+        assert response.status_code in (200, 201)
         # The dimension's attributes should now once again show for the linked metric
         response = client.get("/metrics/default.num_messages/")
-        assert response.ok
+        assert response.status_code in (200, 201)
         assert response.json()["dimensions"] == [
             {
                 "is_primary_key": False,
                 "name": "default.us_users.age",
                 "node_display_name": "Default: Us Users",
                 "node_name": "default.us_users",
-                "path": ["default.messages.user_id"],
+                "path": ["default.messages"],
                 "type": "int",
             },
             {
@@ -1059,7 +1059,7 @@ class TestNodeCRUD:  # pylint: disable=too-many-public-methods
                 "name": "default.us_users.country",
                 "node_display_name": "Default: Us Users",
                 "node_name": "default.us_users",
-                "path": ["default.messages.user_id"],
+                "path": ["default.messages"],
                 "type": "string",
             },
             {
@@ -1067,7 +1067,7 @@ class TestNodeCRUD:  # pylint: disable=too-many-public-methods
                 "name": "default.us_users.created_at",
                 "node_display_name": "Default: Us Users",
                 "node_name": "default.us_users",
-                "path": ["default.messages.user_id"],
+                "path": ["default.messages"],
                 "type": "timestamp",
             },
             {
@@ -1075,7 +1075,7 @@ class TestNodeCRUD:  # pylint: disable=too-many-public-methods
                 "name": "default.us_users.full_name",
                 "node_display_name": "Default: Us Users",
                 "node_name": "default.us_users",
-                "path": ["default.messages.user_id"],
+                "path": ["default.messages"],
                 "type": "string",
             },
             {
@@ -1083,7 +1083,7 @@ class TestNodeCRUD:  # pylint: disable=too-many-public-methods
                 "name": "default.us_users.gender",
                 "node_display_name": "Default: Us Users",
                 "node_name": "default.us_users",
-                "path": ["default.messages.user_id"],
+                "path": ["default.messages"],
                 "type": "string",
             },
             {
@@ -1091,7 +1091,7 @@ class TestNodeCRUD:  # pylint: disable=too-many-public-methods
                 "name": "default.us_users.id",
                 "node_display_name": "Default: Us Users",
                 "node_name": "default.us_users",
-                "path": ["default.messages.user_id"],
+                "path": ["default.messages"],
                 "type": "int",
             },
             {
@@ -1099,7 +1099,7 @@ class TestNodeCRUD:  # pylint: disable=too-many-public-methods
                 "name": "default.us_users.post_processing_timestamp",
                 "node_display_name": "Default: Us Users",
                 "node_name": "default.us_users",
-                "path": ["default.messages.user_id"],
+                "path": ["default.messages"],
                 "type": "timestamp",
             },
             {
@@ -1107,7 +1107,7 @@ class TestNodeCRUD:  # pylint: disable=too-many-public-methods
                 "name": "default.us_users.preferred_language",
                 "node_display_name": "Default: Us Users",
                 "node_name": "default.us_users",
-                "path": ["default.messages.user_id"],
+                "path": ["default.messages"],
                 "type": "string",
             },
             {
@@ -1115,7 +1115,7 @@ class TestNodeCRUD:  # pylint: disable=too-many-public-methods
                 "name": "default.us_users.secret_number",
                 "node_display_name": "Default: Us Users",
                 "node_name": "default.us_users",
-                "path": ["default.messages.user_id"],
+                "path": ["default.messages"],
                 "type": "float",
             },
         ]
@@ -1131,9 +1131,9 @@ class TestNodeCRUD:  # pylint: disable=too-many-public-methods
         Test raising when restoring an already active node
         """
         response = client.post("/catalogs/", json={"name": "warehouse"})
-        assert response.ok
+        assert response.status_code in (200, 201)
         response = client.post("/namespaces/default/")
-        assert response.ok
+        assert response.status_code in (200, 201)
         response = client.post(
             "/nodes/source/",
             json={
@@ -1156,9 +1156,9 @@ class TestNodeCRUD:  # pylint: disable=too-many-public-methods
                 "table": "users",
             },
         )
-        assert response.ok
+        assert response.status_code in (200, 201)
         response = client.post("/nodes/default.users/restore/")
-        assert not response.ok
+        assert response.status_code == 400
         assert response.json() == {
             "message": "Cannot restore `default.users`, node already active.",
             "errors": [],
@@ -1182,19 +1182,25 @@ class TestNodeCRUD:  # pylint: disable=too-many-public-methods
 
         # Hard delete the node
         response = client_with_roads.delete(f"/nodes/{node_name}/hard/")
-        assert response.ok
+        assert response.status_code in (200, 201)
 
         # Check that all revisions (and their relations) for the node have been deleted
-        nodes = session.exec(select(Node).where(Node.name == node_name)).unique().all()
+        nodes = (
+            session.execute(select(Node).where(Node.name == node_name))
+            .unique()
+            .scalars()
+            .all()
+        )
         revisions = (
-            session.exec(
+            session.execute(
                 select(NodeRevision).where(NodeRevision.name == node_name),
             )
             .unique()
+            .scalars()
             .all()
         )
         relations = (
-            session.exec(
+            session.execute(
                 select(NodeRelationship).where(
                     NodeRelationship.child_id.in_(  # type: ignore  # pylint: disable=no-member
                         [rev.id for rev in revisions],
@@ -1202,6 +1208,7 @@ class TestNodeCRUD:  # pylint: disable=too-many-public-methods
                 ),
             )
             .unique()
+            .scalars()
             .all()
         )
         assert nodes == []
@@ -1210,12 +1217,13 @@ class TestNodeCRUD:  # pylint: disable=too-many-public-methods
 
         # Check that upstreams and downstreams of the node still remain
         upstreams = (
-            session.exec(
+            session.execute(
                 select(Node).where(
                     Node.name.in_(upstream_names),  # type: ignore  # pylint: disable=no-member
                 ),
             )
             .unique()
+            .scalars()
             .all()
         )
         assert len(upstreams) == len(upstream_names)
@@ -1261,17 +1269,21 @@ class TestNodeCRUD:  # pylint: disable=too-many-public-methods
 
         # Check that all nodes under the `default` namespace and their revisions have been deleted
         nodes = (
-            session.exec(select(Node).where(Node.namespace == "default")).unique().all()
+            session.execute(select(Node).where(Node.namespace == "default"))
+            .unique()
+            .scalars()
+            .all()
         )
         assert len(nodes) == 0
 
         revisions = (
-            session.exec(
+            session.execute(
                 select(NodeRevision).where(
                     NodeRevision.name.like("default%"),  # type: ignore # pylint: disable=no-member
                 ),
             )
             .unique()
+            .scalars()
             .all()
         )
         assert len(revisions) == 0
@@ -1285,7 +1297,7 @@ class TestNodeCRUD:  # pylint: disable=too-many-public-methods
         """
         # Hard deleting a node causes downstream nodes to become invalid
         response = client_with_roads.delete("/nodes/default.repair_orders/hard/")
-        assert response.ok
+        assert response.status_code in (200, 201)
         data = response.json()
         data["impact"] = sorted(data["impact"], key=lambda x: x["name"])
         assert data == {
@@ -1351,7 +1363,7 @@ class TestNodeCRUD:  # pylint: disable=too-many-public-methods
 
         # Hard deleting a dimension creates broken links
         response = client_with_roads.delete("/nodes/default.repair_order/hard/")
-        assert response.ok
+        assert response.status_code in (200, 201)
         assert response.json() == {
             "impact": [
                 {
@@ -1422,7 +1434,7 @@ class TestNodeCRUD:  # pylint: disable=too-many-public-methods
         response = client_with_roads.delete(
             "/nodes/default.regional_repair_efficiency/hard/",
         )
-        assert response.ok
+        assert response.status_code in (200, 201)
         assert response.json() == {
             "message": "The node `default.regional_repair_efficiency` has been completely removed.",
             "impact": [],
@@ -1432,7 +1444,7 @@ class TestNodeCRUD:  # pylint: disable=too-many-public-methods
         response = client_with_roads.delete(
             "/nodes/default.avg_repair_order_discounts/hard/",
         )
-        assert response.ok
+        assert response.status_code in (200, 201)
         assert response.json() == {
             "message": "The node `default.avg_repair_order_discounts` has been completely removed.",
             "impact": [],
@@ -1529,7 +1541,7 @@ class TestNodeCRUD:  # pylint: disable=too-many-public-methods
         new_columns = [
             {
                 "attributes": [],
-                "dimension": {"name": "default.repair_order"},
+                "dimension": None,
                 "display_name": "Repair Order Id",
                 "name": "repair_order_id",
                 "type": "int",
@@ -1612,6 +1624,90 @@ class TestNodeCRUD:  # pylint: disable=too-many-public-methods
         assert data_second["version"] == "v2.0"
         assert data_second["node_revision_id"] == data["node_revision_id"]
         assert data_second["columns"] == new_columns
+
+    def test_refresh_source_node_with_problems(
+        self,
+        client_with_query_service_example_loader,
+        query_service_client: QueryServiceClient,
+        mocker: MockerFixture,
+    ):
+        """
+        Refresh a source node with a query service and find that no columns are returned.
+        """
+        custom_client = client_with_query_service_example_loader(["ROADS"])
+        response = custom_client.post(
+            "/nodes/default.repair_orders/refresh/",
+        )
+        data = response.json()
+
+        the_good_columns = query_service_client.get_columns_for_table(
+            "default",
+            "roads",
+            "repair_orders",
+        )
+
+        # Columns have changed, so the new node revision should be bumped to a new version
+        assert data["version"] == "v2.0"
+        assert len(data["columns"]) == 8
+        assert response.status_code == 201
+        assert data["status"] == "valid"
+        assert data["missing_table"] is False
+
+        response = custom_client.get("/history?node=default.repair_orders")
+        history = response.json()
+        assert [
+            (activity["activity_type"], activity["entity_type"]) for activity in history
+        ] == [("create", "node"), ("create", "link"), ("refresh", "node")]
+
+        # Refresh it again, but this time no columns are found
+        mocker.patch.object(
+            query_service_client,
+            "get_columns_for_table",
+            lambda *args: [],
+        )
+        response = custom_client.post(
+            "/nodes/default.repair_orders/refresh/",
+        )
+        data_second = response.json()
+        assert data_second["version"] == "v3.0"
+        assert data_second["node_revision_id"] != data["node_revision_id"]
+        assert len(data_second["columns"]) == 8
+        assert data_second["status"] == "valid"
+        assert data_second["missing_table"] is True
+
+        # Refresh it again, but this time the table is missing
+        mocker.patch.object(
+            query_service_client,
+            "get_columns_for_table",
+            lambda *args: (_ for _ in ()).throw(
+                DJDoesNotExistException(message="Table not found: foo.bar.baz"),
+            ),
+        )
+        response = custom_client.post(
+            "/nodes/default.repair_orders/refresh/",
+        )
+        data_third = response.json()
+        assert data_third["version"] == "v4.0"
+        assert data_third["node_revision_id"] != data_second["node_revision_id"]
+        assert len(data_third["columns"]) == 8
+        assert data_third["status"] == "valid"
+        assert data_third["missing_table"] is True
+
+        # Refresh it again, back to normal state
+        mocker.patch.object(
+            query_service_client,
+            "get_columns_for_table",
+            lambda *args: the_good_columns,
+        )
+        response = custom_client.post(
+            "/nodes/default.repair_orders/refresh/",
+        )
+        data_fourth = response.json()
+        assert data_fourth["version"] == "v5.0"
+        assert data_fourth["node_revision_id"] != data_second["node_revision_id"]
+        assert len(data_fourth["columns"]) == 8
+        assert data_fourth["status"] == "valid"
+        assert data_fourth["missing_table"] is False
 
     def test_create_update_source_node(
         self,
@@ -1769,7 +1865,7 @@ class TestNodeCRUD:  # pylint: disable=too-many-public-methods
                 "mode": "published",
             },
         )
-        assert not response.ok
+        assert response.status_code >= 400
         assert response.json() == {
             "detail": [
                 {
@@ -1792,7 +1888,7 @@ class TestNodeCRUD:  # pylint: disable=too-many-public-methods
 
     def test_create_invalid_transform_node(
         self,
-        database: Database,  # pylint: disable=unused-argument
+        catalog: Catalog,  # pylint: disable=unused-argument
         source_node: Node,  # pylint: disable=unused-argument
         client: TestClient,
         create_invalid_transform_node_payload: Dict[str, Any],
@@ -1866,7 +1962,7 @@ class TestNodeCRUD:  # pylint: disable=too-many-public-methods
 
     def test_create_update_transform_node(
         self,
-        database: Database,  # pylint: disable=unused-argument
+        catalog: Catalog,  # pylint: disable=unused-argument
         source_node: Node,  # pylint: disable=unused-argument
         client: TestClient,
         create_transform_node_payload: Dict[str, Any],
@@ -2107,22 +2203,29 @@ class TestNodeCRUD:  # pylint: disable=too-many-public-methods
         }
 
         response = client_with_roads.get("/nodes/default.total_repair_cost")
-        assert response.json()["version"] == "v1.1"
+        assert response.json()["version"] == "v2.0"
 
         response = client_with_roads.patch(
             "/nodes/default.total_repair_cost/",
-            json={"query": "SELECT count(price) FROM default.repair_order_details"},
+            json={
+                "query": "SELECT count(price) FROM default.repair_order_details",
+                "required_dimensions": ["repair_order_id"],
+            },
         )
         node_data = response.json()
         assert node_data["query"] == (
             "SELECT count(price) FROM default.repair_order_details"
         )
         response = client_with_roads.get("/nodes/default.total_repair_cost")
-        assert response.json()["version"] == "v2.0"
+        data = response.json()
+        assert data["version"] == "v3.0"
+        response = client_with_roads.get("/metrics/default.total_repair_cost")
+        data = response.json()
+        assert data["required_dimensions"] == ["repair_order_id"]
 
     def test_create_dimension_node_fails(
         self,
-        database: Database,  # pylint: disable=unused-argument
+        catalog: Catalog,  # pylint: disable=unused-argument
         source_node: Node,  # pylint: disable=unused-argument
         client: TestClient,
     ):
@@ -2163,7 +2266,7 @@ class TestNodeCRUD:  # pylint: disable=too-many-public-methods
 
     def test_create_update_dimension_node(
         self,
-        database: Database,  # pylint: disable=unused-argument
+        catalog: Catalog,  # pylint: disable=unused-argument
         source_node: Node,  # pylint: disable=unused-argument
         client: TestClient,
         create_dimension_node_payload: Dict[str, Any],
@@ -2282,14 +2385,6 @@ class TestNodeCRUD:  # pylint: disable=too-many-public-methods
         data = response.json()
         assert data["columns"] == [
             {
-                "attributes": [],
-                "dimension": None,
-                "display_name": "Sum Age",
-                "name": "sum_age",
-                "type": "bigint",
-                "partition": None,
-            },
-            {
                 "attributes": [
                     {"attribute_type": {"name": "primary_key", "namespace": "system"}},
                 ],
@@ -2297,6 +2392,14 @@ class TestNodeCRUD:  # pylint: disable=too-many-public-methods
                 "display_name": "Country",
                 "name": "country",
                 "type": "string",
+                "partition": None,
+            },
+            {
+                "attributes": [],
+                "dimension": None,
+                "display_name": "Sum Age",
+                "name": "sum_age",
+                "type": "bigint",
                 "partition": None,
             },
             {
@@ -2333,7 +2436,7 @@ class TestNodeCRUD:  # pylint: disable=too-many-public-methods
 
     def test_updating_node_to_invalid_draft(
         self,
-        database: Database,  # pylint: disable=unused-argument
+        catalog: Catalog,  # pylint: disable=unused-argument
         source_node: Node,  # pylint: disable=unused-argument
         client: TestClient,
         create_dimension_node_payload: Dict[str, Any],
@@ -2438,7 +2541,7 @@ class TestNodeCRUD:  # pylint: disable=too-many-public-methods
         data = response.json()
         assert data["message"] == (
             "Materialization job type `SOMETHING` not found. Available job "
-            "types: ['SPARK_SQL', 'DRUID_CUBE']"
+            "types: ['SPARK_SQL', 'DRUID_MEASURES_CUBE', 'DRUID_METRICS_CUBE']"
         )
 
     def test_node_with_struct(self, client_with_roads: TestClient):
@@ -2768,7 +2871,7 @@ m0_default_DOT_num_repair_orders_partitioned AS (SELECT  default_DOT_hard_hat.la
         default_DOT_repair_orders.required_date
  FROM roads.repair_orders AS default_DOT_repair_orders
  WHERE  date_format(default_DOT_repair_orders.order_date, 'yyyyMMdd') = FORMATTED)
- AS default_DOT_repair_orders_partitioned LEFT OUTER JOIN
+ AS default_DOT_repair_orders_partitioned LEFT JOIN
  (SELECT  default_DOT_hard_hats.hard_hat_id,
         default_DOT_hard_hats.last_name,
         default_DOT_hard_hats.state
@@ -2931,622 +3034,6 @@ SELECT  m0_default_DOT_num_repair_orders_partitioned.default_DOT_num_repair_orde
             },
         ]
 
-    def test_add_materialization_success(
-        self,
-        client_with_query_service: TestClient,
-        query_service_client: QueryServiceClient,
-    ):
-        """
-        Verifies success cases of adding materialization config.
-        """
-        # Create the engine and check the existing transform node
-        client_with_query_service.post(
-            "/engines/",
-            json={
-                "name": "spark",
-                "version": "2.4.4",
-                "dialect": "spark",
-            },
-        )
-
-        response = client_with_query_service.get("/nodes/basic.transform.country_agg/")
-        old_node_data = response.json()
-        assert old_node_data["version"] == "v1.0"
-        assert old_node_data["materializations"] == []
-
-        client_with_query_service.post(
-            "/nodes/basic.transform.country_agg/columns/"
-            "basic_DOT_transform_DOT_country_agg_DOT_country/partition",
-            json={
-                "type_": "categorical",
-                "expression": "",
-            },
-        )
-
-        # Setting the materialization config should succeed
-        response = client_with_query_service.post(
-            "/nodes/basic.transform.country_agg/materialization/",
-            json={
-                "job": "spark_sql",
-                "strategy": "full",
-                "config": {},
-                "schedule": "0 * * * *",
-            },
-        )
-        data = response.json()
-        assert (
-            data["message"] == "Successfully updated materialization config named "
-            "`spark_sql__full` for node `basic.transform.country_agg`"
-        )
-
-        # Check history of the node with materialization
-        response = client_with_query_service.get(
-            "/history?node=basic.transform.country_agg",
-        )
-        history = response.json()
-        assert [
-            (activity["activity_type"], activity["entity_type"]) for activity in history
-        ] == [("create", "node"), ("create", "materialization")]
-
-        # Setting it again should inform that it already exists
-        response = client_with_query_service.post(
-            "/nodes/basic.transform.country_agg/materialization/",
-            json={
-                "job": "spark_sql",
-                "strategy": "full",
-                "config": {},
-                "schedule": "0 * * * *",
-            },
-        )
-        assert response.json() == {
-            "info": {
-                "output_tables": ["common.a", "common.b"],
-                "urls": ["http://fake.url/job"],
-            },
-            "message": "The same materialization config with name "
-            "`spark_sql__full` already exists for node "
-            "`basic.transform.country_agg` so no update was performed.",
-        }
-
-        response = client_with_query_service.delete(
-            "/nodes/basic.transform.country_agg/materializations/"
-            "?materialization_name=spark_sql__full",
-        )
-        assert response.json() == {
-            "message": "The materialization named `spark_sql__full` on node "
-            "`basic.transform.country_agg` has been successfully deactivated",
-        }
-
-        # Setting it again should inform that it already exists but was reactivated
-        response = client_with_query_service.post(
-            "/nodes/basic.transform.country_agg/materialization/",
-            json={
-                "job": "spark_sql",
-                "strategy": "full",
-                "config": {},
-                "schedule": "0 * * * *",
-            },
-        )
-        assert response.json()["message"] == (
-            "The same materialization config with name `spark_sql__full` already "
-            "exists for node `basic.transform.country_agg` but was deactivated. It has "
-            "now been restored."
-        )
-        response = client_with_query_service.get(
-            "/history?node=basic.transform.country_agg",
-        )
-        assert [
-            (
-                activity["activity_type"],
-                activity["entity_type"],
-                activity["entity_name"],
-            )
-            for activity in response.json()
-        ] == [
-            ("create", "node", "basic.transform.country_agg"),
-            ("create", "materialization", "spark_sql__full"),
-            ("delete", "materialization", "spark_sql__full"),
-            ("restore", "materialization", "spark_sql__full"),
-        ]
-
-        # Setting the materialization config without partitions should succeed
-        response = client_with_query_service.post(
-            "/nodes/basic.transform.country_agg/materialization/",
-            json={
-                "job": "spark_sql",
-                "strategy": "full",
-                "config": {},
-                "schedule": "0 * * * *",
-            },
-        )
-        data = response.json()
-        assert (
-            data["message"]
-            == "The same materialization config with name `spark_sql__full` already "
-            "exists for node `basic.transform.country_agg` so no update was performed."
-        )
-
-        # Reading the node should yield the materialization config
-        response = client_with_query_service.get("/nodes/basic.transform.country_agg/")
-        data = response.json()
-        assert data["version"] == "v1.0"
-        materialization_compare(
-            data["materializations"],
-            [
-                {
-                    "backfills": [],
-                    "name": "spark_sql__full",
-                    "strategy": "full",
-                    "config": {
-                        "columns": [
-                            {
-                                "column": None,
-                                "name": "country",
-                                "node": None,
-                                "type": "string",
-                                "semantic_type": None,
-                                "semantic_entity": None,
-                            },
-                            {
-                                "column": None,
-                                "name": "num_users",
-                                "node": None,
-                                "type": "bigint",
-                                "semantic_type": None,
-                                "semantic_entity": None,
-                            },
-                        ],
-                        "query": """SELECT  basic_DOT_transform_DOT_country_agg.country,
-    basic_DOT_transform_DOT_country_agg.num_users
- FROM (SELECT  basic_DOT_source_DOT_users.country,
-    COUNT( DISTINCT basic_DOT_source_DOT_users.id) AS num_users
- FROM basic.dim_users AS basic_DOT_source_DOT_users
- GROUP BY  1)
- AS basic_DOT_transform_DOT_country_agg""",
-                        "spark": {},
-                        "upstream_tables": ["public.basic.dim_users"],
-                        "lookback_window": None,
-                    },
-                    "schedule": "0 * * * *",
-                    "job": "SparkSqlMaterializationJob",
-                },
-                {
-                    "backfills": [],
-                    "config": {
-                        "columns": [
-                            {
-                                "column": None,
-                                "name": "country",
-                                "node": None,
-                                "type": "string",
-                                "semantic_type": None,
-                                "semantic_entity": None,
-                            },
-                            {
-                                "column": None,
-                                "name": "num_users",
-                                "node": None,
-                                "type": "bigint",
-                                "semantic_type": None,
-                                "semantic_entity": None,
-                            },
-                        ],
-                        "partitions": [],
-                        "query": """SELECT  basic_DOT_transform_DOT_country_agg.country,
-    basic_DOT_transform_DOT_country_agg.num_users
- FROM (SELECT  basic_DOT_source_DOT_users.country,
-    COUNT( DISTINCT basic_DOT_source_DOT_users.id) AS num_users
- FROM basic.dim_users AS basic_DOT_source_DOT_users
- GROUP BY  1)
- AS basic_DOT_transform_DOT_country_agg""",
-                        "spark": {},
-                        "upstream_tables": ["public.basic.dim_users"],
-                    },
-                    "strategy": "full",
-                    "job": "SparkSqlMaterializationJob",
-                    "name": "default",
-                    "schedule": "0 * * * *",
-                },
-            ],
-        )
-
-        # Set both temporal and categorical partitions on node
-        response = client_with_query_service.post(
-            "/nodes/default.hard_hat/columns/birth_date/partition",
-            json={
-                "type_": "temporal",
-                "granularity": "day",
-                "format": "yyyyMMdd",
-            },
-        )
-        # assert response.json() == {}
-
-        client_with_query_service.post(
-            "/nodes/default.hard_hat/columns/contractor_id/partition",
-            json={
-                "type_": "categorical",
-            },
-        )
-
-        client_with_query_service.post(
-            "/nodes/default.hard_hat/columns/country/partition",
-            json={
-                "type_": "categorical",
-            },
-        )
-
-        # Setting the materialization config should succeed and it should reschedule
-        # the materialization with the temporal partition
-        response = client_with_query_service.post(
-            "/nodes/default.hard_hat/materialization/",
-            json={
-                "job": "spark_sql",
-                "strategy": "full",
-                "config": {},
-                "schedule": "0 * * * *",
-            },
-        )
-        data = response.json()
-        assert (
-            data["message"] == "Successfully updated materialization config named "
-            "`spark_sql__full__birth_date` for node `default.hard_hat`"
-        )
-        expected_query = (
-            "SELECT hard_hat_id, last_name, first_name, title, birth_date, hire_date, "
-            "address, city, state, postal_code, country, manager, contractor_id FROM "
-            "(SELECT default_DOT_hard_hats.hard_hat_id, default_DOT_hard_hats.last_name, "
-            "default_DOT_hard_hats.first_name, default_DOT_hard_hats.title, "
-            "default_DOT_hard_hats.birth_date, default_DOT_hard_hats.hire_date, "
-            "default_DOT_hard_hats.address, default_DOT_hard_hats.city, "
-            "default_DOT_hard_hats.state, default_DOT_hard_hats.postal_code, "
-            "default_DOT_hard_hats.country, default_DOT_hard_hats.manager, "
-            "default_DOT_hard_hats.contractor_id FROM roads.hard_hats AS "
-            "default_DOT_hard_hats ) AS default_DOT_hard_hat WHERE birth_date = "
-            "CAST(DATE_FORMAT(CAST(${dj_logical_timestamp} AS TIMESTAMP), 'yyyyMMdd') AS "
-            "TIMESTAMP)"
-        )
-        args, _ = query_service_client.materialize.call_args_list[1]  # type: ignore
-        assert (
-            re.compile(r"\s+").sub(" ", args[0].query).strip()
-            == re.compile(r"\s+").sub(" ", expected_query).strip()
-        )
-
-        # Check that the temporal partition is appended onto the list of partitions in the
-        # materialization config but is not included directly in the materialization query
-        response = client_with_query_service.get("/nodes/default.hard_hat/")
-        data = response.json()
-        assert data["version"] == "v1.0"
-        materialization_compare(
-            data["materializations"],
-            [
-                {
-                    "backfills": [],
-                    "name": "spark_sql__full__birth_date",
-                    "strategy": "full",
-                    "config": {
-                        "columns": [
-                            {
-                                "name": "hard_hat_id",
-                                "type": "int",
-                                "column": None,
-                                "node": None,
-                                "semantic_type": None,
-                                "semantic_entity": None,
-                            },
-                            {
-                                "name": "last_name",
-                                "type": "string",
-                                "column": None,
-                                "node": None,
-                                "semantic_type": None,
-                                "semantic_entity": None,
-                            },
-                            {
-                                "name": "first_name",
-                                "type": "string",
-                                "column": None,
-                                "node": None,
-                                "semantic_type": None,
-                                "semantic_entity": None,
-                            },
-                            {
-                                "name": "title",
-                                "type": "string",
-                                "column": None,
-                                "node": None,
-                                "semantic_type": None,
-                                "semantic_entity": None,
-                            },
-                            {
-                                "name": "birth_date",
-                                "type": "timestamp",
-                                "column": None,
-                                "node": None,
-                                "semantic_type": None,
-                                "semantic_entity": None,
-                            },
-                            {
-                                "name": "hire_date",
-                                "type": "timestamp",
-                                "column": None,
-                                "node": None,
-                                "semantic_type": None,
-                                "semantic_entity": None,
-                            },
-                            {
-                                "name": "address",
-                                "type": "string",
-                                "column": None,
-                                "node": None,
-                                "semantic_type": None,
-                                "semantic_entity": None,
-                            },
-                            {
-                                "name": "city",
-                                "type": "string",
-                                "column": None,
-                                "node": None,
-                                "semantic_type": None,
-                                "semantic_entity": None,
-                            },
-                            {
-                                "name": "state",
-                                "type": "string",
-                                "column": None,
-                                "node": None,
-                                "semantic_type": None,
-                                "semantic_entity": None,
-                            },
-                            {
-                                "name": "postal_code",
-                                "type": "string",
-                                "column": None,
-                                "node": None,
-                                "semantic_type": None,
-                                "semantic_entity": None,
-                            },
-                            {
-                                "name": "country",
-                                "type": "string",
-                                "column": None,
-                                "node": None,
-                                "semantic_type": None,
-                                "semantic_entity": None,
-                            },
-                            {
-                                "name": "manager",
-                                "type": "int",
-                                "column": None,
-                                "node": None,
-                                "semantic_type": None,
-                                "semantic_entity": None,
-                            },
-                            {
-                                "name": "contractor_id",
-                                "type": "int",
-                                "column": None,
-                                "node": None,
-                                "semantic_type": None,
-                                "semantic_entity": None,
-                            },
-                        ],
-                        "query": """SELECT  default_DOT_hard_hat.hard_hat_id,
-    default_DOT_hard_hat.last_name,
-    default_DOT_hard_hat.first_name,
-    default_DOT_hard_hat.title,
-    default_DOT_hard_hat.birth_date,
-    default_DOT_hard_hat.hire_date,
-    default_DOT_hard_hat.address,
-    default_DOT_hard_hat.city,
-    default_DOT_hard_hat.state,
-    default_DOT_hard_hat.postal_code,
-    default_DOT_hard_hat.country,
-    default_DOT_hard_hat.manager,
-    default_DOT_hard_hat.contractor_id
- FROM (SELECT  default_DOT_hard_hats.hard_hat_id,
-    default_DOT_hard_hats.last_name,
-    default_DOT_hard_hats.first_name,
-    default_DOT_hard_hats.title,
-    default_DOT_hard_hats.birth_date,
-    default_DOT_hard_hats.hire_date,
-    default_DOT_hard_hats.address,
-    default_DOT_hard_hats.city,
-    default_DOT_hard_hats.state,
-    default_DOT_hard_hats.postal_code,
-    default_DOT_hard_hats.country,
-    default_DOT_hard_hats.manager,
-    default_DOT_hard_hats.contractor_id
- FROM roads.hard_hats AS default_DOT_hard_hats)
- AS default_DOT_hard_hat""",
-                        "spark": {},
-                        "lookback_window": None,
-                        "upstream_tables": ["default.roads.hard_hats"],
-                    },
-                    "schedule": "0 * * * *",
-                    "job": "SparkSqlMaterializationJob",
-                },
-            ],
-        )
-
-        # Check listing materializations of the node
-        response = client_with_query_service.get(
-            "/nodes/default.hard_hat/materializations/",
-        )
-        materialization_compare(
-            response.json(),
-            [
-                {
-                    "backfills": [],
-                    "config": {
-                        "columns": [
-                            {
-                                "name": "hard_hat_id",
-                                "type": "int",
-                                "column": None,
-                                "node": None,
-                                "semantic_type": None,
-                                "semantic_entity": None,
-                            },
-                            {
-                                "name": "last_name",
-                                "type": "string",
-                                "column": None,
-                                "node": None,
-                                "semantic_type": None,
-                                "semantic_entity": None,
-                            },
-                            {
-                                "name": "first_name",
-                                "type": "string",
-                                "column": None,
-                                "node": None,
-                                "semantic_type": None,
-                                "semantic_entity": None,
-                            },
-                            {
-                                "name": "title",
-                                "type": "string",
-                                "column": None,
-                                "node": None,
-                                "semantic_type": None,
-                                "semantic_entity": None,
-                            },
-                            {
-                                "name": "birth_date",
-                                "type": "timestamp",
-                                "column": None,
-                                "node": None,
-                                "semantic_type": None,
-                                "semantic_entity": None,
-                            },
-                            {
-                                "name": "hire_date",
-                                "type": "timestamp",
-                                "column": None,
-                                "node": None,
-                                "semantic_type": None,
-                                "semantic_entity": None,
-                            },
-                            {
-                                "name": "address",
-                                "type": "string",
-                                "column": None,
-                                "node": None,
-                                "semantic_type": None,
-                                "semantic_entity": None,
-                            },
-                            {
-                                "name": "city",
-                                "type": "string",
-                                "column": None,
-                                "node": None,
-                                "semantic_type": None,
-                                "semantic_entity": None,
-                            },
-                            {
-                                "name": "state",
-                                "type": "string",
-                                "column": None,
-                                "node": None,
-                                "semantic_type": None,
-                                "semantic_entity": None,
-                            },
-                            {
-                                "name": "postal_code",
-                                "type": "string",
-                                "column": None,
-                                "node": None,
-                                "semantic_type": None,
-                                "semantic_entity": None,
-                            },
-                            {
-                                "name": "country",
-                                "type": "string",
-                                "column": None,
-                                "node": None,
-                                "semantic_type": None,
-                                "semantic_entity": None,
-                            },
-                            {
-                                "name": "manager",
-                                "type": "int",
-                                "column": None,
-                                "node": None,
-                                "semantic_type": None,
-                                "semantic_entity": None,
-                            },
-                            {
-                                "name": "contractor_id",
-                                "type": "int",
-                                "column": None,
-                                "node": None,
-                                "semantic_type": None,
-                                "semantic_entity": None,
-                            },
-                        ],
-                        "query": """SELECT  default_DOT_hard_hat.hard_hat_id,
-    default_DOT_hard_hat.last_name,
-    default_DOT_hard_hat.first_name,
-    default_DOT_hard_hat.title,
-    default_DOT_hard_hat.birth_date,
-    default_DOT_hard_hat.hire_date,
-    default_DOT_hard_hat.address,
-    default_DOT_hard_hat.city,
-    default_DOT_hard_hat.state,
-    default_DOT_hard_hat.postal_code,
-    default_DOT_hard_hat.country,
-    default_DOT_hard_hat.manager,
-    default_DOT_hard_hat.contractor_id
- FROM (SELECT  default_DOT_hard_hats.hard_hat_id,
-    default_DOT_hard_hats.last_name,
-    default_DOT_hard_hats.first_name,
-    default_DOT_hard_hats.title,
-    default_DOT_hard_hats.birth_date,
-    default_DOT_hard_hats.hire_date,
-    default_DOT_hard_hats.address,
-    default_DOT_hard_hats.city,
-    default_DOT_hard_hats.state,
-    default_DOT_hard_hats.postal_code,
-    default_DOT_hard_hats.country,
-    default_DOT_hard_hats.manager,
-    default_DOT_hard_hats.contractor_id
- FROM roads.hard_hats AS default_DOT_hard_hats)
- AS default_DOT_hard_hat""",
-                        "spark": {},
-                        "lookback_window": None,
-                        "upstream_tables": ["default.roads.hard_hats"],
-                    },
-                    "strategy": "full",
-                    "job": "SparkSqlMaterializationJob",
-                    "name": "spark_sql__full__birth_date",
-                    "output_tables": ["common.a", "common.b"],
-                    "schedule": "0 * * * *",
-                    "urls": ["http://fake.url/job"],
-                },
-            ],
-        )
-
-        # Kick off backfill for this materialization
-        response = client_with_query_service.post(
-            "/nodes/default.hard_hat/materializations/spark_sql__full__birth_date/backfill",
-            json={
-                "column_name": "birth_date",
-                "range": ["20230101", "20230201"],
-            },
-        )
-        assert query_service_client.run_backfill.call_args_list == [  # type: ignore
-            call(
-                "default.hard_hat",
-                "spark_sql__full__birth_date",
-                PartitionBackfill(
-                    column_name="birth_date",
-                    values=None,
-                    range=["20230101", "20230201"],
-                ),
-            ),
-        ]
-        assert response.json() == {"output_tables": [], "urls": ["http://fake.url/job"]}
-
     def test_update_column_display_name(self, client_with_roads: TestClient):
         """
         Test that updating a column display name works.
@@ -3614,30 +3101,21 @@ class TestNodeColumnsAttributes:
         }
 
     @pytest.fixture
-    def database(self, session: Session) -> Database:
+    def catalog(self, session: Session) -> Catalog:
         """
-        A database fixture.
+        A catalog fixture.
         """
 
-        database = Database(name="postgres", URI="postgres://")
-        session.add(database)
+        catalog = Catalog(name="postgres", uuid=uuid4())
+        session.add(catalog)
         session.commit()
-        return database
+        return catalog
 
     @pytest.fixture
-    def source_node(self, session: Session, database: Database) -> Node:
+    def source_node(self, session: Session) -> Node:
         """
         A source node fixture.
         """
-
-        table = Table(
-            database=database,
-            table="A",
-            columns=[
-                Column(name="ds", type=StringType()),
-                Column(name="user_id", type=IntegerType()),
-            ],
-        )
         node = Node(
             name="basic.source.users",
             type=NodeType.SOURCE,
@@ -3648,7 +3126,6 @@ class TestNodeColumnsAttributes:
             name=node.name,
             type=node.type,
             version="1",
-            tables=[table],
             columns=[
                 Column(name="id", type=IntegerType()),
                 Column(name="created_at", type=TimestampType()),
@@ -3727,34 +3204,6 @@ class TestNodeColumnsAttributes:
             },
         ]
 
-        response = client_with_basic.post(
-            "/nodes/basic.dimension.users/columns/created_at/attributes/",
-            json=[
-                {
-                    "namespace": "system",
-                    "name": "effective_time",
-                },
-            ],
-        )
-        data = response.json()
-        assert data == [
-            {
-                "name": "created_at",
-                "type": "timestamp",
-                "display_name": "Created At",
-                "attributes": [
-                    {
-                        "attribute_type": {
-                            "name": "effective_time",
-                            "namespace": "system",
-                        },
-                    },
-                ],
-                "dimension": None,
-                "partition": None,
-            },
-        ]
-
         # Remove primary key attribute from column
         response = client_with_basic.post(
             "/nodes/basic.source.comments/columns/id/attributes",
@@ -3777,11 +3226,11 @@ class TestNodeColumnsAttributes:
         Test setting column attributes with different failure modes.
         """
         response = client_with_basic.post(
-            "/nodes/basic.source.comments/columns/event_timestamp/attributes/",
+            "/nodes/basic.dimension.users/columns/created_at/attributes/",
             json=[
                 {
-                    "name": "effective_time",
                     "namespace": "system",
+                    "name": "dimension",
                 },
             ],
         )
@@ -3789,7 +3238,7 @@ class TestNodeColumnsAttributes:
         assert response.status_code == 500
         assert (
             data["message"]
-            == "Attribute type `system.effective_time` not allowed on node type `source`!"
+            == "Attribute type `system.dimension` not allowed on node type `dimension`!"
         )
 
         client_with_basic.get(
@@ -3851,10 +3300,25 @@ class TestNodeColumnsAttributes:
             },
         ]
 
+        response = client_with_basic.post(
+            "/attributes/",
+            json={
+                "namespace": "example",
+                "name": "event_time",
+                "description": "Points to a column which represents the time of the event in a "
+                "given fact related node. Used to facilitate proper joins with dimension node "
+                "to match the desired effect.",
+                "allowed_node_types": ["source", "transform"],
+                "uniqueness_scope": ["node", "column_type"],
+            },
+        )
+        data = response.json()
+
         client_with_basic.post(
             "/nodes/basic.source.comments/columns/event_timestamp/attributes/",
             json=[
                 {
+                    "namespace": "example",
                     "name": "event_time",
                 },
             ],
@@ -3864,6 +3328,7 @@ class TestNodeColumnsAttributes:
             "/nodes/basic.source.comments/columns/post_processing_timestamp/attributes/",
             json=[
                 {
+                    "namespace": "example",
                     "name": "event_time",
                 },
             ],
@@ -3973,14 +3438,12 @@ class TestValidateNodes:  # pylint: disable=too-many-public-methods
         assert len(data) == 6
         assert data["columns"] == [
             {
-                "dimension_column": None,
-                "dimension_id": None,
-                "id": None,
-                "name": "payment_id",
-                "type": "int",
+                "attributes": [],
+                "dimension": None,
                 "display_name": "Payment Id",
-                "measure_id": None,
-                "partition_id": None,
+                "name": "payment_id",
+                "partition": None,
+                "type": "int",
             },
         ]
         assert data["status"] == "valid"
@@ -4079,14 +3542,12 @@ class TestValidateNodes:  # pylint: disable=too-many-public-methods
             "missing_parents": ["node_that_does_not_exist"],
             "columns": [
                 {
-                    "id": None,
-                    "name": "col0",
-                    "type": "int",
-                    "dimension_id": None,
+                    "attributes": [],
+                    "dimension": None,
                     "display_name": "Col0",
-                    "dimension_column": None,
-                    "measure_id": None,
-                    "partition_id": None,
+                    "name": "col0",
+                    "partition": None,
+                    "type": "int",
                 },
             ],
             "errors": [
@@ -4122,14 +3583,12 @@ class TestValidateNodes:  # pylint: disable=too-many-public-methods
         assert data["status"] == "invalid"
         assert data["columns"] == [
             {
-                "id": None,
-                "name": "col0",
-                "type": "int",
-                "dimension_id": None,
+                "attributes": [],
+                "dimension": None,
                 "display_name": "Col0",
-                "dimension_column": None,
-                "measure_id": None,
-                "partition_id": None,
+                "name": "col0",
+                "partition": None,
+                "type": "int",
             },
         ]
         assert data["missing_parents"] == ["node_that_does_not_exist"]
@@ -4198,14 +3657,14 @@ class TestValidateNodes:  # pylint: disable=too-many-public-methods
         assert data == {
             "message": (
                 "Dimension node default.payment_type has been successfully "
-                "linked to column payment_type on node default.revenue"
+                "linked to node default.revenue using column payment_type."
             ),
         }
         response = custom_client.get("/nodes/default.revenue")
         data = response.json()
         assert [
             col["dimension"]["name"] for col in data["columns"] if col["dimension"]
-        ] == ["default.payment_type"]
+        ] == []
 
         # Check that after deleting the dimension link, none of the columns have links
         response = custom_client.delete(
@@ -4214,8 +3673,8 @@ class TestValidateNodes:  # pylint: disable=too-many-public-methods
         data = response.json()
         assert data == {
             "message": (
-                "The dimension link on the node default.revenue's payment_type to "
-                "default.payment_type has been successfully removed."
+                "Dimension link default.payment_type to node default.revenue has "
+                "been removed."
             ),
         }
         response = custom_client.get("/nodes/default.revenue")
@@ -4232,10 +3691,9 @@ class TestValidateNodes:  # pylint: disable=too-many-public-methods
             "/nodes/default.revenue/columns/payment_type/?dimension=default.payment_type",
         )
         data = response.json()
-        assert response.status_code == 304
+        assert response.status_code == 404
         assert data == {
-            "message": "No change was made to payment_type on node default.revenue as the"
-            " specified dimension link to default.payment_type on None was not found.",
+            "message": "Dimension link to node default.payment_type not found",
         }
         # Check history again, no change
         response = custom_client.get("/history?node=default.revenue")
@@ -4274,7 +3732,7 @@ class TestValidateNodes:  # pylint: disable=too-many-public-methods
         )
         data = response.json()
         assert data["message"] == (
-            "Cannot add dimension to column, because catalogs do not match: default, public"
+            "Cannot link dimension to node, because catalogs do not match: default, public"
         )
 
     def test_update_node_with_dimension_links(self, client_with_roads: TestClient):
@@ -4328,7 +3786,7 @@ class TestValidateNodes:  # pylint: disable=too-many-public-methods
             },
             {
                 "attributes": [],
-                "dimension": {"name": "default.us_state"},
+                "dimension": None,
                 "display_name": "State",
                 "name": "state",
                 "type": "string",
@@ -4488,7 +3946,7 @@ class TestValidateNodes:  # pylint: disable=too-many-public-methods
                         "lineage": [
                             {
                                 "column_name": "repair_order_id",
-                                "display_name": "Default: Repair Orders",
+                                "display_name": "default.roads.repair_orders",
                                 "lineage": [],
                                 "node_name": "default.repair_orders",
                                 "node_type": "source",
@@ -4532,14 +3990,14 @@ class TestValidateNodes:  # pylint: disable=too-many-public-methods
                         "column_name": "repair_order_id",
                         "node_name": "default.repair_order_details",
                         "node_type": "source",
-                        "display_name": "Default: Repair Order Details",
+                        "display_name": "default.roads.repair_order_details",
                         "lineage": [],
                     },
                     {
                         "column_name": "discount",
                         "node_name": "default.repair_order_details",
                         "node_type": "source",
-                        "display_name": "Default: Repair Order Details",
+                        "display_name": "default.roads.repair_order_details",
                         "lineage": [],
                     },
                 ],
@@ -4550,6 +4008,25 @@ class TestValidateNodes:  # pylint: disable=too-many-public-methods
         """
         Test revalidating all example nodes and confirm that they are set to valid
         """
+        client_with_roads.post(
+            "/nodes/cube/",
+            json={
+                "metrics": [
+                    "default.num_repair_orders",
+                    "default.avg_repair_price",
+                    "default.total_repair_cost",
+                ],
+                "dimensions": [
+                    "default.hard_hat.hire_date",
+                    "default.hard_hat.state",
+                    "default.dispatcher.company_name",
+                ],
+                "filters": [],
+                "description": "Cube of various metrics related to repairs",
+                "mode": "published",
+                "name": "default.repairs_cube",
+            },
+        )
         for node in client_with_roads.get("/nodes/").json():
             status = client_with_roads.post(
                 f"/nodes/{node}/validate/",
@@ -4707,14 +4184,14 @@ class TestValidateNodes:  # pylint: disable=too-many-public-methods
                                 "column_name": "quantity",
                                 "node_name": "default.repair_order_details",
                                 "node_type": "source",
-                                "display_name": "Default: Repair Order Details",
+                                "display_name": "default.roads.repair_order_details",
                                 "lineage": [],
                             },
                             {
                                 "column_name": "price",
                                 "node_name": "default.repair_order_details",
                                 "node_type": "source",
-                                "display_name": "Default: Repair Order Details",
+                                "display_name": "default.roads.repair_order_details",
                                 "lineage": [],
                             },
                         ],
@@ -4729,14 +4206,14 @@ class TestValidateNodes:  # pylint: disable=too-many-public-methods
                                 "column_name": "quantity",
                                 "node_name": "default.repair_order_details",
                                 "node_type": "source",
-                                "display_name": "Default: Repair Order Details",
+                                "display_name": "default.roads.repair_order_details",
                                 "lineage": [],
                             },
                             {
                                 "column_name": "price",
                                 "node_name": "default.repair_order_details",
                                 "node_type": "source",
-                                "display_name": "Default: Repair Order Details",
+                                "display_name": "default.roads.repair_order_details",
                                 "lineage": [],
                             },
                         ],
@@ -4751,7 +4228,7 @@ class TestValidateNodes:  # pylint: disable=too-many-public-methods
                                 "column_name": "repair_order_id",
                                 "node_name": "default.repair_orders",
                                 "node_type": "source",
-                                "display_name": "Default: Repair Orders",
+                                "display_name": "default.roads.repair_orders",
                                 "lineage": [],
                             },
                         ],
@@ -4766,14 +4243,14 @@ class TestValidateNodes:  # pylint: disable=too-many-public-methods
                                 "column_name": "repair_order_id",
                                 "node_name": "default.repair_orders",
                                 "node_type": "source",
-                                "display_name": "Default: Repair Orders",
+                                "display_name": "default.roads.repair_orders",
                                 "lineage": [],
                             },
                             {
                                 "column_name": "dispatched_date",
                                 "node_name": "default.repair_orders",
                                 "node_type": "source",
-                                "display_name": "Default: Repair Orders",
+                                "display_name": "default.roads.repair_orders",
                                 "lineage": [],
                             },
                         ],
@@ -4957,7 +4434,7 @@ def test_resolving_downstream_status(client_with_service_setup: TestClient) -> N
         (metric3, NodeType.METRIC),
     ]:
         response = client_with_service_setup.post(
-            f"/nodes/{node_type.value}/",
+            f"/nodes/{node_type.value}/",  # pylint: disable=no-member
             json=node,
         )
         assert response.status_code == 201
@@ -5150,7 +4627,7 @@ def test_list_dimension_attributes(client_with_roads: TestClient) -> None:
     Test that listing dimension attributes for any node works.
     """
     response = client_with_roads.get("/nodes/default.regional_level_agg/dimensions/")
-    assert response.ok
+    assert response.status_code in (200, 201)
     assert response.json() == [
         {
             "is_primary_key": True,
@@ -5231,7 +4708,7 @@ def test_set_column_partition(client_with_roads: TestClient):
     )
     assert response.json() == {
         "attributes": [],
-        "dimension": {"name": "default.us_state"},
+        "dimension": None,
         "display_name": "State",
         "name": "state",
         "partition": {
@@ -5423,3 +4900,127 @@ ON s.state_region = r.us_region_id""",
         "delete",
         "restore",
     ]
+
+
+class TestCopyNode:
+    """Tests for the copy node API endpoint"""
+
+    @pytest.fixture
+    def repairs_cube_payload(self):
+        """Repairs cube creation payload"""
+        return {
+            "metrics": [
+                "default.num_repair_orders",
+                "default.avg_repair_price",
+                "default.total_repair_cost",
+            ],
+            "dimensions": [
+                "default.hard_hat.state",
+                "default.dispatcher.company_name",
+                "default.municipality_dim.local_region",
+            ],
+            "filters": ["default.hard_hat.state='AZ'"],
+            "description": "Cube of various metrics related to repairs",
+            "mode": "published",
+            "name": "default.repairs_cube",
+        }
+
+    @pytest.fixture
+    def metric_with_required_dim_payload(self):
+        """Metric with required dimension"""
+        return {
+            "description": "Average length of employment per manager",
+            "query": "SELECT avg(NOW() - hire_date) FROM default.hard_hats",
+            "mode": "published",
+            "name": "default.avg_length_of_employment_per_manager",
+            "required_dimensions": ["manager"],
+        }
+
+    def test_copy_node_failures(self, client_with_roads: TestClient):
+        """
+        Test reaching various failure states when copying nodes
+        """
+        response = client_with_roads.post(
+            "/nodes/default.repair_order/copy?new_name=default.contractor",
+        )
+        assert (
+            response.json()["message"]
+            == "A node with name default.contractor already exists."
+        )
+
+        response = client_with_roads.post(
+            "/nodes/default.repair_order/copy?new_name=default.blah.repair_order",
+        )
+        assert (
+            response.json()["message"]
+            == "node namespace `default.blah` does not exist."
+        )
+
+        # Test copying over deactivated node
+        client_with_roads.delete("/nodes/default.contractor")
+        client_with_roads.post(
+            "/nodes/default.repair_order/copy?new_name=default.contractor",
+        )
+        copied = client_with_roads.get("/nodes/default.contractor").json()
+        original = client_with_roads.get("/nodes/default.repair_order").json()
+        for field in ["name", "node_id", "node_revision_id", "updated_at"]:
+            copied[field] = mock.ANY
+        for link in copied["dimension_links"]:
+            link["foreign_keys"] = mock.ANY
+        assert copied == original
+
+    def test_copy_nodes(  # pylint: disable=too-many-locals
+        self,
+        client_with_roads: TestClient,
+        repairs_cube_payload,  # pylint: disable=redefined-outer-name
+        metric_with_required_dim_payload,  # pylint: disable=redefined-outer-name
+    ):
+        """
+        Test copying all nodes in the roads database
+        """
+        client_with_roads.post("/nodes/cube", json=repairs_cube_payload)
+        client_with_roads.post("/nodes/metric", json=metric_with_required_dim_payload)
+
+        # Copy all nodes to a node name with _copy appended
+        nodes = client_with_roads.get("/nodes").json()
+        for node in nodes:
+            client_with_roads.post(f"/nodes/{node}/copy?new_name={node}_copy")
+
+        # Check that each node was successfully copied by comparing against the original
+        for node in nodes:
+            original = client_with_roads.get(f"/nodes/{node}").json()
+            copied = client_with_roads.get(f"/nodes/{node}_copy").json()
+            for field in ["name", "node_id", "node_revision_id", "updated_at"]:
+                copied[field] = mock.ANY
+            for link in copied["dimension_links"]:
+                link["foreign_keys"] = mock.ANY
+            assert original == copied
+
+            # Metrics contain additional metadata, so compare the /metrics endpoint as well
+            if original["type"] == "metric":
+                metric_orig = client_with_roads.get(f"/metrics/{node}").json()
+                metric_copied = client_with_roads.get(f"/metrics/{node}_copy").json()
+                for field in ["id", "name", "updated_at"]:
+                    metric_copied[field] = mock.ANY
+                assert metric_orig == metric_copied
+
+            # Cubes contain additional metadata, so compare the /metrics endpoint as well
+            if original["type"] == "cube":
+                cube_orig = client_with_roads.get(f"/cubes/{node}").json()
+                cube_copied = client_with_roads.get(f"/cubes/{node}_copy").json()
+                for field in ["name", "node_id", "node_revision_id", "updated_at"]:
+                    cube_copied[field] = mock.ANY
+                assert cube_orig == cube_copied
+
+            # Check that the dimensions DAG for the node has been copied
+            original_dimensions = [
+                dim["name"]
+                for dim in client_with_roads.get(f"/nodes/{node}/dimensions").json()
+            ]
+            copied_dimensions = [
+                dim["name"].replace(f"{node}_copy", node)
+                for dim in client_with_roads.get(
+                    f"/nodes/{node}_copy/dimensions",
+                ).json()
+            ]
+            assert original_dimensions == copied_dimensions

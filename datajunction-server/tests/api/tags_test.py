@@ -51,7 +51,6 @@ class TestTags:
         expected_tag_output = {
             "tag_metadata": {},
             "display_name": "Sales Report",
-            "id": 1,
             "description": "All metrics for sales",
             "name": "sales_report",
             "tag_type": "group",
@@ -59,9 +58,31 @@ class TestTags:
         assert response.status_code == 201
         assert response.json() == expected_tag_output
 
+        response = client.post(
+            "/tags/",
+            json={
+                "name": "sales_report2",
+                "display_name": "Sales Report2",
+                "tag_type": "group",
+            },
+        )
+        assert response.status_code == 201
+        expected_tag_output2 = {
+            "tag_metadata": {},
+            "display_name": "Sales Report2",
+            "description": None,
+            "name": "sales_report2",
+            "tag_type": "group",
+        }
+        assert response.json() == expected_tag_output2
+
         response = client.get("/tags/sales_report/")
         assert response.status_code == 200
         assert response.json() == expected_tag_output
+
+        response = client.get("/tags/sales_report2/")
+        assert response.status_code == 200
+        assert response.json() == expected_tag_output2
 
         # Check history
         response = client.get("/history/tag/sales_report/")
@@ -108,7 +129,6 @@ class TestTags:
         assert response_data == {
             "tag_metadata": {"order": 1},
             "display_name": "Sales Metrics",
-            "id": 1,
             "description": "Helpful sales metrics",
             "name": "sales_report",
             "tag_type": "group",
@@ -122,7 +142,6 @@ class TestTags:
         assert response.json() == {
             "tag_metadata": {"order": 1},
             "display_name": "Sales Metrics",
-            "id": 1,
             "description": "Helpful sales metrics",
             "name": "sales_report",
             "tag_type": "group",
@@ -310,6 +329,16 @@ class TestTags:
                 "version": "v1.0",
             },
         ]
+
+        # Check getting nodes for tag after deactivating a node
+        client_with_dbt.delete("/nodes/default.total_profit")
+        response = client_with_dbt.get(
+            "/tags/sales_report/nodes/",
+        )
+        assert response.status_code == 200
+        response_data = response.json()
+        assert len(response_data) == 1
+        assert response_data[0]["name"] == "default.items_sold_count"
 
         # Check finding nodes for tag
         response = client_with_dbt.get(

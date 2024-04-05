@@ -1,3 +1,4 @@
+# pylint: disable=too-many-arguments
 """
 Cube related APIs.
 """
@@ -5,12 +6,13 @@ import logging
 from typing import List, Optional
 
 from fastapi import Depends, Query
-from sqlmodel import Session
+from sqlalchemy.orm import Session
 
 from datajunction_server.api.helpers import get_catalog_by_name, get_node_by_name
 from datajunction_server.construction.dimensions import build_dimensions_from_cube_query
 from datajunction_server.internal.access.authentication.http import SecureAPIRouter
 from datajunction_server.internal.access.authorization import validate_access
+from datajunction_server.internal.nodes import get_cube_revision_metadata
 from datajunction_server.models import access
 from datajunction_server.models.cube import (
     CubeRevisionMetadata,
@@ -20,9 +22,9 @@ from datajunction_server.models.cube import (
 from datajunction_server.models.metric import TranslatedSQL
 from datajunction_server.models.node_type import NodeType
 from datajunction_server.models.query import QueryCreate
+from datajunction_server.naming import from_amenable_name
 from datajunction_server.service_clients import QueryServiceClient
 from datajunction_server.utils import (
-    from_amenable_name,
     get_query_service_client,
     get_session,
     get_settings,
@@ -33,15 +35,14 @@ settings = get_settings()
 router = SecureAPIRouter(tags=["cubes"])
 
 
-@router.get("/cubes/{name}/", response_model=CubeRevisionMetadata, name="Get a Cube")
+@router.get("/cubes/{name}/", name="Get a Cube")
 def get_cube(
     name: str, *, session: Session = Depends(get_session)
 ) -> CubeRevisionMetadata:
     """
     Get information on a cube
     """
-    node = get_node_by_name(session=session, name=name, node_type=NodeType.CUBE)
-    return node.current
+    return get_cube_revision_metadata(session, name)
 
 
 @router.get("/cubes/{name}/dimensions/sql", name="Dimensions SQL for Cube")

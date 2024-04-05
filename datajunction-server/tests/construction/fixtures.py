@@ -5,17 +5,12 @@
 from typing import Dict, List, Optional, Tuple
 
 import pytest
-from sqlmodel import Session
+from sqlalchemy.orm import Session
 
-from datajunction_server.models import (
-    AttributeType,
-    Column,
-    ColumnAttribute,
-    Database,
-    NodeRevision,
-    Table,
-)
-from datajunction_server.models.node import Node
+from datajunction_server.database.attributetype import AttributeType, ColumnAttribute
+from datajunction_server.database.column import Column
+from datajunction_server.database.database import Database
+from datajunction_server.database.node import Node, NodeRevision
 from datajunction_server.models.node_type import NodeType
 from datajunction_server.sql.parsing.types import (
     DateType,
@@ -226,10 +221,11 @@ def construction_session(  # pylint: disable=too-many-locals
         columns=[
             Column(
                 name="country",
+                order=0,
                 type=StringType(),
                 attributes=[ColumnAttribute(attribute_type=primary_key)],
             ),
-            Column(name="user_cnt", type=IntegerType()),
+            Column(name="user_cnt", type=IntegerType(), order=1),
         ],
     )
 
@@ -256,15 +252,16 @@ def construction_session(  # pylint: disable=too-many-locals
         columns=[
             Column(
                 name="id",
+                order=0,
                 type=IntegerType(),
                 attributes=[ColumnAttribute(attribute_type=primary_key)],
             ),
-            Column(name="full_name", type=StringType()),
-            Column(name="age", type=IntegerType()),
-            Column(name="country", type=StringType()),
-            Column(name="gender", type=StringType()),
-            Column(name="preferred_language", type=StringType()),
-            Column(name="secret_number", type=FloatType()),
+            Column(name="full_name", type=StringType(), order=1),
+            Column(name="age", type=IntegerType(), order=2),
+            Column(name="country", type=StringType(), order=3),
+            Column(name="gender", type=StringType(), order=4),
+            Column(name="preferred_language", type=StringType(), order=5),
+            Column(name="secret_number", type=FloatType(), order=6),
         ],
     )
 
@@ -290,8 +287,9 @@ def construction_session(  # pylint: disable=too-many-locals
                 type=StringType(),
                 dimension=user_dim_ref,
                 dimension_column="country",
+                order=0,
             ),
-            Column(name="num_users", type=IntegerType()),
+            Column(name="num_users", type=IntegerType(), order=1),
         ],
     )
 
@@ -306,11 +304,12 @@ def construction_session(  # pylint: disable=too-many-locals
         node=users_src_ref,
         version="1",
         columns=[
-            Column(name="id", type=IntegerType()),
-            Column(name="full_name", type=StringType()),
+            Column(name="id", type=IntegerType(), order=0),
+            Column(name="full_name", type=StringType(), order=1),
             Column(
                 name="names_map",
                 type=MapType(key_type=StringType(), value_type=StringType()),
+                order=2,
             ),
             Column(
                 name="user_metadata",
@@ -324,81 +323,13 @@ def construction_session(  # pylint: disable=too-many-locals
                         ),
                     ),
                 ),
+                order=3,
             ),
-            Column(name="age", type=IntegerType()),
-            Column(name="country", type=StringType()),
-            Column(name="gender", type=StringType()),
-            Column(name="preferred_language", type=StringType()),
-            Column(name="secret_number", type=FloatType()),
-        ],
-        tables=[
-            Table(
-                node_id=4249,
-                schema="basic",
-                table="comments",
-                columns=[
-                    Column(name="id", type=IntegerType()),
-                    Column(name="full_name", type=StringType()),
-                    Column(
-                        name="names_map",
-                        type=MapType(key_type=StringType(), value_type=StringType()),
-                    ),
-                    Column(
-                        name="user_metadata",
-                        type=MapType(
-                            key_type=StringType(),
-                            value_type=MapType(
-                                key_type=StringType(),
-                                value_type=MapType(
-                                    key_type=StringType(),
-                                    value_type=FloatType(),
-                                ),
-                            ),
-                        ),
-                    ),
-                    Column(name="age", type=IntegerType()),
-                    Column(name="country", type=StringType()),
-                    Column(name="gender", type=StringType()),
-                    Column(name="preferred_language", type=StringType()),
-                    Column(name="secret_number", type=FloatType()),
-                ],
-                cost=10.0,
-                database=postgres,
-                database_id=1,
-            ),
-            Table(
-                node_id=4250,
-                table="comments",
-                columns=[
-                    Column(name="id", type=IntegerType()),
-                    Column(name="full_name", type=StringType()),
-                    Column(
-                        name="names_map",
-                        type=MapType(key_type=StringType(), value_type=StringType()),
-                    ),
-                    Column(
-                        name="user_metadata",
-                        type=MapType(
-                            key_type=StringType(),
-                            value_type=MapType(
-                                key_type=StringType(),
-                                value_type=MapType(
-                                    key_type=StringType(),
-                                    value_type=FloatType(),
-                                ),
-                            ),
-                        ),
-                    ),
-                    Column(name="age", type=IntegerType()),
-                    Column(name="country", type=StringType()),
-                    Column(name="gender", type=StringType()),
-                    Column(name="preferred_language", type=StringType()),
-                    Column(name="secret_number", type=FloatType()),
-                ],
-                cost=100.0,
-                database=gsheets,
-                database_id=2,
-            ),
+            Column(name="age", type=IntegerType(), order=4),
+            Column(name="country", type=StringType(), order=5),
+            Column(name="gender", type=StringType(), order=6),
+            Column(name="preferred_language", type=StringType(), order=7),
+            Column(name="secret_number", type=FloatType(), order=8),
         ],
     )
 
@@ -413,43 +344,15 @@ def construction_session(  # pylint: disable=too-many-locals
         node=comments_src_ref,
         version="1",
         columns=[
-            Column(name="id", type=IntegerType()),
+            Column(name="id", type=IntegerType(), order=0),
             Column(
                 name="user_id",
                 type=IntegerType(),
                 dimension=user_dim_ref,
+                order=1,
             ),
-            Column(name="timestamp", type=TimestampType()),
-            Column(name="text", type=StringType()),
-        ],
-        tables=[
-            Table(
-                node_id=4251,
-                schema="basic",
-                table="comments",
-                columns=[
-                    Column(name="id", type=IntegerType()),
-                    Column(name="user_id", type=IntegerType()),
-                    Column(name="timestamp", type=TimestampType()),
-                    Column(name="text", type=StringType()),
-                ],
-                cost=10.0,
-                database=postgres,
-                database_id=1,
-            ),
-            Table(
-                node_id=4252,
-                table="comments",
-                columns=[
-                    Column(name="id", type=IntegerType()),
-                    Column(name="user_id", type=IntegerType()),
-                    Column(name="timestamp", type=TimestampType()),
-                    Column(name="text", type=StringType()),
-                ],
-                cost=100.0,
-                database=gsheets,
-                database_id=2,
-            ),
+            Column(name="timestamp", type=TimestampType(), order=2),
+            Column(name="text", type=StringType(), order=3),
         ],
     )
 
@@ -468,7 +371,7 @@ def construction_session(  # pylint: disable=too-many-locals
         FROM basic.source.comments
         """,
         columns=[
-            Column(name="cnt", type=IntegerType()),
+            Column(name="cnt", type=IntegerType(), order=0),
         ],
     )
 
@@ -487,7 +390,7 @@ def construction_session(  # pylint: disable=too-many-locals
         FROM basic.source.comments
         """,
         columns=[
-            Column(name="cnt", type=IntegerType()),
+            Column(name="cnt", type=IntegerType(), order=0),
         ],
         required_dimensions=[
             comments_src.columns[0],  # pylint: disable=E1136
@@ -510,7 +413,7 @@ def construction_session(  # pylint: disable=too-many-locals
         FROM basic.transform.country_agg
         """,
         columns=[
-            Column(name="col0", type=IntegerType()),
+            Column(name="col0", type=IntegerType(), order=0),
         ],
     )
     num_users_us_join_mtc_ref = Node(
@@ -534,6 +437,7 @@ def construction_session(  # pylint: disable=too-many-locals
             Column(
                 name="sum_users",
                 type=IntegerType(),
+                order=0,
             ),
         ],
     )
@@ -558,9 +462,10 @@ def construction_session(  # pylint: disable=too-many-locals
                 name="id",
                 type=IntegerType(),
                 attributes=[ColumnAttribute(attribute_type=primary_key)],
+                order=0,
             ),
-            Column(name="first_name", type=StringType()),
-            Column(name="last_name", type=StringType()),
+            Column(name="first_name", type=StringType(), order=1),
+            Column(name="last_name", type=StringType(), order=2),
         ],
     )
 
@@ -586,10 +491,10 @@ def construction_session(  # pylint: disable=too-many-locals
                    c.last_name
         """,
         columns=[
-            Column(name="id", type=IntegerType()),
-            Column(name="first_name", type=StringType()),
-            Column(name="last_name", type=StringType()),
-            Column(name="order_cnt", type=IntegerType()),
+            Column(name="id", type=IntegerType(), order=0),
+            Column(name="first_name", type=StringType(), order=1),
+            Column(name="last_name", type=StringType(), order=2),
+            Column(name="order_cnt", type=IntegerType(), order=3),
         ],
     )
 
@@ -604,33 +509,17 @@ def construction_session(  # pylint: disable=too-many-locals
         node=orders_src_ref,
         version="1",
         columns=[
-            Column(name="id", type=IntegerType()),
+            Column(name="id", type=IntegerType(), order=0),
             Column(
                 name="user_id",
                 type=IntegerType(),
                 dimension=customers_dim_ref,
                 dimension_column="event_id",
+                order=1,
             ),
-            Column(name="order_date", type=DateType()),
-            Column(name="status", type=StringType()),
-            Column(name="_etl_loaded_at", type=TimestampType()),
-        ],
-        tables=[
-            Table(
-                node_id=4253,
-                schema="jaffle_shop",
-                table="orders",
-                columns=[
-                    Column(name="id", type=IntegerType()),
-                    Column(name="user_id", type=IntegerType()),
-                    Column(name="order_date", type=DateType()),
-                    Column(name="status", type=StringType()),
-                    Column(name="_etl_loaded_at", type=TimestampType()),
-                ],
-                cost=10.0,
-                database=postgres,
-                database_id=1,
-            ),
+            Column(name="order_date", type=DateType(), order=2),
+            Column(name="status", type=StringType(), order=3),
+            Column(name="_etl_loaded_at", type=TimestampType(), order=4),
         ],
     )
 
@@ -645,24 +534,9 @@ def construction_session(  # pylint: disable=too-many-locals
         node=customers_src_ref,
         version="1",
         columns=[
-            Column(name="id", type=IntegerType()),
-            Column(name="first_name", type=StringType()),
-            Column(name="last_name", type=StringType()),
-        ],
-        tables=[
-            Table(
-                node_id=4254,
-                schema="jaffle_shop",
-                table="customers",
-                columns=[
-                    Column(name="id", type=IntegerType()),
-                    Column(name="first_name", type=StringType()),
-                    Column(name="last_name", type=StringType()),
-                ],
-                cost=10.0,
-                database=postgres,
-                database_id=1,
-            ),
+            Column(name="id", type=IntegerType(), order=0),
+            Column(name="first_name", type=StringType(), order=1),
+            Column(name="last_name", type=StringType(), order=2),
         ],
     )
 

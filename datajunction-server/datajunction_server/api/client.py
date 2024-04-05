@@ -6,11 +6,12 @@ import json
 import logging
 
 from fastapi import Depends
-from sqlmodel import Session
+from sqlalchemy.orm import Session
 
 from datajunction_server.api.helpers import get_node_by_name
 from datajunction_server.internal.access.authentication.http import SecureAPIRouter
 from datajunction_server.models.materialization import MaterializationJobTypeEnum
+from datajunction_server.models.node import NodeOutput
 from datajunction_server.models.node_type import NodeType
 from datajunction_server.utils import get_session, get_settings
 
@@ -30,7 +31,7 @@ def client_code_for_creating_node(
     node = get_node_by_name(session, node_name)
 
     # Generic user-configurable node creation params
-    params = node.current.dict(
+    params = NodeOutput.from_orm(node).dict(
         exclude={
             "id",
             "version",
@@ -42,7 +43,18 @@ def client_code_for_creating_node(
             "mode",
             "node_id",
             "updated_at",
+            "materializations",
+            "columns",
+            "catalog",
+            "parents",
+            "metric_metadata",
             "query" if node.type == NodeType.CUBE else "",
+            "dimension_links",
+            "created_at",
+            "current_version",
+            "missing_table",
+            "namespace",
+            "tags",
         },
         exclude_none=True,
     )
@@ -58,20 +70,27 @@ def client_code_for_creating_node(
     # Cube-specific params
     cube_params = []
     if node.type == NodeType.CUBE:
-        cube_metrics = ", ".join(
+        ordering = {
+            col.name: col.order or idx for idx, col in enumerate(node.current.columns)
+        }
+        metrics_list = sorted(
             [
-                '"' + elem.node_revisions[-1].name + '"'
+                elem.node_revisions[-1].name
                 for elem in node.current.cube_elements
                 if elem.node_revisions[-1].type == NodeType.METRIC
             ],
+            key=lambda x: ordering[x],
         )
-        cube_dimensions = ", ".join(
+        dimensions_list = sorted(
             [
-                '"' + elem.node_revisions[-1].name + "." + elem.name + '"'
+                elem.node_revisions[-1].name + "." + elem.name
                 for elem in node.current.cube_elements
                 if elem.node_revisions[-1].type == NodeType.DIMENSION
             ],
+            key=lambda x: ordering[x],
         )
+        cube_metrics = ", ".join([f'"{metric}"' for metric in metrics_list])
+        cube_dimensions = ", ".join([f'"{dim}"' for dim in dimensions_list])
         cube_params = [
             f"    metrics=[{cube_metrics}]",
             f"    dimensions=[{cube_dimensions}]",

@@ -60,12 +60,45 @@ export const DataJunctionAPI = {
     ).json();
   },
 
+  nodesWithType: async function (nodeType) {
+    return await (
+      await fetch(`${DJ_URL}/nodes/?node_type=${nodeType}`, {
+        credentials: 'include',
+      })
+    ).json();
+  },
+
   nodeDetails: async () => {
     return await (
       await fetch(`${DJ_URL}/nodes/details/`, {
         credentials: 'include',
       })
     ).json();
+  },
+
+  validateNode: async function (
+    nodeType,
+    name,
+    display_name,
+    description,
+    query,
+  ) {
+    const response = await fetch(`${DJ_URL}/nodes/validate`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: name,
+        display_name: display_name,
+        description: description,
+        query: query,
+        type: nodeType,
+        mode: 'published',
+      }),
+      credentials: 'include',
+    });
+    return { status: response.status, json: await response.json() };
   },
 
   createNode: async function (
@@ -79,6 +112,7 @@ export const DataJunctionAPI = {
     primary_key,
     metric_direction,
     metric_unit,
+    required_dimensions,
   ) {
     const metricMetadata =
       metric_direction || metric_unit
@@ -101,6 +135,7 @@ export const DataJunctionAPI = {
         namespace: namespace,
         primary_key: primary_key,
         metric_metadata: metricMetadata,
+        required_dimensions: required_dimensions,
       }),
       credentials: 'include',
     });
@@ -116,6 +151,7 @@ export const DataJunctionAPI = {
     primary_key,
     metric_direction,
     metric_unit,
+    required_dimensions,
   ) {
     try {
       const metricMetadata =
@@ -137,6 +173,7 @@ export const DataJunctionAPI = {
           mode: mode,
           primary_key: primary_key,
           metric_metadata: metricMetadata,
+          required_dimensions: required_dimensions,
         }),
         credentials: 'include',
       });
@@ -543,6 +580,13 @@ export const DataJunctionAPI = {
       })
     ).json();
   },
+  nodeDimensions: async function (nodeName) {
+    return await (
+      await fetch(`${DJ_URL}/nodes/${nodeName}/dimensions`, {
+        credentials: 'include',
+      })
+    ).json();
+  },
   linkDimension: async function (nodeName, columnName, dimensionName) {
     const response = await fetch(
       `${DJ_URL}/nodes/${nodeName}/columns/${columnName}?dimension=${dimensionName}`,
@@ -569,6 +613,51 @@ export const DataJunctionAPI = {
     );
     return { status: response.status, json: await response.json() };
   },
+
+  addComplexDimensionLink: async function (
+    nodeName,
+    dimensionNode,
+    joinOn,
+    joinType = null,
+    joinCardinality = null,
+    role = null,
+  ) {
+    const response = await fetch(`${DJ_URL}/nodes/${nodeName}/link`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        dimensionNode: dimensionNode,
+        joinType: joinType,
+        joinOn: joinOn,
+        joinCardinality: joinCardinality,
+        role: role,
+      }),
+      credentials: 'include',
+    });
+    return { status: response.status, json: await response.json() };
+  },
+
+  removeComplexDimensionLink: async function (
+    nodeName,
+    dimensionNode,
+    role = null,
+  ) {
+    const response = await fetch(`${DJ_URL}/nodes/${nodeName}/link`, {
+      method: 'DELETE',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        dimensionNode: dimensionNode,
+        role: role,
+      }),
+      credentials: 'include',
+    });
+    return { status: response.status, json: await response.json() };
+  },
+
   deactivate: async function (nodeName) {
     const response = await fetch(`${DJ_URL}/nodes/${nodeName}`, {
       method: 'DELETE',

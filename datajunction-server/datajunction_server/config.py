@@ -31,7 +31,7 @@ class Settings(
     cors_origin_whitelist: List[str] = ["http://localhost:3000"]
 
     # SQLAlchemy URI for the metadata database.
-    index: str = "sqlite:///dj.db?check_same_thread=False"
+    index: str = "postgresql+psycopg://dj:dj@postgres_metadata:5432/dj"
 
     # Directory where the repository lives. This should have 2 subdirectories, "nodes" and
     # "databases".
@@ -90,6 +90,12 @@ class Settings(
 
     # Interval in seconds with which to expire caching of any indexes
     index_cache_expire = 60
+
+    # SQLAlchemy engine config
+    db_pool_size = 20
+    db_max_overflow = 20
+    db_pool_timeout = 10
+    db_connect_timeout = 5
 
     @property
     def celery(self) -> Celery:

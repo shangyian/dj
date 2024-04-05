@@ -3,7 +3,7 @@
 """
 Post requests for all example entities
 """
-from datajunction_server.models import Column
+from datajunction_server.database.column import Column
 from datajunction_server.models.query import QueryWithResults
 from datajunction_server.sql.parsing.types import IntegerType, StringType, TimestampType
 from datajunction_server.typing import QueryState
@@ -575,8 +575,7 @@ CROSS JOIN
         "/nodes/metric/",
         {
             "description": "Total repair cost",
-            "query": "SELECT sum(repair_orders_fact.total_repair_cost) "
-            "FROM default.repair_orders_fact repair_orders_fact",
+            "query": "SELECT sum(total_repair_cost) FROM default.repair_orders_fact",
             "mode": "published",
             "name": "default.total_repair_cost",
         },
@@ -638,85 +637,112 @@ CROSS JOIN
         },
     ),
     (
-        (
-            "/nodes/default.repair_orders_fact/columns/municipality_id/"
-            "?dimension=default.municipality_dim"
-        ),
-        {},
+        ("/nodes/default.repair_orders_fact/link"),
+        {
+            "dimension_node": "default.municipality_dim",
+            "join_type": "left",
+            "join_on": (
+                "default.repair_orders_fact.municipality_id = default.municipality_dim.municipality_id"
+            ),
+        },
     ),
     (
-        (
-            "/nodes/default.repair_orders_fact/columns/hard_hat_id/"
-            "?dimension=default.hard_hat"
-        ),
-        {},
+        "/nodes/default.repair_orders_fact/link",
+        {
+            "dimension_node": "default.hard_hat",
+            "join_type": "left",
+            "join_on": (
+                "default.repair_orders_fact.hard_hat_id = default.hard_hat.hard_hat_id"
+            ),
+        },
     ),
     (
-        (
-            "/nodes/default.repair_orders_fact/columns/dispatcher_id/"
-            "?dimension=default.dispatcher"
-        ),
-        {},
-    ),
-    # (
-    #     (
-    #         "/nodes/default.repair_orders_fact/columns/order_date/"
-    #         "?dimension=default.date_dim"
-    #     ),
-    #     {},
-    # ),
-    (
-        (
-            "/nodes/default.repair_order_details/columns/repair_order_id/"
-            "?dimension=default.repair_order&dimension_column=repair_order_id"
-        ),
-        {},
+        "/nodes/default.repair_orders_fact/link",
+        {
+            "dimension_node": "default.dispatcher",
+            "join_type": "left",
+            "join_on": (
+                "default.repair_orders_fact.dispatcher_id = default.dispatcher.dispatcher_id"
+            ),
+        },
     ),
     (
-        (
-            "/nodes/default.repair_type/columns/contractor_id/"
-            "?dimension=default.contractor&dimension_column=contractor_id"
-        ),
-        {},
+        "/nodes/default.repair_order_details/link",
+        {
+            "dimension_node": "default.repair_order",
+            "join_type": "left",
+            "join_on": (
+                "default.repair_order_details.repair_order_id = default.repair_order.repair_order_id"
+            ),
+        },
     ),
     (
-        (
-            "/nodes/default.repair_orders/columns/repair_order_id/"
-            "?dimension=default.repair_order&dimension_column=repair_order_id"
-        ),
-        {},
+        "/nodes/default.repair_type/link",
+        {
+            "dimension_node": "default.contractor",
+            "join_type": "left",
+            "join_on": (
+                "default.repair_type.contractor_id = default.contractor.contractor_id"
+            ),
+        },
     ),
     (
-        ("/nodes/default.hard_hat/columns/state/?dimension=default.us_state"),
-        {},
+        "/nodes/default.repair_orders/link",
+        {
+            "dimension_node": "default.repair_order",
+            "join_type": "left",
+            "join_on": (
+                "default.repair_orders.repair_order_id = default.repair_order.repair_order_id"
+            ),
+        },
     ),
     (
-        (
-            "/nodes/default.repair_order_details/columns/repair_order_id/"
-            "?dimension=default.repair_order&dimension_column=repair_order_id"
-        ),
-        {},
+        "/nodes/default.hard_hat/link",
+        {
+            "dimension_node": "default.us_state",
+            "join_type": "left",
+            "join_on": ("default.hard_hat.state = default.us_state.state_short"),
+        },
     ),
     (
-        (
-            "/nodes/default.repair_order/columns/dispatcher_id/"
-            "?dimension=default.dispatcher&dimension_column=dispatcher_id"
-        ),
-        {},
+        "/nodes/default.repair_order_details/link",
+        {
+            "dimension_node": "default.repair_order",
+            "join_type": "left",
+            "join_on": (
+                "default.repair_order_details.repair_order_id = default.repair_order.repair_order_id"
+            ),
+        },
     ),
     (
-        (
-            "/nodes/default.repair_order/columns/hard_hat_id/"
-            "?dimension=default.hard_hat&dimension_column=hard_hat_id"
-        ),
-        {},
+        "/nodes/default.repair_order/link",
+        {
+            "dimension_node": "default.dispatcher",
+            "join_type": "left",
+            "join_on": (
+                "default.repair_order.dispatcher_id = default.dispatcher.dispatcher_id"
+            ),
+        },
     ),
     (
-        (
-            "/nodes/default.repair_order/columns/municipality_id/"
-            "?dimension=default.municipality_dim&dimension_column=municipality_id"
-        ),
-        {},
+        "/nodes/default.repair_order/link",
+        {
+            "dimension_node": "default.hard_hat",
+            "join_type": "left",
+            "join_on": (
+                "default.repair_order.hard_hat_id = default.hard_hat.hard_hat_id"
+            ),
+        },
+    ),
+    (
+        "/nodes/default.repair_order/link",
+        {
+            "dimension_node": "default.municipality_dim",
+            "join_type": "left",
+            "join_on": (
+                "default.repair_order.municipality_id = default.municipality_dim.municipality_id"
+            ),
+        },
     ),
 )
 
@@ -1495,18 +1521,20 @@ EVENT = (  # type: ignore
         },
     ),
     (
-        (
-            "/nodes/default.event_source/columns/country/?"
-            "dimension=default.country_dim&dimension_column=country"
-        ),
-        {},
+        "/nodes/default.event_source/link",
+        {
+            "dimension_node": "default.country_dim",
+            "join_type": "left",
+            "join_on": ("default.event_source.country = default.country_dim.country"),
+        },
     ),
     (
-        (
-            "/nodes/default.long_events/columns/country/?"
-            "dimension=default.country_dim&dimension_column=country"
-        ),
-        {},
+        "/nodes/default.long_events/link",
+        {
+            "dimension_node": "default.country_dim",
+            "join_type": "left",
+            "join_on": ("default.long_events.country = default.country_dim.country"),
+        },
     ),
     (
         "/nodes/metric/",
@@ -1774,7 +1802,7 @@ LATERAL_VIEW = (  # type: ignore
             "description": "Mural paint colors",
             "mode": "published",
             "name": "basic.paint_colors_trino",
-            "primary_key": ["color_id", "color_name"],
+            "primary_key": ["color_id"],
         },
     ),
     (
@@ -1796,7 +1824,7 @@ LATERAL_VIEW = (  # type: ignore
             "description": "Mural paint colors",
             "mode": "published",
             "name": "basic.paint_colors_spark",
-            "primary_key": ["color_id", "color_name"],
+            "primary_key": ["color_id"],
         },
     ),
     (
@@ -1808,6 +1836,119 @@ LATERAL_VIEW = (  # type: ignore
             "description": "Average luminosity of color patch",
             "mode": "published",
             "name": "basic.avg_luminosity_patches",
+        },
+    ),
+)
+
+COMPLEX_DIMENSION_LINK = (
+    (
+        "/nodes/source/",
+        {
+            "columns": [
+                {"name": "user_id", "type": "int"},
+                {"name": "event_start_date", "type": "int"},
+                {"name": "event_end_date", "type": "int"},
+                {"name": "elapsed_secs", "type": "int"},
+            ],
+            "description": "Events table",
+            "mode": "published",
+            "name": "default.events_table",
+            "catalog": "default",
+            "schema_": "examples",
+            "table": "events",
+        },
+    ),
+    (
+        "/nodes/source/",
+        {
+            "columns": [
+                {"name": "user_id", "type": "int"},
+                {"name": "snapshot_date", "type": "int"},
+                {"name": "registration_country", "type": "string"},
+                {"name": "residence_country", "type": "string"},
+                {"name": "account_type", "type": "string"},
+            ],
+            "description": "Users table",
+            "mode": "published",
+            "name": "default.users_table",
+            "catalog": "default",
+            "schema_": "examples",
+            "table": "users",
+        },
+    ),
+    (
+        "/nodes/source/",
+        {
+            "columns": [
+                {"name": "country_code", "type": "string"},
+                {"name": "name", "type": "string"},
+                {"name": "population", "type": "int"},
+            ],
+            "description": "Countries table",
+            "mode": "published",
+            "name": "default.countries_table",
+            "catalog": "default",
+            "schema_": "examples",
+            "table": "countries",
+        },
+    ),
+    (
+        "/nodes/transform/",
+        {
+            "description": "Events fact",
+            "query": """
+        SELECT
+            user_id,
+            event_start_date,
+            event_end_date,
+            elapsed_secs
+        FROM default.events_table
+    """,
+            "mode": "published",
+            "name": "default.events",
+        },
+    ),
+    (
+        "/nodes/dimension/",
+        {
+            "description": "Users",
+            "query": """
+        SELECT
+            user_id,
+            snapshot_date,
+            registration_country,
+            residence_country,
+            account_type
+        FROM default.users_table
+    """,
+            "mode": "published",
+            "name": "default.users",
+            "primary_key": ["user_id", "snapshot_date"],
+        },
+    ),
+    (
+        "/nodes/dimension/",
+        {
+            "description": "Countries",
+            "query": """
+        SELECT
+            country_code,
+            name,
+            population
+        FROM default.countries_table
+    """,
+            "mode": "published",
+            "name": "default.countries",
+            "primary_key": ["country_code"],
+        },
+    ),
+    (
+        "/nodes/metric/",
+        {
+            "description": "Elapsed Time in Seconds",
+            "query": "SELECT SUM(elapsed_secs) FROM default.events",
+            "mode": "published",
+            "name": "default.elapsed_secs",
         },
     ),
 )
@@ -1929,24 +2070,48 @@ DIMENSION_LINK = (  # type: ignore
         },
     ),
     (
-        "/nodes/default.user_dim/columns/birth_country/"
-        "?dimension=default.special_country_dim&dimension_column=country_code",
-        {},
+        "/nodes/default.user_dim/link",
+        {
+            "dimension_node": "default.special_country_dim",
+            "join_type": "left",
+            "join_on": (
+                "default.user_dim.birth_country = default.special_country_dim.country_code"
+            ),
+            "role": "birth_country",
+        },
     ),
     (
-        "/nodes/default.user_dim/columns/residence_country/"
-        "?dimension=default.special_country_dim&dimension_column=country_code",
-        {},
+        "/nodes/default.user_dim/link",
+        {
+            "dimension_node": "default.special_country_dim",
+            "join_type": "left",
+            "join_on": (
+                "default.user_dim.residence_country = default.special_country_dim.country_code"
+            ),
+            "role": "residence_country",
+        },
     ),
     (
-        "/nodes/default.special_country_dim/columns/formation_date/"
-        "?dimension=default.date_dim&dimension_column=dateint",
-        {},
+        "/nodes/default.special_country_dim/link",
+        {
+            "dimension_node": "default.date_dim",
+            "join_type": "left",
+            "join_on": (
+                "default.special_country_dim.formation_date = default.date_dim.dateint"
+            ),
+            "role": "formation_date",
+        },
     ),
     (
-        "/nodes/default.special_country_dim/columns/last_election_date/"
-        "?dimension=default.date_dim&dimension_column=dateint",
-        {},
+        "/nodes/default.special_country_dim/link",
+        {
+            "dimension_node": "default.date_dim",
+            "join_type": "left",
+            "join_on": (
+                "default.special_country_dim.last_election_date = default.date_dim.dateint"
+            ),
+            "role": "last_election_date",
+        },
     ),
 )
 
@@ -1964,20 +2129,20 @@ EXAMPLES = {  # type: ignore
 
 COLUMN_MAPPINGS = {
     "public.basic.comments": [
-        Column(name="id", type=IntegerType()),
-        Column(name="user_id", type=IntegerType()),
-        Column(name="timestamp", type=TimestampType()),
-        Column(name="text", type=StringType()),
+        Column(name="id", type=IntegerType(), order=0),
+        Column(name="user_id", type=IntegerType(), order=1),
+        Column(name="timestamp", type=TimestampType(), order=2),
+        Column(name="text", type=StringType(), order=3),
     ],
     "default.roads.repair_orders": [
-        Column(name="repair_order_id", type=IntegerType()),
-        Column(name="municipality_id", type=StringType()),
-        Column(name="hard_hat_id", type=IntegerType()),
-        Column(name="order_date", type=TimestampType()),
-        Column(name="required_date", type=TimestampType()),
-        Column(name="dispatched_date", type=TimestampType()),
-        Column(name="dispatcher_id", type=IntegerType()),
-        Column(name="rating", type=IntegerType()),
+        Column(name="repair_order_id", type=IntegerType(), order=0),
+        Column(name="municipality_id", type=StringType(), order=1),
+        Column(name="hard_hat_id", type=IntegerType(), order=2),
+        Column(name="order_date", type=TimestampType(), order=3),
+        Column(name="required_date", type=TimestampType(), order=4),
+        Column(name="dispatched_date", type=TimestampType(), order=5),
+        Column(name="dispatcher_id", type=IntegerType(), order=6),
+        Column(name="rating", type=IntegerType(), order=7),
     ],
 }
 

@@ -4,27 +4,23 @@ from typing import Dict, Optional, Tuple
 
 import pytest
 from sqlalchemy import select
-from sqlmodel import Session
+from sqlalchemy.orm import Session
 
 import datajunction_server.sql.parsing.types as ct
 from datajunction_server.construction.build import build_node
-from datajunction_server.models import (
-    AttributeType,
-    Column,
-    ColumnAttribute,
-    NodeRevision,
-)
-from datajunction_server.models.node import Node
+from datajunction_server.database.attributetype import AttributeType, ColumnAttribute
+from datajunction_server.database.column import Column
+from datajunction_server.database.node import Node, NodeRevision
 from datajunction_server.models.node_type import NodeType
-from datajunction_server.utils import amenable_name
+from datajunction_server.naming import amenable_name
+from datajunction_server.sql.parsing.backends.antlr4 import parse
 
 from ..sql.utils import compare_query_strings
 from .fixtures import BUILD_EXPECTATION_PARAMETERS
 
 
 @pytest.mark.parametrize("node_name,db_id", BUILD_EXPECTATION_PARAMETERS)
-@pytest.mark.asyncio
-async def test_build_node(node_name: str, db_id: int, request):
+def test_build_node(node_name: str, db_id: int, request):
     """
     Test building a node
     """
@@ -35,7 +31,7 @@ async def test_build_node(node_name: str, db_id: int, request):
     ] = request.getfixturevalue("build_expectation")
     succeeds, expected = build_expectation[node_name][db_id]
     node = next(
-        construction_session.exec(
+        construction_session.execute(
             select(Node).filter(Node.name == node_name),
         ),
     )[0]
@@ -55,14 +51,13 @@ async def test_build_node(node_name: str, db_id: int, request):
             assert expected in str(exc)
 
 
-@pytest.mark.asyncio
-async def test_build_metric_with_dimensions_aggs(request):
+def test_build_metric_with_dimensions_aggs(request):
     """
     Test building metric with dimensions
     """
     construction_session: Session = request.getfixturevalue("construction_session")
     num_comments_mtc: Node = next(
-        construction_session.exec(
+        construction_session.execute(
             select(Node).filter(Node.name == "basic.num_comments"),
         ),
     )[0]
@@ -77,7 +72,7 @@ async def test_build_metric_with_dimensions_aggs(request):
           basic_DOT_dimension_DOT_users.country,
           basic_DOT_dimension_DOT_users.gender
         FROM basic.source.comments AS basic_DOT_source_DOT_comments
-        LEFT OUTER JOIN (
+        LEFT JOIN (
           SELECT
             basic_DOT_source_DOT_users.id,
             basic_DOT_source_DOT_users.country,
@@ -87,7 +82,7 @@ async def test_build_metric_with_dimensions_aggs(request):
          GROUP BY
            basic_DOT_dimension_DOT_users.country, basic_DOT_dimension_DOT_users.gender
     """
-    assert compare_query_strings(str(query), expected)
+    assert str(parse(str(query))) == str(parse(str(expected)))
 
 
 def test_build_metric_with_required_dimensions(request):
@@ -96,7 +91,7 @@ def test_build_metric_with_required_dimensions(request):
     """
     construction_session: Session = request.getfixturevalue("construction_session")
     num_comments_mtc: Node = next(
-        construction_session.exec(
+        construction_session.execute(
             select(Node).filter(Node.name == "basic.num_comments_bnd"),
         ),
     )[0]
@@ -113,7 +108,7 @@ def test_build_metric_with_required_dimensions(request):
           basic_DOT_dimension_DOT_users.country,
           basic_DOT_dimension_DOT_users.gender
         FROM basic.source.comments AS basic_DOT_source_DOT_comments
-        LEFT OUTER JOIN (
+        LEFT JOIN (
           SELECT
             basic_DOT_source_DOT_users.id,
             basic_DOT_source_DOT_users.country,
@@ -123,17 +118,16 @@ def test_build_metric_with_required_dimensions(request):
          GROUP BY
            basic_DOT_source_DOT_comments.id, basic_DOT_source_DOT_comments.text, basic_DOT_dimension_DOT_users.country, basic_DOT_dimension_DOT_users.gender
     """
-    assert compare_query_strings(str(query), expected)
+    assert str(parse(str(query))) == str(parse(str(expected)))
 
 
-@pytest.mark.asyncio
-async def test_raise_on_build_without_required_dimension_column(request):
+def test_raise_on_build_without_required_dimension_column(request):
     """
     Test building a node that has a dimension reference without a column and a compound PK
     """
     construction_session: Session = request.getfixturevalue("construction_session")
     primary_key: AttributeType = next(
-        construction_session.exec(
+        construction_session.execute(
             select(AttributeType).filter(AttributeType.name == "primary_key"),
         ),
     )[0]
@@ -159,13 +153,15 @@ async def test_raise_on_build_without_required_dimension_column(request):
                 name="country",
                 type=ct.StringType(),
                 attributes=[ColumnAttribute(attribute_type=primary_key)],
+                order=0,
             ),
             Column(
                 name="country_id2",
                 type=ct.StringType(),
                 attributes=[ColumnAttribute(attribute_type=primary_key)],
+                order=1,
             ),
-            Column(name="user_cnt", type=ct.IntegerType()),
+            Column(name="user_cnt", type=ct.IntegerType(), order=2),
         ],
     )
     node_foo_ref = Node(name="basic.foo", type=NodeType.TRANSFORM, current_version="1")
@@ -179,11 +175,13 @@ async def test_raise_on_build_without_required_dimension_column(request):
             Column(
                 name="num_users",
                 type=ct.IntegerType(),
+                order=0,
             ),
             Column(
                 name="country_id",
                 type=ct.StringType(),
                 dimension=countries_dim_ref,
+                order=1,
             ),
         ],
     )
@@ -199,7 +197,7 @@ async def test_raise_on_build_without_required_dimension_column(request):
         query="SELECT SUM(num_users) AS num_users "
         "FROM basic.foo GROUP BY basic.dimension.compound_countries.country",
         columns=[
-            Column(name="num_users", type=ct.IntegerType()),
+            Column(name="num_users", type=ct.IntegerType(), order=0),
         ],
     )
     build_node(
@@ -209,14 +207,13 @@ async def test_raise_on_build_without_required_dimension_column(request):
     )
 
 
-@pytest.mark.asyncio
-async def test_build_metric_with_dimensions_filters(request):
+def test_build_metric_with_dimensions_filters(request):
     """
     Test building metric with dimension filters
     """
     construction_session: Session = request.getfixturevalue("construction_session")
     num_comments_mtc: Node = next(
-        construction_session.exec(
+        construction_session.execute(
             select(Node).filter(Node.name == "basic.num_comments"),
         ),
     )[0]
@@ -230,7 +227,7 @@ async def test_build_metric_with_dimensions_filters(request):
         COUNT(1) AS basic_DOT_num_comments,
         basic_DOT_dimension_DOT_users.age
     FROM basic.source.comments AS basic_DOT_source_DOT_comments
-    LEFT OUTER JOIN (
+    LEFT JOIN (
       SELECT
         basic_DOT_source_DOT_users.id,
         basic_DOT_source_DOT_users.age
@@ -244,8 +241,7 @@ async def test_build_metric_with_dimensions_filters(request):
     assert compare_query_strings(str(query), expected)
 
 
-@pytest.mark.asyncio
-async def test_build_node_with_unnamed_column(request):
+def test_build_node_with_unnamed_column(request):
     """
     Test building a node that has an unnamed column (so defaults to col<n>)
     """
@@ -256,7 +252,7 @@ async def test_build_node_with_unnamed_column(request):
         version="1",
         query="""SELECT 1 FROM basic.dimension.countries""",
         columns=[
-            Column(name="col1", type=ct.IntegerType()),
+            Column(name="col1", type=ct.IntegerType(), order=0),
         ],
     )
     build_node(

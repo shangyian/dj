@@ -4,24 +4,26 @@ Utility functions.
 import logging
 import os
 import re
-from enum import Enum
 from functools import lru_cache
-from string import ascii_letters, digits
 
 # pylint: disable=line-too-long
-from typing import Iterator, List, Optional
+from typing import TYPE_CHECKING, Iterator, List, Optional
 
 from dotenv import load_dotenv
 from rich.logging import RichHandler
-from sqlalchemy.engine import Engine
-from sqlmodel import Session, create_engine
+from sqlalchemy.engine import Engine, create_engine
+from sqlalchemy.orm import Session, sessionmaker
+from starlette.background import BackgroundTasks
 from starlette.requests import Request
 from yarl import URL
 
 from datajunction_server.config import Settings
+from datajunction_server.enum import StrEnum
 from datajunction_server.errors import DJException
-from datajunction_server.models.user import User
 from datajunction_server.service_clients import QueryServiceClient
+
+if TYPE_CHECKING:
+    from datajunction_server.database.user import User
 
 
 def setup_logging(loglevel: str) -> None:
@@ -52,23 +54,56 @@ def get_settings() -> Settings:
     return Settings()
 
 
+@lru_cache(maxsize=None)
 def get_engine() -> Engine:
     """
     Create the metadata engine.
     """
     settings = get_settings()
-    engine = create_engine(settings.index)
+    return create_engine(
+        settings.index,
+        pool_pre_ping=True,
+        pool_size=settings.db_pool_size,
+        max_overflow=settings.db_max_overflow,
+        pool_timeout=settings.db_pool_timeout,
+        connect_args={
+            "connect_timeout": settings.db_connect_timeout,
+        },
+    )
 
-    return engine
+
+engine = get_engine()
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 
-def get_session() -> Iterator[Session]:
+class SessionManager:
     """
-    Per-request session.
+    Session context manager.
     """
-    engine = get_engine()
 
-    with Session(engine, autoflush=False) as session:  # pragma: no cover
+    def __init__(self, session_maker: sessionmaker):
+        self.session: Session = session_maker()
+
+    def __enter__(self):
+        return self.session
+
+    def __exit__(self, exception_type, exception_value, traceback):
+        self.session.close()
+
+
+def close_session(session: Session):
+    """
+    Handles session closing
+    """
+    session.close()  # pragma: no cover
+
+
+def get_session(background_tasks: BackgroundTasks) -> Iterator[Session]:
+    """
+    Direct SQLAlchemy session.
+    """
+    with SessionManager(SessionLocal) as session:  # pragma: no cover
+        background_tasks.add_task(close_session, session)
         yield session
 
 
@@ -103,7 +138,7 @@ def get_issue_url(
     return baseurl % query_arguments
 
 
-class VersionUpgrade(str, Enum):
+class VersionUpgrade(StrEnum):
     """
     The version upgrade type
     """
@@ -164,58 +199,7 @@ def get_namespace_from_name(name: str) -> str:
     return node_namespace
 
 
-ACCEPTABLE_CHARS = set(ascii_letters + digits + "_")
-LOOKUP_CHARS = {
-    ".": "DOT",
-    "'": "QUOTE",
-    '"': "DQUOTE",
-    "`": "BTICK",
-    "!": "EXCL",
-    "@": "AT",
-    "#": "HASH",
-    "$": "DOLLAR",
-    "%": "PERC",
-    "^": "CARAT",
-    "&": "AMP",
-    "*": "STAR",
-    "(": "LPAREN",
-    ")": "RPAREN",
-    "[": "LBRACK",
-    "]": "RBRACK",
-    "-": "MINUS",
-    "+": "PLUS",
-    "=": "EQ",
-    "/": "FSLSH",
-    "\\": "BSLSH",
-    "|": "PIPE",
-    "~": "TILDE",
-}
-
-
-def amenable_name(name: str) -> str:
-    """Takes a string and makes it have only alphanumerics"""
-    ret: List[str] = []
-    cont: List[str] = []
-    for char in name:
-        if char in ACCEPTABLE_CHARS:
-            cont.append(char)
-        else:
-            ret.append("".join(cont))
-            ret.append(LOOKUP_CHARS.get(char, "UNK"))
-            cont = []
-
-    return ("_".join(ret) + "_" + "".join(cont)).strip("_")
-
-
-def from_amenable_name(name: str) -> str:
-    """
-    Takes a string and converts it back to a namespaced name
-    """
-    to_replace = f"_{LOOKUP_CHARS[SEPARATOR]}_"
-    return name.replace(to_replace, SEPARATOR)
-
-
-async def get_current_user(request: Request) -> Optional[User]:
+async def get_current_user(request: Request) -> Optional["User"]:
     """
     Returns the current authenticated user
     """

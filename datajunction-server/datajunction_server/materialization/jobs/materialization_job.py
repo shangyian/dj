@@ -4,12 +4,13 @@ Available materialization jobs.
 import abc
 from typing import Optional
 
+from datajunction_server.database.materialization import Materialization
 from datajunction_server.models.engine import Dialect
 from datajunction_server.models.materialization import (
     GenericMaterializationConfig,
     GenericMaterializationInput,
-    Materialization,
     MaterializationInfo,
+    MaterializationStrategy,
 )
 from datajunction_server.models.partition import PartitionBackfill
 from datajunction_server.service_clients import QueryServiceClient
@@ -83,7 +84,10 @@ class SparkSqlMaterializationJob(  # pylint: disable=too-few-public-methods # pr
             ),
         )
         final_query = query_ast
-        if temporal_partitions:
+        if (
+            temporal_partitions
+            and materialization.strategy == MaterializationStrategy.INCREMENTAL_TIME
+        ):
             temporal_partition_col = [
                 col
                 for col in query_ast.select.projection
@@ -120,7 +124,7 @@ class SparkSqlMaterializationJob(  # pylint: disable=too-few-public-methods # pr
                 ),
                 ctes=query_ast.ctes,
             )
-        print("QUERY!!!", str(final_query))
+
         result = query_service_client.materialize(
             GenericMaterializationInput(
                 name=materialization.name,  # type: ignore

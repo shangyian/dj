@@ -17,6 +17,9 @@ describe('<AddMaterializationPopover />', () => {
     const onSubmitMock = jest.fn();
     mockDjClient.DataJunctionAPI.materialize.mockReturnValue({
       status: 201,
+      json: {
+        message: 'Saved!',
+      },
     });
     mockDjClient.DataJunctionAPI.materializationInfo.mockReturnValue({
       status: 200,
@@ -30,7 +33,7 @@ describe('<AddMaterializationPopover />', () => {
             job_class: 'SparkSqlMaterializationJob',
           },
           {
-            name: 'druid_cube',
+            name: 'druid_metrics_cube',
             label: 'Druid Cube',
             description:
               'Used to materialize a cube to Druid for low-latency access to a set of metrics and dimensions. While the logical cube definition is at the level of metrics and dimensions, a materialized Druid cube will reference measures and dimensions, with rollup configured on the measures where appropriate.',

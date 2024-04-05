@@ -7,12 +7,13 @@ Custom types for annotations.
 from __future__ import annotations
 
 import datetime
-from enum import Enum
 from types import ModuleType
 from typing import Any, Iterator, List, Literal, Optional, Tuple, TypedDict, Union
 
 from pydantic.datetime_parse import parse_datetime
 from typing_extensions import Protocol
+
+from datajunction_server.enum import StrEnum
 
 
 class SQLADialect(Protocol):  # pylint: disable=too-few-public-methods
@@ -48,7 +49,7 @@ Row = Tuple[Any, ...]
 Stream = Iterator[Row]
 
 
-class TypeEnum(str, Enum):
+class TypeEnum(StrEnum):
     """
     PEP 249 basic types.
 
@@ -64,7 +65,7 @@ class TypeEnum(str, Enum):
     UNKNOWN = "UNKNOWN"
 
 
-class QueryState(str, Enum):
+class QueryState(StrEnum):
     """
     Different states of a query.
     """
@@ -327,6 +328,6 @@ class UTCDatetime(datetime.datetime):
         Convert to UTC
         """
         if value.tzinfo is None:
-            return value.replace(tzinfo=datetime.timezone.utc)
+            return value.replace(tzinfo=datetime.timezone.utc)  # pragma: no cover
 
         return value.astimezone(datetime.timezone.utc)
