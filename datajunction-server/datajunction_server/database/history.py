@@ -24,7 +24,6 @@ class ActivityType(StrEnum):
     TAG = "tag"
     SET_ATTRIBUTE = "set_attribute"
     STATUS_CHANGE = "status_change"
-    UPSTREAM_UPDATE = "upstream_update"
 
 
 class EntityType(StrEnum):

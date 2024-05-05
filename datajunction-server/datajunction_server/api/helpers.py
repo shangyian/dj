@@ -330,6 +330,8 @@ async def resolve_downstream_references(
                 )
 
             downstream_node_revision.status = node_validator.status
+
+            await session.refresh(downstream_node_revision, ["columns"])
             downstream_node_revision.columns = node_validator.columns
             if node_validator.status == NodeStatus.VALID:
                 newly_valid_nodes.append(downstream_node_revision)

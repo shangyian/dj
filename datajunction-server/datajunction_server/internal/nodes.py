@@ -867,7 +867,7 @@ async def propagate_update_downstream(  # pylint: disable=too-many-locals
                 entity_type=EntityType.NODE,
                 entity_name=downstream.name,
                 node=downstream.name,
-                activity_type=ActivityType.UPSTREAM_UPDATE,
+                activity_type=ActivityType.UPDATE,
                 details={
                     "changes": {
                         "updated_columns": sorted(list(node_validator.updated_columns)),
@@ -1830,7 +1830,6 @@ async def revalidate_node(  # pylint: disable=too-many-locals,too-many-statement
         )
 
     # Revalidate all other node types
-    previous_status = current_node_revision.status
     node_validator = await validate_node_data(current_node_revision, session)
 
     # Update the status
@@ -1849,7 +1848,7 @@ async def revalidate_node(  # pylint: disable=too-many-locals,too-many-statement
             updated_columns = True
 
     # Only create a new revision if the columns have been updated
-    if previous_status != node.current.status or updated_columns:  # type: ignore
+    if updated_columns:  # type: ignore
         new_revision = copy_existing_node_revision(node.current)  # type: ignore
         new_revision.version = str(
             Version.parse(node.current.version).next_major_version(),  # type: ignore

@@ -92,66 +92,72 @@ async def test_topological_sort(session: AsyncSession) -> None:
     """
     Test ``topological_sort``.
     """
-    node_A = Node(name="test.A", type=NodeType.TRANSFORM)
-    node_rev_A = NodeRevision(
-        node=node_A,
-        name=node_A.name,
+    node_a = Node(name="test.A", type=NodeType.TRANSFORM)
+    node_rev_a = NodeRevision(
+        node=node_a,
+        name=node_a.name,
         parents=[],
     )
-    node_A.current = node_rev_A
-    session.add(node_A)
-    session.add(node_rev_A)
+    node_a.current = node_rev_a
+    session.add(node_a)
+    session.add(node_rev_a)
 
-    node_B = Node(name="test.B", type=NodeType.TRANSFORM)
-    node_rev_B = NodeRevision(
-        node=node_B,
-        name=node_B.name,
-        parents=[node_A],
+    node_b = Node(name="test.B", type=NodeType.TRANSFORM)
+    node_rev_b = NodeRevision(
+        node=node_b,
+        name=node_b.name,
+        parents=[node_a],
     )
-    node_B.current = node_rev_B
-    session.add(node_B)
-    session.add(node_rev_B)
+    node_b.current = node_rev_b
+    session.add(node_b)
+    session.add(node_rev_b)
 
-    node_C = Node(name="test.C", type=NodeType.TRANSFORM)
-    node_rev_C = NodeRevision(
-        node=node_C,
-        name=node_C.name,
-        parents=[node_A],
+    node_c = Node(name="test.C", type=NodeType.TRANSFORM)
+    node_rev_c = NodeRevision(
+        node=node_c,
+        name=node_c.name,
+        parents=[node_a],
     )
-    node_C.current = node_rev_C
-    session.add(node_C)
-    session.add(node_rev_C)
+    node_c.current = node_rev_c
+    session.add(node_c)
+    session.add(node_rev_c)
 
-    node_D = Node(name="test.D", type=NodeType.TRANSFORM)
-    node_rev_D = NodeRevision(
-        node=node_D,
-        name=node_D.name,
-        parents=[node_B, node_C],
+    node_d = Node(name="test.D", type=NodeType.TRANSFORM)
+    node_rev_d = NodeRevision(
+        node=node_d,
+        name=node_d.name,
+        parents=[node_b, node_c],
     )
-    node_D.current = node_rev_D
-    session.add(node_D)
-    session.add(node_rev_D)
+    node_d.current = node_rev_d
+    session.add(node_d)
+    session.add(node_rev_d)
 
-    node_E = Node(name="test.E", type=NodeType.TRANSFORM)
-    node_rev_E = NodeRevision(
-        node=node_E,
-        name=node_E.name,
-        parents=[node_D],
+    node_e = Node(name="test.E", type=NodeType.TRANSFORM)
+    node_rev_e = NodeRevision(
+        node=node_e,
+        name=node_e.name,
+        parents=[node_d],
     )
-    node_E.current = node_rev_E
-    session.add(node_E)
-    session.add(node_rev_E)
+    node_e.current = node_rev_e
+    session.add(node_e)
+    session.add(node_rev_e)
 
-    node_F = Node(name="test.F", type=NodeType.TRANSFORM)
-    node_rev_D.parents.append(node_F)
-    node_rev_F = NodeRevision(
-        node=node_F,
-        name=node_F.name,
-        parents=[node_E],
+    node_f = Node(name="test.F", type=NodeType.TRANSFORM)
+    node_rev_d.parents.append(node_f)
+    node_rev_f = NodeRevision(
+        node=node_f,
+        name=node_f.name,
+        parents=[node_e],
     )
-    node_F.current = node_rev_F
-    session.add(node_F)
-    session.add(node_rev_F)
+    node_f.current = node_rev_f
+    session.add(node_f)
+    session.add(node_rev_f)
 
-    ordering = topological_sort([node_A, node_B, node_C, node_D, node_E])
-    assert [node.name for node in ordering] == [node_A.name, node_C.name, node_B.name, node_D.name, node_E.name]
+    ordering = topological_sort([node_a, node_b, node_c, node_d, node_e])
+    assert [node.name for node in ordering] == [
+        node_a.name,
+        node_c.name,
+        node_b.name,
+        node_d.name,
+        node_e.name,
+    ]
