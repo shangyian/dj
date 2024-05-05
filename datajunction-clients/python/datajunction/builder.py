@@ -5,7 +5,11 @@ from typing import Dict, List, Optional
 
 from datajunction import models
 from datajunction.client import DJClient
-from datajunction.exceptions import DJClientException, DJNamespaceAlreadyExists
+from datajunction.exceptions import (
+    DJClientException,
+    DJNamespaceAlreadyExists,
+    DJTableAlreadyRegistered,
+)
 from datajunction.nodes import Cube, Dimension, Metric, Namespace, Source, Transform
 from datajunction.tags import Tag
 
@@ -44,14 +48,15 @@ class DJBuilder(DJClient):  # pylint: disable=too-many-public-methods
         """
         Delete a namespace by name.
         """
-        response = self._session.delete(
+        response = self._session.request(
+            "DELETE",
             f"/namespaces/{namespace}/",
             timeout=self._timeout,
             params={
                 "cascade": cascade,
             },
         )
-        if not response.ok:
+        if not response.status_code < 400:
             raise DJClientException(response.json()["message"])
 
     def restore_namespace(self, namespace: str, cascade: bool = False) -> None:
@@ -80,7 +85,7 @@ class DJBuilder(DJClient):  # pylint: disable=too-many-public-methods
             timeout=self._timeout,
         )
         json_response = response.json()
-        if not response.ok:
+        if not response.status_code < 400:
             raise DJClientException(
                 f"Deleting node `{node_name}` failed: {json_response}",
             )  # pragma: no cover
@@ -94,7 +99,7 @@ class DJBuilder(DJClient):  # pylint: disable=too-many-public-methods
             timeout=self._timeout,
         )
         json_response = response.json()
-        if not response.ok:
+        if not response.status_code < 400:
             raise DJClientException(
                 f"Restoring node `{node_name}` failed: {json_response}",
             )  # pragma: no cover
@@ -139,12 +144,21 @@ class DJBuilder(DJClient):  # pylint: disable=too-many-public-methods
         Register a table as a source node. This will create a source node under the configured
         `source_node_namespace` (a server-side setting), which defaults to the `source` namespace.
         """
-        response = self._session.post(f"/register/table/{catalog}/{schema}/{table}/")
-        new_node = Source(
+        try:
+            response = self._session.post(
+                f"/register/table/{catalog}/{schema}/{table}/",
+            )
+        except Exception as exc:
+            if "409 Client Error" in str(exc):
+                raise DJTableAlreadyRegistered(catalog, schema, table) from exc
+            raise DJClientException(
+                f"Failed to register table `{catalog}.{schema}.{table}`: {exc}",
+            ) from exc
+        source_node = Source(
             **response.json(),
             dj_client=self,
         )
-        return new_node
+        return source_node
 
     #
     # Nodes: TRANSFORM

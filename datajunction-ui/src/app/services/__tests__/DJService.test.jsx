@@ -34,6 +34,22 @@ describe('DataJunctionAPI', () => {
     });
   });
 
+  it('calls catalogs correctly', async () => {
+    fetch.mockResponseOnce(JSON.stringify({}));
+    await DataJunctionAPI.catalogs();
+    expect(fetch).toHaveBeenCalledWith(`${DJ_URL}/catalogs`, {
+      credentials: 'include',
+    });
+  });
+
+  it('calls engines correctly', async () => {
+    fetch.mockResponseOnce(JSON.stringify({}));
+    await DataJunctionAPI.engines();
+    expect(fetch).toHaveBeenCalledWith(`${DJ_URL}/engines`, {
+      credentials: 'include',
+    });
+  });
+
   it('calls node correctly', async () => {
     fetch.mockResponseOnce(JSON.stringify(mocks.mockMetricNode));
     const nodeData = await DataJunctionAPI.node(mocks.mockMetricNode.name);
@@ -47,6 +63,57 @@ describe('DataJunctionAPI', () => {
     expect(nodeData.display_name).toEqual(mocks.mockMetricNode.display_name);
     expect(nodeData.type).toEqual(mocks.mockMetricNode.type);
     expect(nodeData.primary_key).toEqual([]);
+  });
+
+  it('calls nodeDetails correctly', async () => {
+    fetch.mockResponseOnce(JSON.stringify([mocks.mockMetricNode]));
+    const nodeData = await DataJunctionAPI.nodeDetails();
+    expect(fetch).toHaveBeenCalledWith(`${DJ_URL}/nodes/details/`, {
+      credentials: 'include',
+    });
+    expect(nodeData).toEqual([mocks.mockMetricNode]);
+  });
+
+  it('calls validate correctly', async () => {
+    fetch.mockResponseOnce(JSON.stringify([mocks.mockMetricNode]));
+    await DataJunctionAPI.validateNode(
+      'metric',
+      'default.num_repair_orders',
+      'aa',
+      'desc',
+      'select 1',
+    );
+    expect(fetch).toHaveBeenCalledWith(`${DJ_URL}/nodes/validate`, {
+      credentials: 'include',
+      body: JSON.stringify({
+        name: 'default.num_repair_orders',
+        display_name: 'aa',
+        description: 'desc',
+        query: 'select 1',
+        type: 'metric',
+        mode: 'published',
+      }),
+
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      method: 'POST',
+    });
+  });
+
+  it('calls registerTable correctly', async () => {
+    fetch.mockResponseOnce(JSON.stringify([mocks.mockMetricNode]));
+    await DataJunctionAPI.registerTable('default', 'xyz', 'abc');
+    expect(fetch).toHaveBeenCalledWith(
+      `${DJ_URL}/register/table/default/xyz/abc`,
+      {
+        credentials: 'include',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        method: 'POST',
+      },
+    );
   });
 
   it('node with errors are handled', async () => {

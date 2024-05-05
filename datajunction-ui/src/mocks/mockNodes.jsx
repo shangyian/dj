@@ -103,6 +103,7 @@ export const mocks = {
     created_at: '2023-08-21T16:48:56.841631+00:00',
     tags: [{ name: 'purpose', display_name: 'Purpose' }],
     dimension_links: [],
+    incompatible_druid_functions: ['IF'],
     dimensions: [
       {
         value: 'default.date_dim.dateint',
@@ -405,6 +406,53 @@ export const mocks = {
       post: { status: 'invalid' },
       details: {
         upstream_node: 'default.repair_order_details',
+      },
+      created_at: '2023-08-21T16:48:56.950482+00:00',
+    },
+    {
+      id: 7,
+      entity_type: 'backfill',
+      entity_name: 'default.avg_repair_price',
+      node: 'default.avg_repair_price',
+      activity_type: 'create',
+      user: null,
+      pre: { status: 'valid' },
+      post: { status: 'invalid' },
+      details: {
+        materialization: 'druid_metrics_cube__incremental_time__xyz',
+        partition: {
+          column_name: 'xyz.abc',
+          values: null,
+          range: ['20240201', '20240301'],
+        },
+      },
+      created_at: '2023-08-21T16:48:56.950482+00:00',
+    },
+    {
+      id: 8,
+      entity_type: 'node',
+      entity_name: 'default.avg_repair_price',
+      node: 'default.avg_repair_price',
+      activity_type: 'tag',
+      user: null,
+      pre: {},
+      post: {},
+      details: {
+        tags: ['a', 'b'],
+      },
+      created_at: '2023-08-21T16:48:56.950482+00:00',
+    },
+    {
+      id: 9,
+      entity_type: 'link',
+      entity_name: 'default.avg_repair_price',
+      node: 'default.avg_repair_price',
+      activity_type: 'create',
+      user: null,
+      pre: {},
+      post: {},
+      details: {
+        dimension: 'abcde',
       },
       created_at: '2023-08-21T16:48:56.950482+00:00',
     },

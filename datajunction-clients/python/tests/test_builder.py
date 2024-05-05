@@ -1,11 +1,15 @@
 """Tests DJ client"""
+from unittest.mock import MagicMock
+
 import pytest
+from requests.exceptions import HTTPError
 
 from datajunction import DJBuilder
 from datajunction.exceptions import (
     DJClientException,
     DJNamespaceAlreadyExists,
     DJNodeAlreadyExists,
+    DJTableAlreadyRegistered,
     DJTagAlreadyExists,
 )
 from datajunction.models import (
@@ -19,7 +23,7 @@ from datajunction.models import (
 )
 
 
-class TestDJBuilder:  # pylint: disable=too-many-public-methods
+class TestDJBuilder:  # pylint: disable=too-many-public-methods, protected-access
     """
     Tests for DJ client/builder functionality.
     """
@@ -260,6 +264,15 @@ class TestDJBuilder:  # pylint: disable=too-many-public-methods
             "source.default.store.comments"
             in client.namespace("source.default.store").sources()
         )
+        # and that errors are handled properly
+        client._session.post = MagicMock(
+            side_effect=HTTPError("409 Client Error: Conflict"),
+        )
+        with pytest.raises(DJTableAlreadyRegistered):
+            client.register_table(catalog="default", schema="store", table="comments")
+        client._session.post = MagicMock(side_effect=Exception("Boom!"))
+        with pytest.raises(DJClientException):
+            client.register_table(catalog="default", schema="store", table="comments")
 
     def test_create_and_update_node(self, client):  # pylint: disable=unused-argument
         """
@@ -482,7 +495,7 @@ class TestDJBuilder:  # pylint: disable=too-many-public-methods
             name="default.cube_one",
             description="Ice ice cube.",
             metrics=["default.number_of_account_types"],
-            dimensions=["default.payment_type"],
+            dimensions=["default.payment_type.payment_type_name"],
             mode=NodeMode.PUBLISHED,
         )
         assert cube_one.name == "default.cube_one"
@@ -543,19 +556,6 @@ class TestDJBuilder:  # pylint: disable=too-many-public-methods
         """
         Check that getting sql via the client works as expected.
         """
-        result = client.sql(metrics=["foo.bar.avg_repair_price"])
-        assert "SELECT" in result and "FROM" in result
-
-        # Retrieve SQL for a single metric
-        result = client.sql(
-            metrics=["foo.bar.avg_repair_price"],
-            dimensions=["dimension_that_does_not_exist"],
-            filters=[],
-        )
-        assert (
-            result["message"]
-            == "Please make sure that `dimension_that_does_not_exist` is a dimensional attribute."
-        )
 
         # Retrieve SQL for multiple metrics using the client object
         result = client.sql(
@@ -571,6 +571,23 @@ class TestDJBuilder:  # pylint: disable=too-many-public-methods
         )
         assert "SELECT" in result and "FROM" in result
 
+        result = client.sql(metrics=["foo.bar.avg_repair_price"])
+        assert "SELECT" in result and "FROM" in result
+
+        # Retrieve SQL for a single metric
+        result = client.sql(
+            metrics=["foo.bar.avg_repair_price"],
+            dimensions=["foo.bar.dimension_that_does_not_exist"],
+            filters=[],
+        )
+        assert (
+            result["message"]
+            == "Please make sure that `dimension_that_does_not_exist` is a dimensional attribute."
+            or result["message"]
+            == "foo.bar.dimension_that_does_not_exist are not available dimensions on "
+            "foo.bar.avg_repair_price"
+        )
+
         # Should fail due to dimension not being available
         result = client.sql(
             metrics=["foo.bar.num_repair_orders", "foo.bar.avg_repair_price"],
@@ -582,6 +599,9 @@ class TestDJBuilder:  # pylint: disable=too-many-public-methods
         assert result["message"] == (
             "The dimension attribute `default.hard_hat.city` is not available on "
             "every metric and thus cannot be included."
+        ) or result["message"] == (
+            "default.hard_hat.city are not available dimensions on "
+            "foo.bar.num_repair_orders, foo.bar.avg_repair_price"
         )
 
     def test_get_dimensions(self, client):
@@ -909,3 +929,58 @@ class TestDJBuilder:  # pylint: disable=too-many-public-methods
         node.save()
         repull_node = client.source("default.repair_orders")
         assert repull_node.tags == [tag]
+
+    def test_list_nodes_with_tags(self, client):
+        """
+        Test that we can list nodes with tags.
+        """
+        # create some tags
+        tag_foo = client.create_tag(
+            name="foo",
+            description="Foo",
+            tag_type="test",
+            tag_metadata={"foo": "bar"},
+        )
+        tag_bar = client.create_tag(
+            name="bar",
+            description="Bar",
+            tag_type="test",
+            tag_metadata={"foo": "bar"},
+        )
+
+        # tag some nodes
+        node_one = client.source("default.repair_orders")
+        node_one.tags.append(tag_foo)
+        node_one.tags.append(tag_bar)
+        node_one.save()
+
+        node_two = client.metric("default.num_repair_orders")
+        node_two.tags.append(tag_foo)
+        node_two.save()
+
+        node_three = client.dimension("default.repair_order")
+        node_three.tags.append(tag_foo)
+        node_three.tags.append(tag_bar)
+        node_three.save()
+
+        # list nodes with tags
+        nodes_with_foo = client.list_nodes_with_tags(tag_names=["foo"])
+        nodes_with_foo_and_bar = client.list_nodes_with_tags(tag_names=["bar", "foo"])
+
+        # evaluate
+        with pytest.raises(DJClientException):
+            client.list_nodes_with_tags(tag_names=["does-not-exist"])
+        assert (
+            client.list_nodes_with_tags(tag_names=["does-not-exist"], skip_missing=True)
+            == []
+        )
+        assert set(nodes_with_foo) == set(
+            [
+                "default.repair_order",
+                "default.repair_orders",
+                "default.num_repair_orders",
+            ],
+        )
+        assert set(nodes_with_foo_and_bar) == set(
+            ["default.repair_orders", "default.repair_order"],
+        )

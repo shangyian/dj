@@ -2,10 +2,10 @@
 Data related APIs.
 """
 
-from typing import Optional
+from typing import Annotated, Optional
 
-from fastapi import Depends, Request
-from sqlalchemy.orm import Session
+from fastapi import Depends, Header, Request
+from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette.sse import EventSourceResponse
 
 from datajunction_server.api.helpers import build_sql_for_dj_query, query_event_stream
@@ -27,11 +27,12 @@ router = SecureAPIRouter(tags=["DJSQL"])
 
 
 @router.get("/djsql/data", response_model=QueryWithResults)
-def get_data_for_djsql(  # pylint: disable=R0914, R0913
+async def get_data_for_djsql(  # pylint: disable=R0914, R0913
     query: str,
     async_: bool = False,
     *,
-    session: Session = Depends(get_session),
+    cache_control: Annotated[str, Header()] = "",
+    session: AsyncSession = Depends(get_session),
     query_service_client: QueryServiceClient = Depends(get_query_service_client),
     engine_name: Optional[str] = None,
     engine_version: Optional[str] = None,
@@ -48,7 +49,7 @@ def get_data_for_djsql(  # pylint: disable=R0914, R0913
         user=current_user,
         base_verb=access.ResourceRequestVerb.EXECUTE,
     )
-    translated_sql, engine, catalog = build_sql_for_dj_query(
+    translated_sql, engine, catalog = await build_sql_for_dj_query(
         session,
         query,
         access_control,
@@ -64,7 +65,10 @@ def get_data_for_djsql(  # pylint: disable=R0914, R0913
         async_=async_,
     )
 
-    result = query_service_client.submit_query(query_create)
+    result = query_service_client.submit_query(
+        query_create,
+        headers={"Cache-Control": cache_control},
+    )
 
     # Inject column info if there are results
     if result.results.__root__:  # pragma: no cover
@@ -74,10 +78,11 @@ def get_data_for_djsql(  # pylint: disable=R0914, R0913
 
 # pylint: disable=R0914, R0913
 @router.get("/djsql/stream/", response_model=QueryWithResults)
-def get_data_stream_for_djsql(  # pragma: no cover
+async def get_data_stream_for_djsql(  # pragma: no cover
     query: str,
     *,
-    session: Session = Depends(get_session),
+    cache_control: Annotated[str, Header()] = "",
+    session: AsyncSession = Depends(get_session),
     request: Request,
     query_service_client: QueryServiceClient = Depends(get_query_service_client),
     engine_name: Optional[str] = None,
@@ -94,7 +99,7 @@ def get_data_stream_for_djsql(  # pragma: no cover
         validate_access=validate_access,
         user=current_user,
     )
-    translated_sql, engine, catalog = build_sql_for_dj_query(
+    translated_sql, engine, catalog = await build_sql_for_dj_query(
         session,
         query,
         access_control,
@@ -111,9 +116,12 @@ def get_data_stream_for_djsql(  # pragma: no cover
     )
 
     # Submits the query, equivalent to calling POST /data/ directly
-    initial_query_info = query_service_client.submit_query(query_create)
+    initial_query_info = query_service_client.submit_query(
+        query_create,
+        headers={"Cache-Control": cache_control},
+    )
     return EventSourceResponse(
-        query_event_stream(
+        await query_event_stream(
             query=initial_query_info,
             query_service_client=query_service_client,
             columns=translated_sql.columns,  # type: ignore

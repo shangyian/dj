@@ -256,6 +256,11 @@ def _(ctx: list, nones=False):
 
 
 @visit.register
+def _(ctx: sbp.Any_valueContext):
+    return ast.Function(ast.Name("ANY_VALUE"), args=[visit(ctx.expression())])
+
+
+@visit.register
 def _(ctx: sbp.SingleStatementContext):
     return visit(ctx.statement())
 
@@ -620,8 +625,11 @@ def _(ctx: sbp.StringLitContext):
 def _(ctx: sbp.DereferenceContext):
     base = visit(ctx.base)
     field = visit(ctx.fieldName)
-    field.namespace = base.name
-    base.name = field
+    if isinstance(base, ast.Subscript) and isinstance(base.expr, ast.Column):
+        field.namespace = base.expr.name
+    if isinstance(base, ast.Column):
+        field.namespace = base.name
+        base.name = field
     return base
 
 

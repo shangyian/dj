@@ -3,7 +3,8 @@ Tests for the history endpoint
 """
 from unittest import mock
 
-from fastapi.testclient import TestClient
+import pytest
+from httpx import AsyncClient
 
 from datajunction_server.database.history import ActivityType, EntityType, History
 
@@ -27,11 +28,12 @@ def test_history_hash():
     assert hash(foo1) == hash(foo2)
 
 
-def test_get_history_entity(client_with_roads: TestClient):
+@pytest.mark.asyncio
+async def test_get_history_entity(client_with_roads: AsyncClient):
     """
     Test getting history for an entity
     """
-    response = client_with_roads.get("/history/node/default.repair_orders/")
+    response = await client_with_roads.get("/history/node/default.repair_orders/")
     assert response.status_code in (200, 201)
     history = response.json()
     assert len(history) == 1
@@ -52,12 +54,13 @@ def test_get_history_entity(client_with_roads: TestClient):
     ]
 
 
-def test_get_history_node(client_with_roads: TestClient):
+@pytest.mark.asyncio
+async def test_get_history_node(client_with_roads: AsyncClient):
     """
     Test getting history for a node
     """
 
-    response = client_with_roads.get("/history?node=default.repair_order")
+    response = await client_with_roads.get("/history?node=default.repair_order")
     assert response.status_code in (200, 201)
     history = response.json()
     assert len(history) == 5
@@ -66,43 +69,11 @@ def test_get_history_node(client_with_roads: TestClient):
             "activity_type": "create",
             "node": "default.repair_order",
             "created_at": mock.ANY,
-            "details": {},
-            "entity_name": "default.repair_order",
-            "entity_type": "node",
-            "id": mock.ANY,
-            "post": {},
-            "pre": {},
-            "user": "dj",
-        },
-        {
-            "activity_type": "set_attribute",
-            "node": "default.repair_order",
-            "created_at": mock.ANY,
             "details": {
-                "column": "repair_order_id",
-                "attributes": [
-                    {
-                        "name": "primary_key",
-                        "namespace": "system",
-                    },
-                ],
-            },
-            "entity_name": None,
-            "entity_type": "column_attribute",
-            "id": mock.ANY,
-            "post": {},
-            "pre": {},
-            "user": "dj",
-        },
-        {
-            "activity_type": "create",
-            "node": "default.repair_order",
-            "created_at": mock.ANY,
-            "details": {
-                "dimension": "default.dispatcher",
+                "dimension": "default.municipality_dim",
                 "join_cardinality": "many_to_one",
-                "join_sql": "default.repair_order.dispatcher_id = "
-                "default.dispatcher.dispatcher_id",
+                "join_sql": "default.repair_order.municipality_id = "
+                "default.municipality_dim.municipality_id",
                 "role": None,
             },
             "entity_name": "default.repair_order",
@@ -135,10 +106,10 @@ def test_get_history_node(client_with_roads: TestClient):
             "node": "default.repair_order",
             "created_at": mock.ANY,
             "details": {
-                "dimension": "default.municipality_dim",
+                "dimension": "default.dispatcher",
                 "join_cardinality": "many_to_one",
-                "join_sql": "default.repair_order.municipality_id = "
-                "default.municipality_dim.municipality_id",
+                "join_sql": "default.repair_order.dispatcher_id = "
+                "default.dispatcher.dispatcher_id",
                 "role": None,
             },
             "entity_name": "default.repair_order",
@@ -148,15 +119,48 @@ def test_get_history_node(client_with_roads: TestClient):
             "pre": {},
             "user": "dj",
         },
+        {
+            "activity_type": "set_attribute",
+            "node": "default.repair_order",
+            "created_at": mock.ANY,
+            "details": {
+                "column": "repair_order_id",
+                "attributes": [
+                    {
+                        "name": "primary_key",
+                        "namespace": "system",
+                    },
+                ],
+            },
+            "entity_name": None,
+            "entity_type": "column_attribute",
+            "id": mock.ANY,
+            "post": {},
+            "pre": {},
+            "user": "dj",
+        },
+        {
+            "activity_type": "create",
+            "node": "default.repair_order",
+            "created_at": mock.ANY,
+            "details": {},
+            "entity_name": "default.repair_order",
+            "entity_type": "node",
+            "id": mock.ANY,
+            "post": {},
+            "pre": {},
+            "user": "dj",
+        },
     ]
 
 
-def test_get_history_namespace(client_with_service_setup: TestClient):
+@pytest.mark.asyncio
+async def test_get_history_namespace(client_with_service_setup: AsyncClient):
     """
     Test getting history for a node context
     """
 
-    response = client_with_service_setup.get("/history/namespace/default")
+    response = await client_with_service_setup.get("/history/namespace/default")
     assert response.status_code in (200, 201)
     history = response.json()
     assert len(history) == 1

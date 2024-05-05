@@ -6,12 +6,15 @@ from typing import Callable, List, Optional
 # pylint: disable=C0302
 import duckdb
 import pytest
-from sqlalchemy.orm import Session
-from starlette.testclient import TestClient
+from httpx import AsyncClient, Response
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from datajunction_server.api.main import app
 from datajunction_server.database.column import Column
 from datajunction_server.database.database import Database
 from datajunction_server.database.node import Node, NodeRevision
+from datajunction_server.database.queryrequest import QueryBuildType, QueryRequest
 from datajunction_server.internal.access.authorization import validate_access
 from datajunction_server.models import access
 from datajunction_server.models.node_type import NodeType
@@ -20,9 +23,10 @@ from datajunction_server.sql.parsing.types import StringType
 from tests.sql.utils import compare_query_strings
 
 
-def test_sql(
-    session: Session,
-    client: TestClient,
+@pytest.mark.asyncio
+async def test_sql(
+    session: AsyncSession,
+    client: AsyncClient,
 ) -> None:
     """
     Test ``GET /sql/{name}/``.
@@ -52,12 +56,13 @@ def test_sql(
         query="SELECT COUNT(*) FROM default.my_table",
         type=NodeType.METRIC,
     )
+    node_revision.parents = [source_node]
     session.add(database)
     session.add(node_revision)
     session.add(source_node_rev)
-    session.commit()
+    await session.commit()
 
-    response = client.get("/sql/default.a_metric/").json()
+    response = (await client.get("/sql/default.a_metric/")).json()
     assert compare_query_strings(
         response["sql"],
         "SELECT  COUNT(*) default_DOT_a_metric \n FROM rev.my_table AS default_DOT_my_table\n",
@@ -73,6 +78,499 @@ def test_sql(
         },
     ]
     assert response["dialect"] is None
+
+    # Check that this query request has been saved
+    query_request = (await session.execute(select(QueryRequest))).scalars().all()
+    assert len(query_request) == 1
+    assert query_request[0].nodes == ["default.a_metric@1"]
+    assert query_request[0].dimensions == []
+    assert query_request[0].filters == []
+    assert query_request[0].orderby == []
+    assert query_request[0].limit is None
+    assert query_request[0].query_type == QueryBuildType.NODE
+    assert compare_query_strings(query_request[0].query, response["sql"])
+    assert query_request[0].columns == response["columns"]
+
+
+@pytest.fixture
+def transform_node_sql_request(client_with_roads: AsyncClient):
+    """
+    Request SQL for a transform node
+    GET `/sql/default.repair_orders_fact`
+    """
+
+    async def _make_request() -> Response:
+        transform_node_sql_params = {
+            "dimensions": [
+                "default.dispatcher.company_name",
+                "default.hard_hat.state",
+                "default.hard_hat.hard_hat_id",
+            ],
+            "filters": ["default.hard_hat.state = 'CA'"],
+            "limit": 200,
+            "orderby": ["default.dispatcher.company_name ASC"],
+        }
+        response = await client_with_roads.get(
+            "/sql/default.repair_orders_fact",
+            params=transform_node_sql_params,
+        )
+        return response
+
+    return _make_request
+
+
+@pytest.fixture
+def measures_sql_request(client_with_roads: AsyncClient):
+    """
+    Request measures SQL for some metrics
+    GET `/sql/measures`
+    """
+
+    async def _make_request() -> Response:
+        measures_sql_params = {
+            "metrics": ["default.num_repair_orders", "default.total_repair_cost"],
+            "dimensions": [
+                "default.dispatcher.company_name",
+                "default.hard_hat.state",
+            ],
+            "filters": ["default.hard_hat.state = 'CA'"],
+            "include_all_columns": True,
+        }
+        response = await client_with_roads.get(
+            "/sql/measures",
+            params=measures_sql_params,
+        )
+        return response
+
+    return _make_request
+
+
+@pytest.fixture
+def metrics_sql_request(client_with_roads: AsyncClient):
+    """
+    Request metrics SQL for some metrics
+    GET `/sql`
+    """
+
+    async def _make_request() -> Response:
+        metrics_sql_params = {
+            "metrics": ["default.num_repair_orders", "default.total_repair_cost"],
+            "dimensions": [
+                "default.dispatcher.company_name",
+                "default.hard_hat.state",
+            ],
+            "filters": ["default.hard_hat.state = 'CA'"],
+            "orderby": ["default.num_repair_orders DESC", "default.hard_hat.state"],
+            "limit": 50,
+        }
+        return await client_with_roads.get(
+            "/sql",
+            params=metrics_sql_params,
+        )
+
+    return _make_request
+
+
+@pytest.fixture
+def update_transform_node(client_with_roads: AsyncClient):
+    """
+    Update transform node with a simplified query
+    """
+
+    async def _make_request() -> Response:
+        response = await client_with_roads.patch(
+            "/nodes/default.repair_orders_fact",
+            json={
+                "query": """SELECT
+          repair_orders.repair_order_id,
+          repair_orders.municipality_id,
+          repair_orders.hard_hat_id,
+          repair_orders.dispatcher_id,
+          repair_orders.order_date,
+          repair_orders.dispatched_date,
+          repair_orders.required_date,
+          repair_order_details.discount,
+          repair_order_details.price * repair_order_details.quantity AS total_repair_cost
+        FROM
+          default.repair_orders repair_orders
+        JOIN
+          default.repair_order_details repair_order_details
+        ON repair_orders.repair_order_id = repair_order_details.repair_order_id""",
+            },
+        )
+        return response
+
+    return _make_request
+
+
+async def get_query_requests(session: AsyncSession, query_type: QueryBuildType):
+    """
+    Get all query requests of the specific query type
+    """
+    return (
+        (
+            await session.execute(
+                select(QueryRequest)
+                .where(
+                    QueryRequest.query_type == query_type,
+                )
+                .order_by(QueryRequest.created_at.asc()),
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+
+@pytest.mark.asyncio
+async def test_saving_node_sql_requests(  # pylint: disable=too-many-statements
+    session: AsyncSession,
+    client_with_roads: AsyncClient,
+    transform_node_sql_request,  # pylint: disable=redefined-outer-name
+    update_transform_node,  # pylint: disable=redefined-outer-name
+) -> None:
+    """
+    Test different scenarios involving saving and reusing cached query requests when
+    requesting node SQL for a transform.
+    """
+    response = await transform_node_sql_request()
+
+    # Check that this query request has been saved
+    query_request = await get_query_requests(session, QueryBuildType.NODE)
+    assert len(query_request) == 1
+    assert query_request[0].nodes == ["default.repair_orders_fact@v1.0"]
+    assert query_request[0].parents == [
+        "default.repair_order_details@v1.0",
+        "default.repair_orders@v1.0",
+    ]
+    assert query_request[0].dimensions == [
+        "default.dispatcher.company_name@v1.0",
+        "default.hard_hat.state@v1.0",
+        "default.hard_hat.hard_hat_id@v1.0",
+    ]
+    assert query_request[0].filters == ["default.hard_hat.state@v1.0 = 'CA'"]
+    assert query_request[0].orderby == [
+        "default.dispatcher.company_name@v1.0 ASC",
+    ]
+    assert query_request[0].limit == 200
+    assert query_request[0].query_type == QueryBuildType.NODE
+    assert query_request[0].query.strip() == response.json()["sql"].strip()
+    assert query_request[0].columns == response.json()["columns"]
+
+    # Requesting it again should reuse the saved request
+    await transform_node_sql_request()
+    query_requests = await get_query_requests(session, QueryBuildType.NODE)
+    assert len(query_requests) == 1
+
+    # Update the transform node to a query that invalidates the SQL request
+    response = await client_with_roads.patch(
+        "/nodes/default.repair_orders_fact",
+        json={
+            "query": """SELECT
+      repair_orders.repair_order_id
+    FROM
+      default.repair_orders repair_orders""",
+        },
+    )
+    assert response.status_code == 200
+
+    # This should now trigger error messages when requesting SQL
+    response = await transform_node_sql_request()
+    assert (
+        "Cannot resolve type of column default.repair_orders_fact.hard_hat_id"
+        in response.json()["message"]
+    )
+
+    # Update the transform node with a new query
+    response = await update_transform_node()
+    assert response.status_code == 200
+
+    response = (await transform_node_sql_request()).json()
+
+    # Check that the node update triggered an updated query request to be saved. Note that
+    # default.repair_orders_fact's version gets bumped, but default.hard_hat will stay the same
+    query_request = await get_query_requests(session, QueryBuildType.NODE)
+    assert len(query_request) == 2
+    assert query_request[1].nodes == ["default.repair_orders_fact@v3.0"]
+    assert query_request[1].parents == [
+        "default.repair_order_details@v1.0",
+        "default.repair_orders@v1.0",
+    ]
+    assert query_request[1].dimensions == [
+        "default.dispatcher.company_name@v1.0",
+        "default.hard_hat.state@v1.0",
+        "default.hard_hat.hard_hat_id@v1.0",
+    ]
+    assert query_request[1].filters == ["default.hard_hat.state@v1.0 = 'CA'"]
+    assert query_request[1].orderby == [
+        "default.dispatcher.company_name@v1.0 ASC",
+    ]
+    assert query_request[1].limit == 200
+    assert query_request[1].query_type == QueryBuildType.NODE
+    assert query_request[1].query.strip() == response["sql"].strip()
+    assert query_request[1].columns == response["columns"]
+
+    # Update the dimension node default.hard_hat with a new query
+    response = await client_with_roads.patch(
+        "/nodes/default.hard_hat",
+        json={"query": "SELECT hard_hat_id, state FROM default.hard_hats"},
+    )
+    assert response.status_code == 200
+
+    # Request the same node query again
+    response = (await transform_node_sql_request()).json()
+
+    # Check that the dimension node update triggered an updated query request to be saved. Now
+    # default.repair_orders_fact's version remains the same, but default.hard_hat gets bumped
+    query_request = await get_query_requests(session, QueryBuildType.NODE)
+    assert len(query_request) == 3
+    assert query_request[2].nodes == ["default.repair_orders_fact@v3.0"]
+    assert query_request[2].parents == [
+        "default.repair_order_details@v1.0",
+        "default.repair_orders@v1.0",
+    ]
+    assert query_request[2].dimensions == [
+        "default.dispatcher.company_name@v1.0",
+        "default.hard_hat.state@v2.0",
+        "default.hard_hat.hard_hat_id@v2.0",
+    ]
+    assert query_request[2].filters == ["default.hard_hat.state@v2.0 = 'CA'"]
+    assert query_request[2].orderby == [
+        "default.dispatcher.company_name@v1.0 ASC",
+    ]
+    assert query_request[2].limit == 200
+    assert query_request[2].query_type == QueryBuildType.NODE
+    assert query_request[2].query.strip() == response["sql"].strip()
+    assert query_request[2].columns == response["columns"]
+
+    # Remove a dimension node link to default.hard_hat
+    response = await client_with_roads.request(
+        "DELETE",
+        "/nodes/default.repair_orders_fact/link",
+        json={
+            "dimension_node": "default.hard_hat",
+        },
+    )
+    assert response.status_code == 201
+
+    # Now requesting metrics SQL with default.hard_hat.state should fail
+    response = (await transform_node_sql_request()).json()
+    assert response["message"] == (
+        "default.hard_hat.hard_hat_id, default.hard_hat.state are not available dimensions "
+        "on default.repair_orders_fact"
+    )
+
+
+@pytest.mark.asyncio
+async def test_saving_measures_sql_requests(
+    session: AsyncSession,
+    client_with_roads: AsyncClient,
+    measures_sql_request,  # pylint: disable=redefined-outer-name
+    update_transform_node,  # pylint: disable=redefined-outer-name
+) -> None:
+    """
+    Test saving query request while requesting measures SQL for a set of metrics + dimensions
+    + filters. It also checks that additional arguments like `include_all_columns` are recorded
+    in the query request key.
+    - Requesting metrics SQL (for a set of metrics + dimensions)
+    """
+    response = (await measures_sql_request()).json()
+
+    # Check that the measures SQL request was saved
+    query_requests = await get_query_requests(session, QueryBuildType.MEASURES)
+    assert len(query_requests) == 1
+    assert query_requests[0].nodes == [
+        "default.num_repair_orders@v1.0",
+        "default.total_repair_cost@v1.0",
+    ]
+    assert query_requests[0].dimensions == [
+        "default.dispatcher.company_name@v1.0",
+        "default.hard_hat.state@v1.0",
+    ]
+    assert query_requests[0].filters == ["default.hard_hat.state@v1.0 = 'CA'"]
+    assert query_requests[0].orderby == []
+    assert query_requests[0].limit is None
+    assert query_requests[0].query_type == QueryBuildType.MEASURES
+    assert query_requests[0].other_args == {"include_all_columns": True}
+    assert query_requests[0].query.strip() == response["sql"].strip()
+    assert query_requests[0].columns == response["columns"]
+
+    # Requesting it again should reuse the saved request
+    await measures_sql_request()
+    query_requests = await get_query_requests(session, QueryBuildType.MEASURES)
+    assert len(query_requests) == 1
+
+    # Update the underlying transform behind the metrics
+    response = await update_transform_node()
+    assert response.status_code == 200
+    response = (await measures_sql_request()).json()
+
+    # Check that the measures SQL request was saved
+    query_requests = await get_query_requests(session, QueryBuildType.MEASURES)
+    assert len(query_requests) == 2
+    assert query_requests[1].nodes == [
+        "default.num_repair_orders@v1.0",
+        "default.total_repair_cost@v1.0",
+    ]
+    assert query_requests[1].parents == [
+        "default.repair_order_details@v1.0",
+        "default.repair_orders@v1.0",
+        "default.repair_orders_fact@v2.0",
+    ]
+    assert query_requests[1].dimensions == [
+        "default.dispatcher.company_name@v1.0",
+        "default.hard_hat.state@v1.0",
+    ]
+    assert query_requests[1].filters == ["default.hard_hat.state@v1.0 = 'CA'"]
+    assert query_requests[1].orderby == []
+    assert query_requests[1].limit is None
+    assert query_requests[1].query_type == QueryBuildType.MEASURES
+    assert query_requests[1].other_args == {"include_all_columns": True}
+    assert query_requests[1].query.strip() == response["sql"].strip()
+    assert query_requests[1].columns == response["columns"]
+
+    # Remove a dimension node link to default.hard_hat
+    response = await client_with_roads.request(
+        "DELETE",
+        "/nodes/default.repair_orders_fact/link",
+        json={
+            "dimension_node": "default.hard_hat",
+        },
+    )
+    assert response.status_code == 201
+
+    # And requesting measures SQL with default.hard_hat.state should fail
+    response = (await measures_sql_request()).json()
+    assert response["message"] == (
+        "default.hard_hat.state are not available dimensions on default.num_repair_orders, default.total_repair_cost"
+    )
+
+
+@pytest.mark.asyncio
+async def test_saving_metrics_sql_requests(  # pylint: disable=too-many-statements
+    session: AsyncSession,
+    client_with_roads: AsyncClient,
+    metrics_sql_request,  # pylint: disable=redefined-outer-name
+    update_transform_node,  # pylint: disable=redefined-outer-name
+) -> None:
+    """
+    Requesting metrics SQL for a set of metrics + dimensions + filters
+    """
+    response = (await metrics_sql_request()).json()
+
+    # Check that the metrics SQL request was saved
+    query_request = await get_query_requests(session, QueryBuildType.METRICS)
+    assert len(query_request) == 1
+    assert query_request[0].nodes == [
+        "default.num_repair_orders@v1.0",
+        "default.total_repair_cost@v1.0",
+    ]
+    assert query_request[0].parents == [
+        "default.repair_order_details@v1.0",
+        "default.repair_orders@v1.0",
+        "default.repair_orders_fact@v1.0",
+    ]
+    assert query_request[0].dimensions == [
+        "default.dispatcher.company_name@v1.0",
+        "default.hard_hat.state@v1.0",
+    ]
+    assert query_request[0].filters == ["default.hard_hat.state@v1.0 = 'CA'"]
+    assert query_request[0].orderby == [
+        "default.num_repair_orders@v1.0 DESC",
+        "default.hard_hat.state@v1.0",
+    ]
+    assert query_request[0].limit == 50
+    assert query_request[0].engine_name is None
+    assert query_request[0].engine_version is None
+    assert query_request[0].other_args == {}
+
+    assert query_request[0].query_type == QueryBuildType.METRICS
+    assert query_request[0].query.strip() == response["sql"].strip()
+    assert query_request[0].columns == response["columns"]
+
+    # Requesting it again should reuse the cached values
+    await metrics_sql_request()
+    query_request = await get_query_requests(session, QueryBuildType.METRICS)
+    assert len(query_request) == 1
+
+    # Patch the underlying transform with a new query
+    await update_transform_node()
+
+    # Now requesting metrics SQL should not use the cached entry
+    response = (await metrics_sql_request()).json()
+
+    # Check that a new metrics SQL request was saved
+    query_request = await get_query_requests(session, QueryBuildType.METRICS)
+    assert len(query_request) == 2
+    assert query_request[1].nodes == [
+        "default.num_repair_orders@v1.0",
+        "default.total_repair_cost@v1.0",
+    ]
+    assert query_request[1].parents == [
+        "default.repair_order_details@v1.0",
+        "default.repair_orders@v1.0",
+        "default.repair_orders_fact@v2.0",
+    ]
+    assert query_request[1].dimensions == [
+        "default.dispatcher.company_name@v1.0",
+        "default.hard_hat.state@v1.0",
+    ]
+    assert query_request[1].filters == ["default.hard_hat.state@v1.0 = 'CA'"]
+    assert query_request[1].orderby == [
+        "default.num_repair_orders@v1.0 DESC",
+        "default.hard_hat.state@v1.0",
+    ]
+    assert query_request[1].limit == 50
+    assert query_request[1].engine_name is None
+    assert query_request[1].engine_version is None
+    assert query_request[1].other_args == {}
+
+    assert query_request[1].query_type == QueryBuildType.METRICS
+    assert query_request[1].query.strip() == response["sql"].strip()
+    assert query_request[1].columns == response["columns"]
+
+    # Request metrics SQL without dimensions, filters, limit or orderby
+    metrics_sql_params = {
+        "metrics": ["default.num_repair_orders", "default.total_repair_cost"],
+    }
+    response = (
+        await client_with_roads.get(
+            "/sql",
+            params=metrics_sql_params,
+        )
+    ).json()
+
+    # Check the query request entry that was saved
+    query_request = await get_query_requests(session, QueryBuildType.METRICS)
+    assert len(query_request) == 3
+    assert query_request[2].nodes == [
+        "default.num_repair_orders@v1.0",
+        "default.total_repair_cost@v1.0",
+    ]
+    assert query_request[2].parents == [
+        "default.repair_order_details@v1.0",
+        "default.repair_orders@v1.0",
+        "default.repair_orders_fact@v2.0",
+    ]
+    assert query_request[2].dimensions == []
+    assert query_request[2].filters == []
+    assert query_request[2].orderby == []
+    assert query_request[2].limit is None
+    assert query_request[2].engine_name is None
+    assert query_request[2].engine_version is None
+    assert query_request[2].other_args == {}
+
+    assert query_request[2].query_type == QueryBuildType.METRICS
+    assert query_request[2].query.strip() == response["sql"].strip()
+    assert query_request[2].columns == response["columns"]
+
+    # Request it again and check that no new entry was created
+    await client_with_roads.get(
+        "/sql",
+        params=metrics_sql_params,
+    )
+    query_request = await get_query_requests(session, QueryBuildType.METRICS)
+    assert len(query_request) == 3
 
 
 @pytest.mark.parametrize(
@@ -1020,7 +1518,8 @@ def test_sql(
         ),
     ],
 )
-def test_sql_with_filters(  # pylint: disable=too-many-arguments
+@pytest.mark.asyncio
+async def test_sql_with_filters(  # pylint: disable=too-many-arguments
     groups: List[str],
     node_name,
     dimensions,
@@ -1030,14 +1529,14 @@ def test_sql_with_filters(  # pylint: disable=too-many-arguments
     rows,
     client_with_query_service_example_loader: Callable[
         [Optional[List[str]]],
-        TestClient,
+        AsyncClient,
     ],
 ):
     """
     Test ``GET /sql/{node_name}/`` with various filters and dimensions.
     """
-    custom_client = client_with_query_service_example_loader(groups)
-    response = custom_client.get(
+    custom_client = await client_with_query_service_example_loader(groups)
+    response = await custom_client.get(
         f"/sql/{node_name}/",
         params={"dimensions": dimensions, "filters": filters},
     )
@@ -1047,7 +1546,7 @@ def test_sql_with_filters(  # pylint: disable=too-many-arguments
 
     # Run the query against local duckdb file if it's part of the roads model
     if "ROADS" in groups:
-        response = custom_client.get(
+        response = await custom_client.get(
             f"/data/{node_name}/",
             params={"dimensions": dimensions, "filters": filters},
         )
@@ -1221,19 +1720,20 @@ def test_sql_with_filters(  # pylint: disable=too-many-arguments
         ),
     ],
 )
-def test_sql_with_filters_on_namespaced_nodes(  # pylint: disable=R0913
+@pytest.mark.asyncio
+async def test_sql_with_filters_on_namespaced_nodes(  # pylint: disable=R0913
     node_name,
     dimensions,
     filters,
     orderby,
     sql,
-    client_with_namespaced_roads: TestClient,
+    client_with_namespaced_roads: AsyncClient,
 ):
     """
     Test ``GET /sql/{node_name}/`` with various filters and dimensions using a
     version of the DJ roads database with namespaces.
     """
-    response = client_with_namespaced_roads.get(
+    response = await client_with_namespaced_roads.get(
         f"/sql/{node_name}/",
         params={"dimensions": dimensions, "filters": filters, "orderby": orderby},
     )
@@ -1241,8 +1741,9 @@ def test_sql_with_filters_on_namespaced_nodes(  # pylint: disable=R0913
     assert str(parse(str(data["sql"]))) == str(parse(str(sql)))
 
 
-def test_sql_with_filters_orderby_no_access(  # pylint: disable=R0913
-    client_with_namespaced_roads: TestClient,
+@pytest.mark.asyncio
+async def test_sql_with_filters_orderby_no_access(  # pylint: disable=R0913
+    client_with_namespaced_roads: AsyncClient,
 ):
     """
     Test ``GET /sql/{node_name}/`` with various filters and dimensions using a
@@ -1255,7 +1756,6 @@ def test_sql_with_filters_orderby_no_access(  # pylint: disable=R0913
 
         return _validate_access
 
-    app = client_with_namespaced_roads.app
     app.dependency_overrides[validate_access] = validate_access_override
 
     node_name = "foo.bar.num_repair_orders"
@@ -1272,7 +1772,7 @@ def test_sql_with_filters_orderby_no_access(  # pylint: disable=R0913
         "foo.bar.repair_orders.order_date >= '2020-01-01'",
     ]
     orderby = ["foo.bar.hard_hat.last_name"]
-    response = client_with_namespaced_roads.get(
+    response = await client_with_namespaced_roads.get(
         f"/sql/{node_name}/",
         params={"dimensions": dimensions, "filters": filters, "orderby": orderby},
     )
@@ -1286,20 +1786,22 @@ def test_sql_with_filters_orderby_no_access(  # pylint: disable=R0913
         ),
     )
     assert data["errors"][0]["code"] == 500
+    app.dependency_overrides.clear()
 
 
-def test_cross_join_unnest(
-    client_example_loader: Callable[[Optional[List[str]]], TestClient],
+@pytest.mark.asyncio
+async def test_cross_join_unnest(
+    client_example_loader: Callable[[Optional[List[str]]], AsyncClient],
 ):
     """
     Verify cross join unnest on a joined in dimension works
     """
-    custom_client = client_example_loader(["LATERAL_VIEW"])
-    custom_client.post(
+    custom_client = await client_example_loader(["LATERAL_VIEW"])
+    await custom_client.post(
         "/nodes/basic.corrected_patches/columns/color_id/"
         "?dimension=basic.paint_colors_trino&dimension_column=color_id",
     )
-    response = custom_client.get(
+    response = await custom_client.get(
         "/sql/basic.avg_luminosity_patches/",
         params={
             "filters": [],
@@ -1344,18 +1846,19 @@ def test_cross_join_unnest(
     compare_query_strings(query, expected)
 
 
-def test_lateral_view_explode(
-    client_example_loader: Callable[[Optional[List[str]]], TestClient],
+@pytest.mark.asyncio
+async def test_lateral_view_explode(
+    client_example_loader: Callable[[Optional[List[str]]], AsyncClient],
 ):
     """
     Verify lateral view explode on a joined in dimension works
     """
-    custom_client = client_example_loader(["LATERAL_VIEW"])
-    custom_client.post(
+    custom_client = await client_example_loader(["LATERAL_VIEW"])
+    await custom_client.post(
         "/nodes/basic.corrected_patches/columns/color_id/"
         "?dimension=basic.paint_colors_spark&dimension_column=color_id",
     )
-    response = custom_client.get(
+    response = await custom_client.get(
         "/sql/basic.avg_luminosity_patches/",
         params={
             "filters": [],
@@ -1392,12 +1895,13 @@ def test_lateral_view_explode(
     compare_query_strings(query, expected)
 
 
-def test_get_sql_for_metrics_failures(client_with_account_revenue: TestClient):
+@pytest.mark.asyncio
+async def test_get_sql_for_metrics_failures(client_with_account_revenue: AsyncClient):
     """
     Test failure modes when getting sql for multiple metrics.
     """
     # Getting sql for no metrics fails appropriately
-    response = client_with_account_revenue.get(
+    response = await client_with_account_revenue.get(
         "/sql/",
         params={
             "metrics": [],
@@ -1414,7 +1918,7 @@ def test_get_sql_for_metrics_failures(client_with_account_revenue: TestClient):
     }
 
     # Getting sql for metric with no dimensions works
-    response = client_with_account_revenue.get(
+    response = await client_with_account_revenue.get(
         "/sql/",
         params={
             "metrics": ["default.number_of_account_types"],
@@ -1425,7 +1929,8 @@ def test_get_sql_for_metrics_failures(client_with_account_revenue: TestClient):
     assert response.status_code == 200
 
 
-def test_get_sql_for_metrics_no_access(client_with_roads: TestClient):
+@pytest.mark.asyncio
+async def test_get_sql_for_metrics_no_access(client_with_roads: AsyncClient):
     """
     Test getting sql for multiple metrics.
     """
@@ -1439,10 +1944,9 @@ def test_get_sql_for_metrics_no_access(client_with_roads: TestClient):
 
         return _validate_access
 
-    app = client_with_roads.app
     app.dependency_overrides[validate_access] = validate_access_override
 
-    response = client_with_roads.get(
+    response = await client_with_roads.get(
         "/sql/",
         params={
             "metrics": ["default.discounted_orders_rate", "default.num_repair_orders"],
@@ -1467,14 +1971,16 @@ def test_get_sql_for_metrics_no_access(client_with_roads: TestClient):
     assert "read:node/default.repair_orders_fact" in data["message"]
     assert "read:node/default.hard_hat" in data["message"]
     assert data["errors"][0]["code"] == 500
+    app.dependency_overrides.clear()
 
 
-def test_get_sql_for_metrics(client_with_roads: TestClient):
+@pytest.mark.asyncio
+async def test_get_sql_for_metrics(client_with_roads: AsyncClient):
     """
     Test getting sql for multiple metrics.
     """
 
-    response = client_with_roads.get(
+    response = await client_with_roads.get(
         "/sql/",
         params={
             "metrics": ["default.discounted_orders_rate", "default.num_repair_orders"],
@@ -1624,11 +2130,12 @@ def test_get_sql_for_metrics(client_with_roads: TestClient):
     ]
 
 
-def test_get_sql_including_dimension_ids(client_with_roads: TestClient):
+@pytest.mark.asyncio
+async def test_get_sql_including_dimension_ids(client_with_roads: AsyncClient):
     """
     Test getting SQL when there are dimensions ids included
     """
-    response = client_with_roads.get(
+    response = await client_with_roads.get(
         "/sql/",
         params={
             "metrics": ["default.avg_repair_price", "default.total_repair_cost"],
@@ -1676,7 +2183,7 @@ def test_get_sql_including_dimension_ids(client_with_roads: TestClient):
          FROM default_DOT_repair_orders_fact"""
     assert str(parse(str(expected))) == str(parse(str(data["sql"])))
 
-    response = client_with_roads.get(
+    response = await client_with_roads.get(
         "/sql/",
         params={
             "metrics": ["default.avg_repair_price", "default.total_repair_cost"],
@@ -1728,13 +2235,14 @@ def test_get_sql_including_dimension_ids(client_with_roads: TestClient):
     )
 
 
-def test_get_sql_including_dimensions_with_disambiguated_columns(
-    client_with_roads: TestClient,
+@pytest.mark.asyncio
+async def test_get_sql_including_dimensions_with_disambiguated_columns(
+    client_with_roads: AsyncClient,
 ):
     """
     Test getting SQL that includes dimensions with SQL that has to disambiguate projection columns with prefixes
     """
-    response = client_with_roads.get(
+    response = await client_with_roads.get(
         "/sql/",
         params={
             "metrics": ["default.total_repair_cost"],
@@ -1834,7 +2342,7 @@ def test_get_sql_including_dimensions_with_disambiguated_columns(
         """,
     )
 
-    response = client_with_roads.get(
+    response = await client_with_roads.get(
         "/sql/",
         params={
             "metrics": ["default.avg_repair_price", "default.total_repair_cost"],
@@ -1876,13 +2384,14 @@ def test_get_sql_including_dimensions_with_disambiguated_columns(
     assert str(parse(data["sql"])) == str(parse(expected))
 
 
-def test_get_sql_for_metrics_filters_validate_dimensions(
-    client_with_namespaced_roads: TestClient,
+@pytest.mark.asyncio
+async def test_get_sql_for_metrics_filters_validate_dimensions(
+    client_with_namespaced_roads: AsyncClient,
 ):
     """
     Test that we extract the columns from filters to validate that they are from shared dimensions
     """
-    response = client_with_namespaced_roads.get(
+    response = await client_with_namespaced_roads.get(
         "/sql/",
         params={
             "metrics": ["foo.bar.num_repair_orders", "foo.bar.avg_repair_price"],
@@ -1901,14 +2410,15 @@ def test_get_sql_for_metrics_filters_validate_dimensions(
     )
 
 
-def test_get_sql_for_metrics_orderby_not_in_dimensions(
-    client_example_loader: Callable[[Optional[List[str]]], TestClient],
+@pytest.mark.asyncio
+async def test_get_sql_for_metrics_orderby_not_in_dimensions(
+    client_example_loader: Callable[[Optional[List[str]]], AsyncClient],
 ):
     """
     Test that we extract the columns from filters to validate that they are from shared dimensions
     """
-    custom_client = client_example_loader(["ROADS", "NAMESPACED_ROADS"])
-    response = custom_client.get(
+    custom_client = await client_example_loader(["ROADS", "NAMESPACED_ROADS"])
+    response = await custom_client.get(
         "/sql/",
         params={
             "metrics": ["foo.bar.num_repair_orders", "foo.bar.avg_repair_price"],
@@ -1926,36 +2436,34 @@ def test_get_sql_for_metrics_orderby_not_in_dimensions(
     )
 
 
-def test_get_sql_for_metrics_orderby_not_in_dimensions_no_access(
-    client_example_loader: Callable[[Optional[List[str]]], TestClient],
+@pytest.mark.asyncio
+async def test_get_sql_for_metrics_orderby_not_in_dimensions_no_access(
+    client_example_loader: Callable[[Optional[List[str]]], AsyncClient],
 ):
     """
     Test that we extract the columns from filters to validate that they are from shared dimensions
     """
-    if isinstance(client_example_loader, TestClient):
 
-        def validate_access_override():
-            def _validate_access(access_control: access.AccessControl):
-                for request in access_control.requests:
-                    if (
-                        request.access_object.resource_type == access.ResourceType.NODE
-                        and request.access_object.name
-                        in (
-                            "foo.bar.avg_repair_price",
-                            "default.hard_hat.city",
-                        )
-                    ):
-                        request.deny()
-                    else:
-                        request.approve()
+    def validate_access_override():
+        def _validate_access(access_control: access.AccessControl):
+            for request in access_control.requests:
+                if (
+                    request.access_object.resource_type == access.ResourceType.NODE
+                    and request.access_object.name
+                    in (
+                        "foo.bar.avg_repair_price",
+                        "default.hard_hat.city",
+                    )
+                ):
+                    request.deny()
+                else:
+                    request.approve()
 
-            return _validate_access
+        return _validate_access
 
-        app = client_example_loader.app
-        app.dependency_overrides[validate_access] = validate_access_override
-
-    custom_client = client_example_loader(["ROADS", "NAMESPACED_ROADS"])
-    response = custom_client.get(
+    app.dependency_overrides[validate_access] = validate_access_override
+    custom_client = await client_example_loader(["ROADS", "NAMESPACED_ROADS"])
+    response = await custom_client.get(
         "/sql/",
         params={
             "metrics": ["foo.bar.num_repair_orders", "foo.bar.avg_repair_price"],
@@ -1971,15 +2479,17 @@ def test_get_sql_for_metrics_orderby_not_in_dimensions_no_access(
         "Columns ['default.hard_hat.city'] in order by "
         "clause must also be specified in the metrics or dimensions"
     )
+    app.dependency_overrides.clear()
 
 
-def test_sql_structs(client_with_roads: TestClient):
+@pytest.mark.asyncio
+async def test_sql_structs(client_with_roads: AsyncClient):
     """
     Create a transform with structs and verify that metric expressions that reference these
     structs, along with grouping by dimensions that reference these structs will work when
     building metrics SQL.
     """
-    client_with_roads.post(
+    await client_with_roads.post(
         "/nodes/transform",
         json={
             "name": "default.simple_agg",
@@ -2004,7 +2514,7 @@ GROUP BY
         },
     )
 
-    client_with_roads.post(
+    await client_with_roads.post(
         "/nodes/metric",
         json={
             "name": "default.average_dispatch_delay",
@@ -2020,7 +2530,7 @@ GROUP BY
         },
     ]
     for column in ["order_year", "order_month", "order_day"]:
-        client_with_roads.post(
+        await client_with_roads.post(
             f"/nodes/default.simple_agg/columns/{column}/attributes/",
             json=dimension_attr,
         )
@@ -2046,34 +2556,23 @@ FROM (SELECT  EXTRACT(YEAR, ro.relevant_dates.order_dt) AS order_year,
     COUNT(ro.repair_order_id) AS repair_orders_cnt
  FROM (SELECT  default_DOT_repair_orders.repair_order_id,
     struct(default_DOT_repair_orders.required_date AS required_dt, default_DOT_repair_orders.order_date AS order_dt, default_DOT_repair_orders.dispatched_date AS dispatched_dt) relevant_dates
- FROM roads.repair_orders AS default_DOT_repair_orders LEFT JOIN (SELECT  default_DOT_repair_orders.repair_order_id,
-    default_DOT_repair_orders.municipality_id,
-    default_DOT_repair_orders.hard_hat_id,
-    default_DOT_repair_orders.order_date,
-    default_DOT_repair_orders.required_date,
-    default_DOT_repair_orders.dispatched_date,
-    default_DOT_repair_orders.dispatcher_id
- FROM roads.repair_orders AS default_DOT_repair_orders)
- AS default_DOT_repair_order ON default_DOT_repair_orders.repair_order_id = default_DOT_repair_order.repair_order_id
-
-) AS ro
+ FROM roads.repair_orders AS default_DOT_repair_orders) AS ro
  GROUP BY  EXTRACT(YEAR, ro.relevant_dates.order_dt), EXTRACT(MONTH, ro.relevant_dates.order_dt), EXTRACT(DAY, ro.relevant_dates.order_dt))
  AS default_DOT_simple_agg
  WHERE  default_DOT_simple_agg.order_year = 2020
- GROUP BY  default_DOT_simple_agg.order_year, default_DOT_simple_agg.order_month, default_DOT_simple_agg.order_day
-)
+ GROUP BY  default_DOT_simple_agg.order_year, default_DOT_simple_agg.order_month, default_DOT_simple_agg.order_day)
 
 SELECT  default_DOT_simple_agg.default_DOT_average_dispatch_delay,
     default_DOT_simple_agg.default_DOT_simple_agg_DOT_order_year,
     default_DOT_simple_agg.default_DOT_simple_agg_DOT_order_month,
     default_DOT_simple_agg.default_DOT_simple_agg_DOT_order_day
  FROM default_DOT_simple_agg"""
-    response = client_with_roads.get("/sql", params=sql_params)
+    response = await client_with_roads.get("/sql", params=sql_params)
     data = response.json()
     assert str(parse(str(expected))) == str(parse(str(data["sql"])))
 
     # Test the same query string but with `ro` as a CTE
-    client_with_roads.patch(
+    await client_with_roads.patch(
         "/nodes/transform",
         json={
             "name": "default.simple_agg",
@@ -2097,7 +2596,7 @@ GROUP BY
         },
     )
 
-    response = client_with_roads.get("/sql", params=sql_params)
+    response = await client_with_roads.get("/sql", params=sql_params)
     data = response.json()
     assert compare_query_strings(data["sql"], expected)
 
@@ -2725,14 +3224,15 @@ SELECT  default_DOT_repair_orders_fact.default_DOT_repair_orders_fact_DOT_repair
         ),
     ],
 )
-def test_measures_sql_with_filters(  # pylint: disable=too-many-arguments
+@pytest.mark.asyncio
+async def test_measures_sql_with_filters(  # pylint: disable=too-many-arguments
     metrics,
     dimensions,
     filters,
     sql,
     columns,
     rows,
-    client_with_roads: TestClient,
+    client_with_roads: AsyncClient,
     duckdb_conn: duckdb.DuckDBPyConnection,  # pylint: disable=c-extension-no-member
 ):
     """
@@ -2743,9 +3243,63 @@ def test_measures_sql_with_filters(  # pylint: disable=too-many-arguments
         "dimensions": dimensions,
         "filters": filters,
     }
-    response = client_with_roads.get("/sql/measures", params=sql_params)
+    response = await client_with_roads.get("/sql/measures", params=sql_params)
     data = response.json()
+    print("data", data)
     assert str(parse(str(data["sql"]))) == str(parse(str(sql)))
     result = duckdb_conn.sql(data["sql"])
     assert result.fetchall() == rows
     assert data["columns"] == columns
+
+
+@pytest.mark.asyncio
+async def test_alias_node_sql(
+    client_with_roads: AsyncClient,
+):
+    """
+    Pushing down filters should use the column names and not the column aliases
+    """
+    response = await client_with_roads.patch(
+        "/nodes/default.repair_orders_fact",
+        json={
+            "query": "SELECT repair_orders.hard_hat_id AS hh_id "
+            "FROM default.repair_orders repair_orders",
+        },
+    )
+    assert response.status_code == 200
+
+    response = await client_with_roads.post(
+        "/nodes/default.repair_orders_fact/link",
+        json={
+            "dimension_node": "default.hard_hat",
+            "join_type": "left",
+            "join_on": (
+                "default.repair_orders_fact.hh_id = default.hard_hat.hard_hat_id"
+            ),
+        },
+    )
+    assert response.status_code == 201
+
+    response = await client_with_roads.get(
+        "/sql/default.repair_orders_fact",
+        params={
+            "dimensions": ["default.hard_hat.hard_hat_id"],
+            "filters": ["default.hard_hat.hard_hat_id IN (123, 13)"],
+        },
+    )
+    assert str(parse(response.json()["sql"])) == str(
+        parse(
+            """
+            SELECT
+              default_DOT_repair_orders_fact.hh_id default_DOT_repair_orders_fact_DOT_hh_id,
+              default_DOT_repair_orders_fact.hh_id default_DOT_hard_hat_DOT_hard_hat_id
+            FROM (
+              SELECT
+                default_DOT_repair_orders.hard_hat_id AS hh_id
+              FROM roads.repair_orders AS default_DOT_repair_orders
+              WHERE  default_DOT_repair_orders.hard_hat_id IN (123, 13)
+            ) AS default_DOT_repair_orders_fact
+            WHERE  default_DOT_repair_orders_fact.hh_id IN (123, 13)
+            """,
+        ),
+    )
