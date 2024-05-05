@@ -8,7 +8,7 @@ from datajunction_server.database.column import Column
 from datajunction_server.database.database import Database
 from datajunction_server.database.node import Node, NodeRevision
 from datajunction_server.models.node import DimensionAttributeOutput, NodeType
-from datajunction_server.sql.dag import get_dimensions
+from datajunction_server.sql.dag import get_dimensions, topological_sort
 from datajunction_server.sql.parsing.types import IntegerType, StringType
 
 
@@ -85,3 +85,73 @@ async def test_get_dimensions(session: AsyncSession) -> None:
             path=["A.b_id"],
         ),
     ]
+
+
+@pytest.mark.asyncio
+async def test_topological_sort(session: AsyncSession) -> None:
+    """
+    Test ``topological_sort``.
+    """
+    node_A = Node(name="test.A", type=NodeType.TRANSFORM)
+    node_rev_A = NodeRevision(
+        node=node_A,
+        name=node_A.name,
+        parents=[],
+    )
+    node_A.current = node_rev_A
+    session.add(node_A)
+    session.add(node_rev_A)
+
+    node_B = Node(name="test.B", type=NodeType.TRANSFORM)
+    node_rev_B = NodeRevision(
+        node=node_B,
+        name=node_B.name,
+        parents=[node_A],
+    )
+    node_B.current = node_rev_B
+    session.add(node_B)
+    session.add(node_rev_B)
+
+    node_C = Node(name="test.C", type=NodeType.TRANSFORM)
+    node_rev_C = NodeRevision(
+        node=node_C,
+        name=node_C.name,
+        parents=[node_A],
+    )
+    node_C.current = node_rev_C
+    session.add(node_C)
+    session.add(node_rev_C)
+
+    node_D = Node(name="test.D", type=NodeType.TRANSFORM)
+    node_rev_D = NodeRevision(
+        node=node_D,
+        name=node_D.name,
+        parents=[node_B, node_C],
+    )
+    node_D.current = node_rev_D
+    session.add(node_D)
+    session.add(node_rev_D)
+
+    node_E = Node(name="test.E", type=NodeType.TRANSFORM)
+    node_rev_E = NodeRevision(
+        node=node_E,
+        name=node_E.name,
+        parents=[node_D],
+    )
+    node_E.current = node_rev_E
+    session.add(node_E)
+    session.add(node_rev_E)
+
+    node_F = Node(name="test.F", type=NodeType.TRANSFORM)
+    node_rev_D.parents.append(node_F)
+    node_rev_F = NodeRevision(
+        node=node_F,
+        name=node_F.name,
+        parents=[node_E],
+    )
+    node_F.current = node_rev_F
+    session.add(node_F)
+    session.add(node_rev_F)
+
+    ordering = topological_sort([node_A, node_B, node_C, node_D, node_E])
+    assert [node.name for node in ordering] == [node_A.name, node_C.name, node_B.name, node_D.name, node_E.name]
