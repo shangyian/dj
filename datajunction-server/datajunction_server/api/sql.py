@@ -64,28 +64,28 @@ async def get_measures_sql_for_cube(
     This SQL can be used to produce an intermediate table with all the measures
     and dimensions needed for an analytics database (e.g., Druid).
     """
-    if query_request := await QueryRequest.get_query_request(
-        session,
-        nodes=metrics,
-        dimensions=dimensions,
-        filters=filters,
-        orderby=[],
-        limit=None,
-        engine_name=engine_name,
-        engine_version=engine_version,
-        query_type=QueryBuildType.MEASURES,
-        other_args={"include_all_columns": include_all_columns},
-    ):
-        engine = (
-            await get_engine(session, engine_name, engine_version)  # type: ignore
-            if engine_name
-            else None
-        )
-        return TranslatedSQL(
-            sql=query_request.query,
-            columns=query_request.columns,
-            dialect=engine.dialect if engine else None,
-        )
+    # if query_request := await QueryRequest.get_query_request(
+    #     session,
+    #     nodes=metrics,
+    #     dimensions=dimensions,
+    #     filters=filters,
+    #     orderby=[],
+    #     limit=None,
+    #     engine_name=engine_name,
+    #     engine_version=engine_version,
+    #     query_type=QueryBuildType.MEASURES,
+    #     other_args={"include_all_columns": include_all_columns},
+    # ):
+    #     engine = (
+    #         await get_engine(session, engine_name, engine_version)  # type: ignore
+    #         if engine_name
+    #         else None
+    #     )
+    #     return TranslatedSQL(
+    #         sql=query_request.query,
+    #         columns=query_request.columns,
+    #         dialect=engine.dialect if engine else None,
+    #     )
 
     measures_query = await get_measures_query(
         session=session,
@@ -237,37 +237,37 @@ async def get_node_sql(  # pylint: disable=too-many-locals
     )
     validate_orderby(orderby, [node_name], dimensions)
 
-    if query_request := await QueryRequest.get_query_request(
-        session,
-        nodes=[node_name],
-        dimensions=dimensions,
-        filters=filters,
-        orderby=orderby,
-        limit=limit,
-        engine_name=engine.name if engine else None,
-        engine_version=engine.version if engine else None,
-        query_type=QueryBuildType.NODE,
-    ):
-        # Update the node SQL in a background task to keep it up-to-date
-        background_tasks.add_task(
-            build_and_save_node_sql,
-            node_name=node_name,
-            dimensions=dimensions,
-            filters=filters,
-            orderby=orderby,
-            limit=limit,
-            session=session,
-            engine=engine,
-            access_control=access_control,
-        )
-        return (
-            TranslatedSQL(
-                sql=query_request.query,
-                columns=query_request.columns,
-                dialect=engine.dialect if engine else None,
-            ),
-            query_request,
-        )
+    # if query_request := await QueryRequest.get_query_request(
+    #     session,
+    #     nodes=[node_name],
+    #     dimensions=dimensions,
+    #     filters=filters,
+    #     orderby=orderby,
+    #     limit=limit,
+    #     engine_name=engine.name if engine else None,
+    #     engine_version=engine.version if engine else None,
+    #     query_type=QueryBuildType.NODE,
+    # ):
+    #     # Update the node SQL in a background task to keep it up-to-date
+    #     background_tasks.add_task(
+    #         build_and_save_node_sql,
+    #         node_name=node_name,
+    #         dimensions=dimensions,
+    #         filters=filters,
+    #         orderby=orderby,
+    #         limit=limit,
+    #         session=session,
+    #         engine=engine,
+    #         access_control=access_control,
+    #     )
+    #     return (
+    #         TranslatedSQL(
+    #             sql=query_request.query,
+    #             columns=query_request.columns,
+    #             dialect=engine.dialect if engine else None,
+    #         ),
+    #         query_request,
+    #     )
 
     query_request = await build_and_save_node_sql(
         node_name=node_name,
