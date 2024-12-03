@@ -44,12 +44,20 @@ jobs:
               - 'datajunction-clients/python/**'
               # run Python unit tests also when server is updated (because server changes can break the client)
               - 'datajunction-server/**'
+              exclude:
+                - '**/__about__.py'
             server:
               - 'datajunction-server/**'
+              exclude:
+                - '**/__about__.py'
             djqs:
               - 'datajunction-query/**'
+              exclude:
+                - '**/__about__.py'
             djrs:
               - 'datajunction-reflection/**'
+              exclude:
+                - '**/__about__.py'
 
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v2
