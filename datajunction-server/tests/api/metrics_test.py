@@ -24,6 +24,7 @@ expected_dimensions = [
         "is_primary_key": False,
         "type": "string",
         "path": ["default.repair_orders_fact"],
+        "is_hidden": False,
     },
     {
         "filter_only": False,
@@ -33,6 +34,7 @@ expected_dimensions = [
         "is_primary_key": True,
         "type": "int",
         "path": ["default.repair_orders_fact"],
+        "is_hidden": False,
     },
     {
         "filter_only": False,
@@ -42,6 +44,7 @@ expected_dimensions = [
         "is_primary_key": False,
         "type": "string",
         "path": ["default.repair_orders_fact"],
+        "is_hidden": False,
     },
     {
         "filter_only": False,
@@ -51,6 +54,7 @@ expected_dimensions = [
         "is_primary_key": False,
         "type": "string",
         "path": ["default.repair_orders_fact"],
+        "is_hidden": False,
     },
     {
         "filter_only": False,
@@ -60,6 +64,7 @@ expected_dimensions = [
         "is_primary_key": False,
         "type": "timestamp",
         "path": ["default.repair_orders_fact"],
+        "is_hidden": False,
     },
     {
         "filter_only": False,
@@ -69,6 +74,7 @@ expected_dimensions = [
         "is_primary_key": False,
         "type": "string",
         "path": ["default.repair_orders_fact"],
+        "is_hidden": False,
     },
     {
         "filter_only": False,
@@ -78,6 +84,7 @@ expected_dimensions = [
         "is_primary_key": False,
         "type": "int",
         "path": ["default.repair_orders_fact"],
+        "is_hidden": False,
     },
     {
         "filter_only": False,
@@ -87,6 +94,7 @@ expected_dimensions = [
         "is_primary_key": False,
         "type": "string",
         "path": ["default.repair_orders_fact"],
+        "is_hidden": False,
     },
     {
         "filter_only": False,
@@ -96,6 +104,7 @@ expected_dimensions = [
         "is_primary_key": False,
         "type": "string",
         "path": ["default.repair_orders_fact"],
+        "is_hidden": False,
     },
     {
         "filter_only": False,
@@ -105,6 +114,7 @@ expected_dimensions = [
         "is_primary_key": True,
         "type": "int",
         "path": ["default.repair_orders_fact"],
+        "is_hidden": False,
     },
     {
         "filter_only": False,
@@ -114,6 +124,7 @@ expected_dimensions = [
         "is_primary_key": False,
         "type": "timestamp",
         "path": ["default.repair_orders_fact"],
+        "is_hidden": False,
     },
     {
         "filter_only": False,
@@ -123,6 +134,7 @@ expected_dimensions = [
         "is_primary_key": False,
         "type": "string",
         "path": ["default.repair_orders_fact"],
+        "is_hidden": False,
     },
     {
         "filter_only": False,
@@ -132,6 +144,7 @@ expected_dimensions = [
         "is_primary_key": False,
         "type": "int",
         "path": ["default.repair_orders_fact"],
+        "is_hidden": False,
     },
     {
         "filter_only": False,
@@ -141,6 +154,7 @@ expected_dimensions = [
         "is_primary_key": False,
         "type": "string",
         "path": ["default.repair_orders_fact"],
+        "is_hidden": False,
     },
     {
         "filter_only": False,
@@ -150,6 +164,7 @@ expected_dimensions = [
         "is_primary_key": False,
         "type": "string",
         "path": ["default.repair_orders_fact"],
+        "is_hidden": False,
     },
     {
         "filter_only": False,
@@ -159,6 +174,7 @@ expected_dimensions = [
         "is_primary_key": False,
         "type": "string",
         "path": ["default.repair_orders_fact"],
+        "is_hidden": False,
     },
     {
         "filter_only": False,
@@ -168,6 +184,7 @@ expected_dimensions = [
         "is_primary_key": False,
         "type": "string",
         "path": ["default.repair_orders_fact"],
+        "is_hidden": False,
     },
     {
         "filter_only": False,
@@ -177,6 +194,7 @@ expected_dimensions = [
         "is_primary_key": False,
         "type": "timestamp",
         "path": ["default.repair_orders_fact"],
+        "is_hidden": False,
     },
     {
         "filter_only": False,
@@ -186,6 +204,7 @@ expected_dimensions = [
         "is_primary_key": False,
         "type": "string",
         "path": ["default.repair_orders_fact"],
+        "is_hidden": False,
     },
     {
         "filter_only": False,
@@ -195,6 +214,7 @@ expected_dimensions = [
         "is_primary_key": False,
         "type": "int",
         "path": ["default.repair_orders_fact"],
+        "is_hidden": False,
     },
     {
         "filter_only": False,
@@ -204,6 +224,7 @@ expected_dimensions = [
         "is_primary_key": False,
         "type": "string",
         "path": ["default.repair_orders_fact"],
+        "is_hidden": False,
     },
     {
         "filter_only": False,
@@ -213,6 +234,7 @@ expected_dimensions = [
         "is_primary_key": False,
         "type": "string",
         "path": ["default.repair_orders_fact"],
+        "is_hidden": False,
     },
     {
         "filter_only": False,
@@ -222,6 +244,7 @@ expected_dimensions = [
         "is_primary_key": True,
         "type": "int",
         "path": ["default.repair_orders_fact"],
+        "is_hidden": False,
     },
     {
         "filter_only": False,
@@ -231,6 +254,7 @@ expected_dimensions = [
         "is_primary_key": False,
         "type": "timestamp",
         "path": ["default.repair_orders_fact"],
+        "is_hidden": False,
     },
     {
         "filter_only": False,
@@ -240,6 +264,7 @@ expected_dimensions = [
         "is_primary_key": False,
         "type": "string",
         "path": ["default.repair_orders_fact"],
+        "is_hidden": False,
     },
     {
         "filter_only": False,
@@ -249,6 +274,7 @@ expected_dimensions = [
         "is_primary_key": False,
         "type": "int",
         "path": ["default.repair_orders_fact"],
+        "is_hidden": False,
     },
     {
         "filter_only": False,
@@ -258,6 +284,7 @@ expected_dimensions = [
         "is_primary_key": False,
         "type": "string",
         "path": ["default.repair_orders_fact"],
+        "is_hidden": False,
     },
     {
         "filter_only": False,
@@ -267,6 +294,7 @@ expected_dimensions = [
         "is_primary_key": False,
         "type": "string",
         "path": ["default.repair_orders_fact"],
+        "is_hidden": False,
     },
     {
         "filter_only": False,
@@ -276,6 +304,7 @@ expected_dimensions = [
         "is_primary_key": False,
         "type": "string",
         "path": ["default.repair_orders_fact"],
+        "is_hidden": False,
     },
     {
         "filter_only": False,
@@ -285,6 +314,7 @@ expected_dimensions = [
         "is_primary_key": False,
         "type": "string",
         "path": ["default.repair_orders_fact"],
+        "is_hidden": False,
     },
     {
         "filter_only": False,
@@ -294,6 +324,7 @@ expected_dimensions = [
         "is_primary_key": False,
         "type": "string",
         "path": ["default.repair_orders_fact"],
+        "is_hidden": False,
     },
     {
         "filter_only": False,
@@ -303,6 +334,7 @@ expected_dimensions = [
         "is_primary_key": False,
         "type": "string",
         "path": ["default.repair_orders_fact"],
+        "is_hidden": False,
     },
     {
         "filter_only": False,
@@ -312,6 +344,7 @@ expected_dimensions = [
         "is_primary_key": True,
         "type": "string",
         "path": ["default.repair_orders_fact"],
+        "is_hidden": False,
     },
     {
         "filter_only": False,
@@ -321,6 +354,7 @@ expected_dimensions = [
         "is_primary_key": False,
         "type": "string",
         "path": ["default.repair_orders_fact"],
+        "is_hidden": False,
     },
     {
         "filter_only": False,
@@ -330,6 +364,7 @@ expected_dimensions = [
         "is_primary_key": False,
         "type": "string",
         "path": ["default.repair_orders_fact"],
+        "is_hidden": False,
     },
     {
         "filter_only": False,
@@ -339,6 +374,7 @@ expected_dimensions = [
         "is_primary_key": False,
         "type": "int",
         "path": ["default.repair_orders_fact"],
+        "is_hidden": False,
     },
     {
         "filter_only": False,
@@ -348,6 +384,7 @@ expected_dimensions = [
         "is_primary_key": False,
         "type": "int",
         "path": ["default.repair_orders_fact", "default.hard_hat"],
+        "is_hidden": False,
     },
     {
         "filter_only": False,
@@ -357,6 +394,7 @@ expected_dimensions = [
         "is_primary_key": False,
         "type": "string",
         "path": ["default.repair_orders_fact", "default.hard_hat"],
+        "is_hidden": False,
     },
     {
         "filter_only": False,
@@ -366,6 +404,7 @@ expected_dimensions = [
         "is_primary_key": False,
         "type": "int",
         "path": ["default.repair_orders_fact", "default.hard_hat"],
+        "is_hidden": False,
     },
     {
         "filter_only": False,
@@ -375,6 +414,7 @@ expected_dimensions = [
         "is_primary_key": True,
         "type": "string",
         "path": ["default.repair_orders_fact", "default.hard_hat"],
+        "is_hidden": False,
     },
 ]
 
@@ -497,6 +537,7 @@ async def test_read_metric(
             "path": [],
             "type": "string",
             "filter_only": False,
+            "is_hidden": False,
         },
         {
             "is_primary_key": False,
@@ -506,6 +547,7 @@ async def test_read_metric(
             "path": [],
             "type": "float",
             "filter_only": False,
+            "is_hidden": False,
         },
         {
             "is_primary_key": False,
@@ -515,6 +557,7 @@ async def test_read_metric(
             "path": [],
             "type": "int",
             "filter_only": False,
+            "is_hidden": False,
         },
     ]
 
@@ -693,6 +736,7 @@ async def test_get_multi_link_dimensions(
             ],
             "type": "int",
             "filter_only": False,
+            "is_hidden": False,
         },
         {
             "is_primary_key": True,
@@ -705,6 +749,7 @@ async def test_get_multi_link_dimensions(
             ],
             "type": "int",
             "filter_only": False,
+            "is_hidden": False,
         },
         {
             "is_primary_key": True,
@@ -717,6 +762,7 @@ async def test_get_multi_link_dimensions(
             ],
             "type": "int",
             "filter_only": False,
+            "is_hidden": False,
         },
         {
             "is_primary_key": True,
@@ -729,6 +775,7 @@ async def test_get_multi_link_dimensions(
             ],
             "type": "int",
             "filter_only": False,
+            "is_hidden": False,
         },
         {
             "is_primary_key": False,
@@ -741,6 +788,7 @@ async def test_get_multi_link_dimensions(
             ],
             "type": "int",
             "filter_only": False,
+            "is_hidden": False,
         },
         {
             "is_primary_key": False,
@@ -753,6 +801,7 @@ async def test_get_multi_link_dimensions(
             ],
             "type": "int",
             "filter_only": False,
+            "is_hidden": False,
         },
         {
             "is_primary_key": False,
@@ -765,6 +814,7 @@ async def test_get_multi_link_dimensions(
             ],
             "type": "int",
             "filter_only": False,
+            "is_hidden": False,
         },
         {
             "is_primary_key": False,
@@ -777,6 +827,7 @@ async def test_get_multi_link_dimensions(
             ],
             "type": "int",
             "filter_only": False,
+            "is_hidden": False,
         },
         {
             "is_primary_key": False,
@@ -789,6 +840,7 @@ async def test_get_multi_link_dimensions(
             ],
             "type": "int",
             "filter_only": False,
+            "is_hidden": False,
         },
         {
             "is_primary_key": False,
@@ -801,6 +853,7 @@ async def test_get_multi_link_dimensions(
             ],
             "type": "int",
             "filter_only": False,
+            "is_hidden": False,
         },
         {
             "is_primary_key": False,
@@ -813,6 +866,7 @@ async def test_get_multi_link_dimensions(
             ],
             "type": "int",
             "filter_only": False,
+            "is_hidden": False,
         },
         {
             "is_primary_key": False,
@@ -825,6 +879,7 @@ async def test_get_multi_link_dimensions(
             ],
             "type": "int",
             "filter_only": False,
+            "is_hidden": False,
         },
         {
             "is_primary_key": False,
@@ -837,6 +892,7 @@ async def test_get_multi_link_dimensions(
             ],
             "type": "int",
             "filter_only": False,
+            "is_hidden": False,
         },
         {
             "is_primary_key": False,
@@ -849,6 +905,7 @@ async def test_get_multi_link_dimensions(
             ],
             "type": "int",
             "filter_only": False,
+            "is_hidden": False,
         },
         {
             "is_primary_key": False,
@@ -861,6 +918,7 @@ async def test_get_multi_link_dimensions(
             ],
             "type": "int",
             "filter_only": False,
+            "is_hidden": False,
         },
         {
             "is_primary_key": False,
@@ -873,6 +931,7 @@ async def test_get_multi_link_dimensions(
             ],
             "type": "int",
             "filter_only": False,
+            "is_hidden": False,
         },
         {
             "is_primary_key": True,
@@ -882,6 +941,7 @@ async def test_get_multi_link_dimensions(
             "path": ["default.user_dim.birth_country"],
             "type": "string",
             "filter_only": False,
+            "is_hidden": False,
         },
         {
             "is_primary_key": True,
@@ -891,6 +951,7 @@ async def test_get_multi_link_dimensions(
             "path": ["default.user_dim.residence_country"],
             "type": "string",
             "filter_only": False,
+            "is_hidden": False,
         },
         {
             "is_primary_key": False,
@@ -900,6 +961,7 @@ async def test_get_multi_link_dimensions(
             "path": ["default.user_dim.birth_country"],
             "type": "int",
             "filter_only": False,
+            "is_hidden": False,
         },
         {
             "is_primary_key": False,
@@ -909,6 +971,7 @@ async def test_get_multi_link_dimensions(
             "path": ["default.user_dim.residence_country"],
             "type": "int",
             "filter_only": False,
+            "is_hidden": False,
         },
         {
             "is_primary_key": False,
@@ -918,6 +981,7 @@ async def test_get_multi_link_dimensions(
             "path": ["default.user_dim.birth_country"],
             "type": "int",
             "filter_only": False,
+            "is_hidden": False,
         },
         {
             "is_primary_key": False,
@@ -927,6 +991,7 @@ async def test_get_multi_link_dimensions(
             "path": ["default.user_dim.residence_country"],
             "type": "int",
             "filter_only": False,
+            "is_hidden": False,
         },
         {
             "is_primary_key": False,
@@ -936,6 +1001,7 @@ async def test_get_multi_link_dimensions(
             "path": ["default.user_dim.birth_country"],
             "type": "string",
             "filter_only": False,
+            "is_hidden": False,
         },
         {
             "is_primary_key": False,
@@ -945,6 +1011,7 @@ async def test_get_multi_link_dimensions(
             "path": ["default.user_dim.residence_country"],
             "type": "string",
             "filter_only": False,
+            "is_hidden": False,
         },
         {
             "is_primary_key": False,
@@ -954,6 +1021,7 @@ async def test_get_multi_link_dimensions(
             "path": [],
             "type": "int",
             "filter_only": False,
+            "is_hidden": False,
         },
         {
             "is_primary_key": False,
@@ -963,6 +1031,7 @@ async def test_get_multi_link_dimensions(
             "path": [],
             "type": "string",
             "filter_only": False,
+            "is_hidden": False,
         },
         {
             "is_primary_key": False,
@@ -972,6 +1041,7 @@ async def test_get_multi_link_dimensions(
             "path": [],
             "type": "string",
             "filter_only": False,
+            "is_hidden": False,
         },
         {
             "is_primary_key": True,
@@ -981,6 +1051,7 @@ async def test_get_multi_link_dimensions(
             "path": [],
             "type": "int",
             "filter_only": False,
+            "is_hidden": False,
         },
     ]
 
