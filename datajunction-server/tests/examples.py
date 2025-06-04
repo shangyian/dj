@@ -1,8 +1,7 @@
-# pylint: disable=too-many-lines,C0301
-
 """
 Post requests for all example entities
 """
+
 from datajunction_server.database.column import Column
 from datajunction_server.models.query import QueryWithResults
 from datajunction_server.sql.parsing.types import IntegerType, StringType, TimestampType
@@ -74,6 +73,27 @@ ROADS = (  # type: ignore
             "catalog": "default",
             "schema_": "roads",
             "table": "repair_orders",
+        },
+    ),
+    (
+        "/nodes/source/",
+        {
+            "columns": [
+                {"name": "repair_order_id", "type": "int"},
+                {"name": "municipality_id", "type": "string"},
+                {"name": "hard_hat_id", "type": "int"},
+                {"name": "order_date", "type": "timestamp"},
+                {"name": "required_date", "type": "timestamp"},
+                {"name": "dispatched_date", "type": "timestamp"},
+                {"name": "dispatcher_id", "type": "int"},
+            ],
+            "description": "All repair orders (view)",
+            "mode": "published",
+            "name": "default.repair_orders_view",
+            "catalog": "default",
+            "schema_": "roads",
+            "table": "repair_orders_view",
+            "query": "CREATE OR REPLACE VIEW roads.repair_orders_view AS SELECT * FROM roads.repair_orders",
         },
     ),
     (
@@ -343,6 +363,58 @@ ROADS = (  # type: ignore
     (
         "/nodes/dimension/",
         {
+            "description": "Hard hat dimension #2",
+            "query": """
+                        SELECT
+                        hard_hat_id,
+                        last_name,
+                        first_name,
+                        title,
+                        birth_date,
+                        hire_date,
+                        address,
+                        city,
+                        state,
+                        postal_code,
+                        country,
+                        manager,
+                        contractor_id
+                        FROM default.hard_hats
+                    """,
+            "mode": "published",
+            "name": "default.hard_hat_2",
+            "primary_key": ["hard_hat_id"],
+        },
+    ),
+    (
+        "/nodes/dimension/",
+        {
+            "description": "Hard hat dimension (for deletion)",
+            "query": """
+                        SELECT
+                        hard_hat_id,
+                        last_name,
+                        first_name,
+                        title,
+                        birth_date,
+                        hire_date,
+                        address,
+                        city,
+                        state,
+                        postal_code,
+                        country,
+                        manager,
+                        contractor_id
+                        FROM default.hard_hats
+                    """,
+            "mode": "published",
+            "name": "default.hard_hat_to_delete",
+            "primary_key": ["hard_hat_id"],
+        },
+    ),
+    (
+        "/nodes/dimension/",
+        {
             "description": "Hard hat dimension",
             "query": """
                         SELECT
@@ -367,6 +439,32 @@ ROADS = (  # type: ignore
                     """,
             "mode": "published",
             "name": "default.local_hard_hats",
+            "primary_key": ["hard_hat_id"],
+        },
+    ),
+    (
+        "/nodes/dimension/",
+        {
+            "description": "Hard hat dimension #1",
+            "query": """
+                        SELECT hh.hard_hat_id
+                        FROM default.hard_hats hh
+                    """,
+            "mode": "published",
+            "name": "default.local_hard_hats_1",
+            "primary_key": ["hard_hat_id"],
+        },
+    ),
+    (
+        "/nodes/dimension/",
+        {
+            "description": "Hard hat dimension #2",
+            "query": """
+                        SELECT hh.hard_hat_id
+                        FROM default.hard_hats hh
+                    """,
+            "mode": "published",
+            "name": "default.local_hard_hats_2",
             "primary_key": ["hard_hat_id"],
         },
     ),
@@ -584,7 +682,9 @@ CROSS JOIN
         "/nodes/metric/",
         {
             "description": "Average length of employment",
-            "query": ("SELECT avg(NOW() - hire_date) " "FROM default.hard_hat"),
+            "query": (
+                "SELECT avg(CAST(NOW() AS DATE) - hire_date) FROM default.hard_hat"
+            ),
             "mode": "published",
             "name": "default.avg_length_of_employment",
         },
@@ -640,7 +740,7 @@ CROSS JOIN
         ("/nodes/default.repair_orders_fact/link"),
         {
             "dimension_node": "default.municipality_dim",
-            "join_type": "left",
+            "join_type": "inner",
             "join_on": (
                 "default.repair_orders_fact.municipality_id = default.municipality_dim.municipality_id"
             ),
@@ -650,7 +750,7 @@ CROSS JOIN
         "/nodes/default.repair_orders_fact/link",
         {
             "dimension_node": "default.hard_hat",
-            "join_type": "left",
+            "join_type": "inner",
             "join_on": (
                 "default.repair_orders_fact.hard_hat_id = default.hard_hat.hard_hat_id"
             ),
@@ -659,8 +759,18 @@ CROSS JOIN
     (
         "/nodes/default.repair_orders_fact/link",
         {
-            "dimension_node": "default.dispatcher",
+            "dimension_node": "default.hard_hat_to_delete",
             "join_type": "left",
+            "join_on": (
+                "default.repair_orders_fact.hard_hat_id = default.hard_hat_to_delete.hard_hat_id"
+            ),
+        },
+    ),
+    (
+        "/nodes/default.repair_orders_fact/link",
+        {
+            "dimension_node": "default.dispatcher",
+            "join_type": "inner",
             "join_on": (
                 "default.repair_orders_fact.dispatcher_id = default.dispatcher.dispatcher_id"
             ),
@@ -670,7 +780,7 @@ CROSS JOIN
         "/nodes/default.repair_order_details/link",
         {
             "dimension_node": "default.repair_order",
-            "join_type": "left",
+            "join_type": "inner",
             "join_on": (
                 "default.repair_order_details.repair_order_id = default.repair_order.repair_order_id"
             ),
@@ -680,7 +790,7 @@ CROSS JOIN
         "/nodes/default.repair_type/link",
         {
             "dimension_node": "default.contractor",
-            "join_type": "left",
+            "join_type": "inner",
             "join_on": (
                 "default.repair_type.contractor_id = default.contractor.contractor_id"
             ),
@@ -690,17 +800,35 @@ CROSS JOIN
         "/nodes/default.repair_orders/link",
         {
             "dimension_node": "default.repair_order",
-            "join_type": "left",
+            "join_type": "inner",
             "join_on": (
                 "default.repair_orders.repair_order_id = default.repair_order.repair_order_id"
             ),
         },
     ),
     (
+        "/nodes/default.repair_orders/link",
+        {
+            "dimension_node": "default.dispatcher",
+            "join_type": "inner",
+            "join_on": (
+                "default.repair_orders.dispatcher_id = default.dispatcher.dispatcher_id"
+            ),
+        },
+    ),
+    (
+        "/nodes/default.contractors/link",
+        {
+            "dimension_node": "default.us_state",
+            "join_type": "inner",
+            "join_on": ("default.contractors.state = default.us_state.state_short"),
+        },
+    ),
+    (
         "/nodes/default.hard_hat/link",
         {
             "dimension_node": "default.us_state",
-            "join_type": "left",
+            "join_type": "inner",
             "join_on": ("default.hard_hat.state = default.us_state.state_short"),
         },
     ),
@@ -708,7 +836,7 @@ CROSS JOIN
         "/nodes/default.repair_order_details/link",
         {
             "dimension_node": "default.repair_order",
-            "join_type": "left",
+            "join_type": "inner",
             "join_on": (
                 "default.repair_order_details.repair_order_id = default.repair_order.repair_order_id"
             ),
@@ -718,7 +846,7 @@ CROSS JOIN
         "/nodes/default.repair_order/link",
         {
             "dimension_node": "default.dispatcher",
-            "join_type": "left",
+            "join_type": "inner",
             "join_on": (
                 "default.repair_order.dispatcher_id = default.dispatcher.dispatcher_id"
             ),
@@ -728,7 +856,7 @@ CROSS JOIN
         "/nodes/default.repair_order/link",
         {
             "dimension_node": "default.hard_hat",
-            "join_type": "left",
+            "join_type": "inner",
             "join_on": (
                 "default.repair_order.hard_hat_id = default.hard_hat.hard_hat_id"
             ),
@@ -737,8 +865,18 @@ CROSS JOIN
     (
         "/nodes/default.repair_order/link",
         {
-            "dimension_node": "default.municipality_dim",
+            "dimension_node": "default.hard_hat_to_delete",
             "join_type": "left",
+            "join_on": (
+                "default.repair_order.hard_hat_id = default.hard_hat_to_delete.hard_hat_id"
+            ),
+        },
+    ),
+    (
+        "/nodes/default.repair_order/link",
+        {
+            "dimension_node": "default.municipality_dim",
+            "join_type": "inner",
             "join_on": (
                 "default.repair_order.municipality_id = default.municipality_dim.municipality_id"
             ),
@@ -1159,7 +1297,7 @@ NAMESPACED_ROADS = (  # type: ignore
         "/nodes/metric/",
         {
             "description": "Average length of employment",
-            "query": ("SELECT avg(NOW() - hire_date) " "FROM foo.bar.hard_hats"),
+            "query": ("SELECT avg(NOW() - hire_date) FROM foo.bar.hard_hats"),
             "mode": "published",
             "name": "foo.bar.avg_length_of_employment",
         },
@@ -1168,9 +1306,7 @@ NAMESPACED_ROADS = (  # type: ignore
         "/nodes/metric/",
         {
             "description": "Total repair order discounts",
-            "query": (
-                "SELECT sum(price * discount) " "FROM foo.bar.repair_order_details"
-            ),
+            "query": ("SELECT sum(price * discount) FROM foo.bar.repair_order_details"),
             "mode": "published",
             "name": "foo.bar.total_repair_order_discounts",
         },
@@ -1179,9 +1315,7 @@ NAMESPACED_ROADS = (  # type: ignore
         "/nodes/metric/",
         {
             "description": "Total repair order discounts",
-            "query": (
-                "SELECT avg(price * discount) " "FROM foo.bar.repair_order_details"
-            ),
+            "query": ("SELECT avg(price * discount) FROM foo.bar.repair_order_details"),
             "mode": "published",
             "name": "foo.bar.avg_repair_order_discounts",
         },
@@ -1191,7 +1325,7 @@ NAMESPACED_ROADS = (  # type: ignore
         {
             "description": "Average time to dispatch a repair order",
             "query": (
-                "SELECT avg(dispatched_date - order_date) " "FROM foo.bar.repair_orders"
+                "SELECT avg(dispatched_date - order_date) FROM foo.bar.repair_orders"
             ),
             "mode": "published",
             "name": "foo.bar.avg_time_to_dispatch",
@@ -1344,6 +1478,43 @@ ACCOUNT_REVENUE = (  # type: ignore
         {
             "query": (
                 "SELECT payment_id, payment_amount, customer_id, account_type "
+                "FROM default.revenue WHERE payment_amount > 1000000"
+            ),
+            "description": "Only large revenue payments #1",
+            "mode": "published",
+            "name": "default.large_revenue_payments_only_1",
+        },
+    ),
+    (
+        "/nodes/transform/",
+        {
+            "query": (
+                "SELECT payment_id, payment_amount, customer_id, account_type "
+                "FROM default.revenue WHERE payment_amount > 1000000"
+            ),
+            "description": "Only large revenue payments #2",
+            "mode": "published",
+            "name": "default.large_revenue_payments_only_2",
+        },
+    ),
+    (
+        "/nodes/transform/",
+        {
+            "query": (
+                "SELECT payment_id, payment_amount, customer_id, account_type "
+                "FROM default.revenue WHERE payment_amount > 1000000"
+            ),
+            "description": "Only large revenue payments",
+            "mode": "published",
+            "name": "default.large_revenue_payments_only_custom",
+            "custom_metadata": {"foo": "bar"},
+        },
+    ),
+    (
+        "/nodes/transform/",
+        {
+            "query": (
+                "SELECT payment_id, payment_amount, customer_id, account_type "
                 "FROM default.revenue WHERE "
                 "large_revenue_payments_and_business_only > 1000000 "
                 "AND account_type='BUSINESS'"
@@ -1351,6 +1522,20 @@ ACCOUNT_REVENUE = (  # type: ignore
             "description": "Only large revenue payments from business accounts",
             "mode": "published",
             "name": "default.large_revenue_payments_and_business_only",
+        },
+    ),
+    (
+        "/nodes/transform/",
+        {
+            "query": (
+                "SELECT payment_id, payment_amount, customer_id, account_type "
+                "FROM default.revenue WHERE "
+                "large_revenue_payments_and_business_only > 1000000 "
+                "AND account_type='BUSINESS'"
+            ),
+            "description": "Only large revenue payments from business accounts 1",
+            "mode": "published",
+            "name": "default.large_revenue_payments_and_business_only_1",
         },
     ),
     (
@@ -1386,7 +1571,11 @@ BASIC = (  # type: ignore
                 {"name": "id", "type": "int"},
                 {"name": "full_name", "type": "string"},
                 {"name": "age", "type": "int"},
-                {"name": "country", "type": "string"},
+                {
+                    "name": "country",
+                    "type": "string",
+                    "dimension": "basic.dimension.countries",
+                },
                 {"name": "gender", "type": "string"},
                 {"name": "preferred_language", "type": "string"},
                 {"name": "secret_number", "type": "float"},
@@ -1474,9 +1663,132 @@ BASIC = (  # type: ignore
         {
             "description": "Number of users.",
             "type": "metric",
-            "query": ("SELECT SUM(num_users) FROM basic.transform.country_agg"),
+            "query": ("SELECT SUM(1) FROM basic.dimension.users"),
             "mode": "published",
             "name": "basic.num_users",
+        },
+    ),
+)
+
+BASIC_IN_DIFFERENT_CATALOG = (  # type: ignore
+    (
+        "/namespaces/different.basic/",
+        {},
+    ),
+    (
+        "/namespaces/different.basic.source/",
+        {},
+    ),
+    (
+        "/namespaces/different.basic.transform/",
+        {},
+    ),
+    (
+        "/namespaces/different.basic.dimension/",
+        {},
+    ),
+    (
+        "/nodes/source/",
+        {
+            "name": "different.basic.source.users",
+            "description": "A user table",
+            "columns": [
+                {"name": "id", "type": "int"},
+                {"name": "full_name", "type": "string"},
+                {"name": "age", "type": "int"},
+                {"name": "country", "type": "string"},
+                {"name": "gender", "type": "string"},
+                {"name": "preferred_language", "type": "string"},
+                {"name": "secret_number", "type": "float"},
+                {"name": "created_at", "type": "timestamp"},
+                {"name": "post_processing_timestamp", "type": "timestamp"},
+            ],
+            "mode": "published",
+            "catalog": "default",
+            "schema_": "basic",
+            "table": "dim_users",
+        },
+    ),
+    (
+        "/nodes/dimension/",
+        {
+            "description": "User dimension",
+            "query": (
+                "SELECT id, full_name, age, country, gender, preferred_language, "
+                "secret_number, created_at, post_processing_timestamp "
+                "FROM different.basic.source.users"
+            ),
+            "mode": "published",
+            "name": "different.basic.dimension.users",
+            "primary_key": ["id"],
+        },
+    ),
+    (
+        "/nodes/source/",
+        {
+            "name": "different.basic.source.comments",
+            "description": "A fact table with comments",
+            "columns": [
+                {"name": "id", "type": "int"},
+                {
+                    "name": "user_id",
+                    "type": "int",
+                    "dimension": "different.basic.dimension.users",
+                },
+                {"name": "timestamp", "type": "timestamp"},
+                {"name": "text", "type": "string"},
+                {"name": "event_timestamp", "type": "timestamp"},
+                {"name": "created_at", "type": "timestamp"},
+                {"name": "post_processing_timestamp", "type": "timestamp"},
+            ],
+            "mode": "published",
+            "catalog": "default",
+            "schema_": "basic",
+            "table": "comments",
+        },
+    ),
+    (
+        "/nodes/dimension/",
+        {
+            "description": "Country dimension",
+            "query": "SELECT country, COUNT(1) AS user_cnt "
+            "FROM different.basic.source.users GROUP BY country",
+            "mode": "published",
+            "name": "different.basic.dimension.countries",
+            "primary_key": ["country"],
+        },
+    ),
+    (
+        "/nodes/transform/",
+        {
+            "description": "Country level agg table",
+            "query": (
+                "SELECT country, COUNT(DISTINCT id) AS num_users "
+                "FROM different.basic.source.users GROUP BY 1"
+            ),
+            "mode": "published",
+            "name": "different.basic.transform.country_agg",
+        },
+    ),
+    (
+        "/nodes/metric/",
+        {
+            "description": "Number of comments",
+            "query": ("SELECT COUNT(1) FROM different.basic.source.comments"),
+            "mode": "published",
+            "name": "different.basic.num_comments",
+        },
+    ),
+    (
+        "/nodes/metric/",
+        {
+            "description": "Number of users.",
+            "type": "metric",
+            "query": (
+                "SELECT SUM(num_users) FROM different.basic.transform.country_agg"
+            ),
+            "mode": "published",
+            "name": "different.basic.num_users",
         },
     ),
 )
@@ -1541,7 +1853,7 @@ EVENT = (  # type: ignore
         {
             "name": "default.device_ids_count",
             "description": "Number of Distinct Devices",
-            "query": "SELECT COUNT(DISTINCT device_id) " "FROM default.event_source",
+            "query": "SELECT COUNT(DISTINCT device_id) FROM default.event_source",
             "mode": "published",
         },
     ),
@@ -1550,7 +1862,7 @@ EVENT = (  # type: ignore
         {
             "name": "default.long_events_distinct_countries",
             "description": "Number of Distinct Countries for Long Events",
-            "query": "SELECT COUNT(DISTINCT country) " "FROM default.long_events",
+            "query": "SELECT COUNT(DISTINCT country) FROM default.long_events",
             "mode": "published",
         },
     ),
@@ -1598,8 +1910,7 @@ DBT = (  # type: ignore
         {
             "description": "User dimension",
             "query": (
-                "SELECT id, first_name, last_name "
-                "FROM dbt.source.jaffle_shop.customers"
+                "SELECT id, first_name, last_name FROM dbt.source.jaffle_shop.customers"
             ),
             "mode": "published",
             "name": "dbt.dimension.customers",
@@ -1690,7 +2001,7 @@ DBT = (  # type: ignore
         {
             "description": "Item dimension",
             "query": (
-                "SELECT item_name " "account_type_classification FROM default.sales"
+                "SELECT item_name account_type_classification FROM default.sales"
             ),
             "mode": "published",
             "name": "default.items",
@@ -1713,6 +2024,16 @@ DBT = (  # type: ignore
             "query": "SELECT SUM(sold_count * price_per_unit) FROM default.sales",
             "mode": "published",
             "name": "default.total_profit",
+        },
+    ),
+    (
+        "/nodes/dbt.source.jaffle_shop.orders/link",
+        {
+            "dimension_node": "dbt.dimension.customers",
+            "join_type": "inner",
+            "join_on": (
+                "dbt.source.jaffle_shop.orders.user_id = dbt.dimension.customers.id"
+            ),
         },
     ),
 )
@@ -1849,6 +2170,7 @@ COMPLEX_DIMENSION_LINK = (
                 {"name": "event_start_date", "type": "int"},
                 {"name": "event_end_date", "type": "int"},
                 {"name": "elapsed_secs", "type": "int"},
+                {"name": "user_registration_country", "type": "string"},
             ],
             "description": "Events table",
             "mode": "published",
@@ -1901,7 +2223,8 @@ COMPLEX_DIMENSION_LINK = (
             user_id,
             event_start_date,
             event_end_date,
-            elapsed_secs
+            elapsed_secs,
+            user_registration_country
         FROM default.events_table
     """,
             "mode": "published",
@@ -2120,6 +2443,7 @@ EXAMPLES = {  # type: ignore
     "NAMESPACED_ROADS": NAMESPACED_ROADS,
     "ACCOUNT_REVENUE": ACCOUNT_REVENUE,
     "BASIC": BASIC,
+    "BASIC_IN_DIFFERENT_CATALOG": BASIC_IN_DIFFERENT_CATALOG,
     "EVENT": EVENT,
     "DBT": DBT,
     "LATERAL_VIEW": LATERAL_VIEW,
@@ -2143,6 +2467,20 @@ COLUMN_MAPPINGS = {
         Column(name="dispatched_date", type=TimestampType(), order=5),
         Column(name="dispatcher_id", type=IntegerType(), order=6),
         Column(name="rating", type=IntegerType(), order=7),
+    ],
+    "default.roads.repair_orders_view": [
+        Column(name="repair_order_id", type=IntegerType(), order=0),
+        Column(name="municipality_id", type=StringType(), order=1),
+        Column(name="hard_hat_id", type=IntegerType(), order=2),
+        Column(name="order_date", type=TimestampType(), order=3),
+        Column(name="required_date", type=TimestampType(), order=4),
+        Column(name="dispatched_date", type=TimestampType(), order=5),
+        Column(name="dispatcher_id", type=IntegerType(), order=6),
+        Column(name="rating", type=IntegerType(), order=7),
+    ],
+    "public.main.view_foo": [
+        Column(name="one", type=IntegerType(), order=0),
+        Column(name="two", type=StringType(), order=1),
     ],
 }
 
@@ -2188,6 +2526,6 @@ QUERY_DATA_MAPPINGS = {
                 },
             ],
             "errors": [],
-        }
+        },
     ),
 }

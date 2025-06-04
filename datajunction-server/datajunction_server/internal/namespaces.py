@@ -1,28 +1,34 @@
 """
 Helper methods for namespaces endpoints.
 """
+
 import os
 import re
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Tuple
 
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
 
-from datajunction_server.api.helpers import get_node_namespace, hard_delete_node
-from datajunction_server.database.history import ActivityType, EntityType, History
+from datajunction_server.api.helpers import get_node_namespace
+from datajunction_server.database.history import History
 from datajunction_server.database.namespace import NodeNamespace
-from datajunction_server.database.node import Node, NodeRevision
+from datajunction_server.database.node import Column, Node, NodeRevision
 from datajunction_server.database.user import User
 from datajunction_server.errors import (
     DJActionNotAllowedException,
     DJDoesNotExistException,
     DJInvalidInputException,
 )
-from datajunction_server.internal.nodes import get_cube_revision_metadata
+from datajunction_server.internal.history import ActivityType, EntityType
+from datajunction_server.internal.nodes import (
+    get_single_cube_revision_metadata,
+    hard_delete_node,
+)
 from datajunction_server.models.node import NodeMinimumDetail
 from datajunction_server.models.node_type import NodeType
+from datajunction_server.sql.dag import topological_sort
 from datajunction_server.typing import UTCDatetime
 from datajunction_server.utils import SEPARATOR
 
@@ -63,7 +69,7 @@ async def get_nodes_in_namespace_detailed(
         select(Node)
         .where(
             or_(
-                Node.namespace.like(f"{namespace}.%"),  # pylint: disable=no-member
+                Node.namespace.like(f"{namespace}.%"),
                 Node.namespace == namespace,
             ),
             Node.current_version == NodeRevision.version,
@@ -74,12 +80,13 @@ async def get_nodes_in_namespace_detailed(
             joinedload(Node.current).options(
                 *NodeRevision.default_load_options(),
             ),
+            joinedload(Node.tags),
         )
     )
     return (await session.execute(list_nodes_query)).unique().scalars().all()
 
 
-async def list_namespaces_in_hierarchy(  # pylint: disable=too-many-arguments
+async def list_namespaces_in_hierarchy(
     session: AsyncSession,
     namespace: str,
 ) -> List[NodeNamespace]:
@@ -88,7 +95,7 @@ async def list_namespaces_in_hierarchy(  # pylint: disable=too-many-arguments
     """
     statement = select(NodeNamespace).where(
         or_(
-            NodeNamespace.namespace.like(  # pylint: disable=no-member
+            NodeNamespace.namespace.like(
                 f"{namespace}.%",
             ),
             NodeNamespace.namespace == namespace,
@@ -106,8 +113,9 @@ async def list_namespaces_in_hierarchy(  # pylint: disable=too-many-arguments
 async def mark_namespace_deactivated(
     session: AsyncSession,
     namespace: NodeNamespace,
+    current_user: User,
+    save_history: Callable,
     message: str = None,
-    current_user: Optional[User] = None,
 ):
     """
     Deactivates the node namespace and updates history indicating so
@@ -121,15 +129,16 @@ async def mark_namespace_deactivated(
         minute=now.minute,
         second=now.second,
     )
-    session.add(
-        History(
+    await save_history(
+        event=History(
             entity_type=EntityType.NAMESPACE,
             entity_name=namespace.namespace,
             node=None,
             activity_type=ActivityType.DELETE,
             details={"message": message or ""},
-            user=current_user.username if current_user else None,
+            user=current_user.username,
         ),
+        session=session,
     )
     await session.commit()
 
@@ -137,22 +146,24 @@ async def mark_namespace_deactivated(
 async def mark_namespace_restored(
     session: AsyncSession,
     namespace: NodeNamespace,
+    current_user: User,
+    save_history: Callable,
     message: str = None,
-    current_user: Optional[User] = None,
 ):
     """
     Restores the node namespace and updates history indicating so
     """
     namespace.deactivated_at = None  # type: ignore
-    session.add(
-        History(
+    await save_history(
+        event=History(
             entity_type=EntityType.NAMESPACE,
             entity_name=namespace.namespace,
             node=None,
             activity_type=ActivityType.RESTORE,
             details={"message": message or ""},
-            user=current_user.username if current_user else None,
+            user=current_user.username,
         ),
+        session=session,
     )
     await session.commit()
 
@@ -185,8 +196,9 @@ def get_parent_namespaces(namespace: str):
 async def create_namespace(
     session: AsyncSession,
     namespace: str,
+    current_user: User,
+    save_history: Callable,
     include_parents: bool = True,
-    current_user: Optional[User] = None,
 ) -> List[str]:
     """
     Creates a namespace entry in the database table.
@@ -204,14 +216,15 @@ async def create_namespace(
         ):
             node_namespace = NodeNamespace(namespace=parent_namespace)
             session.add(node_namespace)
-            session.add(
-                History(
+            await save_history(
+                event=History(
                     entity_type=EntityType.NAMESPACE,
                     entity_name=namespace,
                     node=None,
                     activity_type=ActivityType.CREATE,
-                    user=current_user.username if current_user else None,
+                    user=current_user.username,
                 ),
+                session=session,
             )
     await session.commit()
     return parents
@@ -220,8 +233,9 @@ async def create_namespace(
 async def hard_delete_namespace(
     session: AsyncSession,
     namespace: str,
+    current_user: User,
+    save_history: Callable,
     cascade: bool = False,
-    current_user: Optional[User] = None,
 ):
     """
     Hard delete a node namespace.
@@ -234,7 +248,7 @@ async def hard_delete_namespace(
                     or_(
                         Node.namespace.like(
                             f"{namespace}.%",
-                        ),  # pylint: disable=no-member
+                        ),
                         Node.namespace == namespace,
                     ),
                 )
@@ -261,6 +275,7 @@ async def hard_delete_namespace(
             node_name,
             session,
             current_user=current_user,
+            save_history=save_history,
         )
 
     namespaces = await list_namespaces_in_hierarchy(session, namespace)
@@ -278,21 +293,62 @@ def _get_dir_and_filename(
     node_name: str,
     node_type: str,
     namespace_requested: str,
-) -> Tuple[str, str]:
+) -> Tuple[str, str, str]:
     """
-    Get the directory and filename where a node name would be located
+    Get the directory, filename, and build name for a node
     """
     dot_split = node_name.replace(f"{namespace_requested}.", "").split(".")
     filename = f"{dot_split[-1]}.{node_type}.yaml"
     directory = os.path.sep.join(dot_split[:-1])
-    return filename, directory
+    build_name = (
+        f"{SEPARATOR.join(dot_split[:-1])}.{dot_split[-1]}"
+        if directory
+        else dot_split[-1]
+    )
+    return filename, directory, build_name
+
+
+def _non_primary_key_attributes(column: Column):
+    """
+    Returns all non-PK column attributes for a column
+    """
+    return [
+        attr.attribute_type.name
+        for attr in column.attributes
+        if attr.attribute_type.name not in ("primary_key",)
+    ]
+
+
+def _attributes_config(column: Column):
+    """
+    Returns a project config definition for a partition on a column
+    """
+    non_pk_attributes = _non_primary_key_attributes(column)
+    if non_pk_attributes:
+        return {"attributes": _non_primary_key_attributes(column)}
+    return {}
+
+
+def _partition_config(column: Column):
+    """
+    Returns a project config definition for a partition on a column
+    """
+    if column.partition:
+        return {
+            "partition": {
+                "format": column.partition.format,
+                "granularity": column.partition.granularity,
+                "type_": column.partition.type_,
+            },
+        }
+    return {}
 
 
 def _source_project_config(node: Node, namespace_requested: str) -> Dict:
     """
     Returns a project config definition for a source node
     """
-    filename, directory = _get_dir_and_filename(
+    filename, directory, build_name = _get_dir_and_filename(
         node_name=node.name,
         node_type=node.type,
         namespace_requested=namespace_requested,
@@ -300,18 +356,22 @@ def _source_project_config(node: Node, namespace_requested: str) -> Dict:
     return {
         "filename": filename,
         "directory": directory,
+        "build_name": build_name,
         "display_name": node.current.display_name,
         "description": node.current.description,
         "table": f"{node.current.catalog}.{node.current.schema_}.{node.current.table}",
         "columns": [
-            {"name": column.name, "type": str(column.type)}
+            {
+                "name": column.name,
+                "type": str(column.type),
+                **_attributes_config(column),
+                **_partition_config(column),
+            }
             for column in node.current.columns
         ],
-        "dimension_links": {
-            column.name: {"dimension": column.dimension.name}
-            for column in node.current.columns
-            if column.dimension
-        },
+        "primary_key": [pk.name for pk in node.current.primary_key()],
+        "dimension_links": _dimension_links_config(node),
+        "tags": [tag.name for tag in node.tags],
     }
 
 
@@ -319,7 +379,7 @@ def _transform_project_config(node: Node, namespace_requested: str) -> Dict:
     """
     Returns a project config definition for a transform node
     """
-    filename, directory = _get_dir_and_filename(
+    filename, directory, build_name = _get_dir_and_filename(
         node_name=node.name,
         node_type=node.type,
         namespace_requested=namespace_requested,
@@ -327,14 +387,22 @@ def _transform_project_config(node: Node, namespace_requested: str) -> Dict:
     return {
         "filename": filename,
         "directory": directory,
+        "build_name": build_name,
         "display_name": node.current.display_name,
         "description": node.current.description,
         "query": node.current.query,
-        "dimension_links": {
-            column.name: {"dimension": column.dimension.name}
+        "columns": [
+            {
+                "name": column.name,
+                **_attributes_config(column),
+                **_partition_config(column),
+            }
             for column in node.current.columns
-            if column.dimension
-        },
+            if _non_primary_key_attributes(column) or column.partition
+        ],
+        "primary_key": [pk.name for pk in node.current.primary_key()],
+        "dimension_links": _dimension_links_config(node),
+        "tags": [tag.name for tag in node.tags],
     }
 
 
@@ -342,7 +410,7 @@ def _dimension_project_config(node: Node, namespace_requested: str) -> Dict:
     """
     Returns a project config definition for a dimension node
     """
-    filename, directory = _get_dir_and_filename(
+    filename, directory, build_name = _get_dir_and_filename(
         node_name=node.name,
         node_type=node.type,
         namespace_requested=namespace_requested,
@@ -350,15 +418,22 @@ def _dimension_project_config(node: Node, namespace_requested: str) -> Dict:
     return {
         "filename": filename,
         "directory": directory,
+        "build_name": build_name,
         "display_name": node.current.display_name,
         "description": node.current.description,
         "query": node.current.query,
-        "primary_key": [pk.name for pk in node.current.primary_key()],
-        "dimension_links": {
-            column.name: {"dimension": column.dimension.name}
+        "columns": [
+            {
+                "name": column.name,
+                **_attributes_config(column),
+                **_partition_config(column),
+            }
             for column in node.current.columns
-            if column.dimension
-        },
+            if _non_primary_key_attributes(column) or column.partition
+        ],
+        "primary_key": [pk.name for pk in node.current.primary_key()],
+        "dimension_links": _dimension_links_config(node),
+        "tags": [tag.name for tag in node.tags],
     }
 
 
@@ -366,7 +441,7 @@ def _metric_project_config(node: Node, namespace_requested: str) -> Dict:
     """
     Returns a project config definition for a metric node
     """
-    filename, directory = _get_dir_and_filename(
+    filename, directory, build_name = _get_dir_and_filename(
         node_name=node.name,
         node_type=node.type,
         namespace_requested=namespace_requested,
@@ -374,9 +449,40 @@ def _metric_project_config(node: Node, namespace_requested: str) -> Dict:
     return {
         "filename": filename,
         "directory": directory,
+        "build_name": build_name,
         "display_name": node.current.display_name,
         "description": node.current.description,
         "query": node.current.query,
+        "tags": [tag.name for tag in node.tags],
+        "required_dimensions": [dim.name for dim in node.current.required_dimensions],
+        "direction": (
+            node.current.metric_metadata.direction.name.lower()
+            if node.current.metric_metadata and node.current.metric_metadata.direction
+            else None
+        ),
+        "unit": (
+            node.current.metric_metadata.unit.name.lower()
+            if node.current.metric_metadata and node.current.metric_metadata.unit
+            else None
+        ),
+        "significant_digits": (
+            node.current.metric_metadata.significant_digits
+            if node.current.metric_metadata
+            and node.current.metric_metadata.significant_digits
+            else None
+        ),
+        "min_decimal_exponent": (
+            node.current.metric_metadata.min_decimal_exponent
+            if node.current.metric_metadata
+            and node.current.metric_metadata.min_decimal_exponent
+            else None
+        ),
+        "max_decimal_exponent": (
+            node.current.metric_metadata.max_decimal_exponent
+            if node.current.metric_metadata
+            and node.current.metric_metadata.max_decimal_exponent
+            else None
+        ),
     }
 
 
@@ -388,12 +494,12 @@ async def _cube_project_config(
     """
     Returns a project config definition for a cube node
     """
-    filename, directory = _get_dir_and_filename(
+    filename, directory, build_name = _get_dir_and_filename(
         node_name=node.name,
         node_type=NodeType.CUBE,
         namespace_requested=namespace_requested,
     )
-    cube_revision = await get_cube_revision_metadata(session, node.name)
+    cube_revision = await get_single_cube_revision_metadata(session, node.name)
     metrics = []
     dimensions = []
     for element in cube_revision.cube_elements:
@@ -404,11 +510,46 @@ async def _cube_project_config(
     return {
         "filename": filename,
         "directory": directory,
+        "build_name": build_name,
         "display_name": cube_revision.display_name,
         "description": cube_revision.description,
         "metrics": metrics,
         "dimensions": dimensions,
+        "columns": [
+            {
+                "name": column.name,
+                **_partition_config(column),
+            }
+            for column in cube_revision.columns
+            if column.partition
+        ],
+        "tags": [tag.name for tag in node.tags],
     }
+
+
+def _dimension_links_config(node: Node):
+    join_links = [
+        {
+            "type": "join",
+            "dimension_node": link.dimension.name,
+            "join_type": link.join_type,
+            "join_on": link.join_sql,
+            **({"role": link.role} if link.role else {}),
+        }
+        for link in node.current.dimension_links
+    ]
+    reference_links = [
+        {
+            "type": "reference",
+            "node_column": column.name,
+            "dimension": column.dimension.name
+            + SEPARATOR
+            + (column.dimension_column or ""),
+        }
+        for column in node.current.columns
+        if column.dimension
+    ]
+    return join_links + reference_links
 
 
 async def get_project_config(
@@ -419,42 +560,24 @@ async def get_project_config(
     """
     Returns a project config definition
     """
-    project_components = []
-    for node in nodes:
-        if node.type == NodeType.SOURCE:
-            project_components.append(
-                _source_project_config(
-                    node=node,
-                    namespace_requested=namespace_requested,
-                ),
-            )
-        elif node.type == NodeType.TRANSFORM:
-            project_components.append(
-                _transform_project_config(
-                    node=node,
-                    namespace_requested=namespace_requested,
-                ),
-            )
-        elif node.type == NodeType.DIMENSION:
-            project_components.append(
-                _dimension_project_config(
-                    node=node,
-                    namespace_requested=namespace_requested,
-                ),
-            )
-        elif node.type == NodeType.METRIC:
-            project_components.append(
-                _metric_project_config(
-                    node=node,
-                    namespace_requested=namespace_requested,
-                ),
-            )
-        else:
-            project_components.append(
-                await _cube_project_config(
-                    session=session,
-                    node=node,
-                    namespace_requested=namespace_requested,
-                ),
-            )
+    sorted_nodes = topological_sort(nodes)
+    project_config_mapping = {
+        NodeType.SOURCE: _source_project_config,
+        NodeType.TRANSFORM: _transform_project_config,
+        NodeType.DIMENSION: _dimension_project_config,
+        NodeType.METRIC: _metric_project_config,
+    }
+    project_components = [
+        project_config_mapping[node.type](
+            node=node,
+            namespace_requested=namespace_requested,
+        )
+        if node.type in project_config_mapping
+        else await _cube_project_config(
+            session=session,
+            node=node,
+            namespace_requested=namespace_requested,
+        )
+        for node in sorted_nodes
+    ]
     return project_components

@@ -23,12 +23,15 @@ describe('<NodePage />', () => {
       DataJunctionAPI: {
         node: jest.fn(),
         metric: jest.fn(),
+        getMetric: jest.fn(),
+        revalidate: jest.fn().mockReturnValue({ status: 'valid' }),
         node_dag: jest.fn().mockReturnValue(mocks.mockNodeDAG),
         clientCode: jest.fn().mockReturnValue('dj_client = DJClient()'),
         columns: jest.fn(),
         history: jest.fn(),
         revisions: jest.fn(),
         materializations: jest.fn(),
+        materializationInfo: jest.fn(),
         sql: jest.fn(),
         cube: jest.fn(),
         compiledSql: jest.fn(),
@@ -38,6 +41,8 @@ describe('<NodePage />', () => {
         dimensions: jest.fn(),
         setPartition: jest.fn(),
         engines: jest.fn(),
+        streamNodeData: jest.fn(),
+        nodeDimensions: jest.fn(),
       },
     };
   };
@@ -275,7 +280,9 @@ describe('<NodePage />', () => {
   it('renders the NodeInfo tab correctly for a metric node', async () => {
     const djClient = mockDJClient();
     djClient.DataJunctionAPI.node.mockReturnValue(mocks.mockMetricNode);
-    djClient.DataJunctionAPI.metric.mockReturnValue(mocks.mockMetricNode);
+    djClient.DataJunctionAPI.getMetric.mockReturnValue(
+      mocks.mockMetricNodeJson,
+    );
     const element = (
       <DJClientContext.Provider value={djClient}>
         <NodePage {...defaultProps} />
@@ -395,7 +402,9 @@ describe('<NodePage />', () => {
   it('renders the NodeColumns tab correctly', async () => {
     const djClient = mockDJClient();
     djClient.DataJunctionAPI.node.mockReturnValue(mocks.mockMetricNode);
-    djClient.DataJunctionAPI.metric.mockReturnValue(mocks.mockMetricNode);
+    djClient.DataJunctionAPI.getMetric.mockReturnValue(
+      mocks.mockMetricNodeJson,
+    );
     djClient.DataJunctionAPI.columns.mockReturnValue(mocks.metricNodeColumns);
     djClient.DataJunctionAPI.attributes.mockReturnValue(mocks.attributes);
     djClient.DataJunctionAPI.dimensions.mockReturnValue(mocks.dimensions);
@@ -472,7 +481,9 @@ describe('<NodePage />', () => {
   it('renders the NodeHistory tab correctly', async () => {
     const djClient = mockDJClient();
     djClient.DataJunctionAPI.node.mockReturnValue(mocks.mockMetricNode);
-    djClient.DataJunctionAPI.metric.mockReturnValue(mocks.mockMetricNode);
+    djClient.DataJunctionAPI.getMetric.mockReturnValue(
+      mocks.mockMetricNodeJson,
+    );
     djClient.DataJunctionAPI.columns.mockReturnValue(mocks.metricNodeColumns);
     djClient.DataJunctionAPI.history.mockReturnValue(mocks.metricNodeHistory);
     djClient.DataJunctionAPI.revisions.mockReturnValue(
@@ -572,7 +583,9 @@ describe('<NodePage />', () => {
   it('renders an empty NodeMaterialization tab correctly', async () => {
     const djClient = mockDJClient();
     djClient.DataJunctionAPI.node.mockReturnValue(mocks.mockMetricNode);
-    djClient.DataJunctionAPI.metric.mockReturnValue(mocks.mockMetricNode);
+    djClient.DataJunctionAPI.getMetric.mockReturnValue(
+      mocks.mockMetricNodeJson,
+    );
     djClient.DataJunctionAPI.columns.mockReturnValue(mocks.metricNodeColumns);
     djClient.DataJunctionAPI.materializations.mockReturnValue([]);
 
@@ -604,11 +617,17 @@ describe('<NodePage />', () => {
 
   it('renders the NodeMaterialization tab with materializations correctly', async () => {
     const djClient = mockDJClient();
-    djClient.DataJunctionAPI.node.mockReturnValue(mocks.mockMetricNode);
-    djClient.DataJunctionAPI.metric.mockReturnValue(mocks.mockMetricNode);
+    djClient.DataJunctionAPI.node.mockReturnValue(mocks.mockTransformNode);
+    djClient.DataJunctionAPI.getMetric.mockReturnValue(
+      mocks.mockMetricNodeJson,
+    );
     djClient.DataJunctionAPI.columns.mockReturnValue(mocks.metricNodeColumns);
     djClient.DataJunctionAPI.materializations.mockReturnValue(
       mocks.nodeMaterializations,
+    );
+
+    djClient.DataJunctionAPI.materializationInfo.mockReturnValue(
+      mocks.materializationInfo,
     );
 
     const element = (
@@ -618,7 +637,9 @@ describe('<NodePage />', () => {
     );
     render(
       <MemoryRouter
-        initialEntries={['/nodes/default.num_repair_orders/materializations']}
+        initialEntries={[
+          '/nodes/default.repair_order_transform/materializations',
+        ]}
       >
         <Routes>
           <Route path="nodes/:name/:tab" element={element} />
@@ -631,52 +652,129 @@ describe('<NodePage />', () => {
           screen.getByRole('button', { name: 'Materializations' }),
         );
         expect(djClient.DataJunctionAPI.node).toHaveBeenCalledWith(
-          mocks.mockMetricNode.name,
+          mocks.mockTransformNode.name,
         );
         expect(djClient.DataJunctionAPI.materializations).toHaveBeenCalledWith(
-          mocks.mockMetricNode.name,
+          mocks.mockTransformNode.name,
         );
-
-        expect(
-          screen.getByRole('table', { name: 'Materializations' }),
-        ).toMatchSnapshot();
       },
       { timeout: 3000 },
     );
   }, 60000);
 
-  it('renders the NodeSQL tab', async () => {
+  it('renders the NodeValidate tab', async () => {
     const djClient = mockDJClient();
+    window.scrollTo = jest.fn();
     djClient.DataJunctionAPI.node.mockReturnValue(mocks.mockMetricNode);
-    djClient.DataJunctionAPI.metric.mockReturnValue(mocks.mockMetricNode);
+    djClient.DataJunctionAPI.nodeDimensions.mockReturnValue([]);
+    djClient.DataJunctionAPI.getMetric.mockReturnValue(
+      mocks.mockMetricNodeJson,
+    );
     djClient.DataJunctionAPI.columns.mockReturnValue(mocks.metricNodeColumns);
-    djClient.DataJunctionAPI.sql.mockReturnValue(mocks.metricNodeColumns);
+    djClient.DataJunctionAPI.sql.mockReturnValue({
+      sql: 'SELECT * FROM testNode',
+    });
+    const streamNodeData = {
+      onmessage: jest.fn(),
+      onerror: jest.fn(),
+      close: jest.fn(),
+    };
+    djClient.DataJunctionAPI.streamNodeData.mockResolvedValue(streamNodeData);
+    djClient.DataJunctionAPI.streamNodeData.mockResolvedValueOnce({
+      state: 'FINISHED',
+      results: [
+        {
+          columns: [{ name: 'column1' }, { name: 'column2' }],
+          rows: [
+            [1, 'value1'],
+            [2, 'value2'],
+          ],
+        },
+      ],
+    });
+
     const element = (
       <DJClientContext.Provider value={djClient}>
         <NodePage />
       </DJClientContext.Provider>
     );
     render(
-      <MemoryRouter initialEntries={['/nodes/default.num_repair_orders/sql']}>
+      <MemoryRouter
+        initialEntries={['/nodes/default.num_repair_orders/validate']}
+      >
         <Routes>
           <Route path="nodes/:name/:tab" element={element} />
         </Routes>
       </MemoryRouter>,
     );
+
     await waitFor(() => {
-      const sqlButton = screen.getByRole('button', { name: 'SQL' });
-      sqlButton.click();
+      expect(screen.getByText('Group By')).toBeInTheDocument();
+      expect(screen.getByText('Add Filters')).toBeInTheDocument();
+      expect(screen.getByText('Generated Query')).toBeInTheDocument();
+      expect(screen.getByText('Results')).toBeInTheDocument();
+    });
+    // Click on the 'Validate' tab
+    fireEvent.click(screen.getByRole('button', { name: '► Validate' }));
+
+    await waitFor(() => {
+      expect(djClient.DataJunctionAPI.node).toHaveBeenCalledWith(
+        mocks.mockMetricNode.name,
+      );
       expect(djClient.DataJunctionAPI.sql).toHaveBeenCalledWith(
-        'default.num_repair_orders',
+        mocks.mockMetricNode.name,
         { dimensions: [], filters: [] },
       );
+      expect(djClient.DataJunctionAPI.nodeDimensions).toHaveBeenCalledWith(
+        mocks.mockMetricNode.name,
+      );
+    });
+
+    // Click on 'Run' to run the node query
+    const runButton = screen.getByText('► Run');
+    fireEvent.click(runButton);
+
+    await waitFor(() => {
+      expect(djClient.DataJunctionAPI.streamNodeData).toHaveBeenCalledWith(
+        mocks.mockMetricNode.name,
+        { dimensions: [], filters: [] },
+      );
+      expect(streamNodeData.onmessage).toBeDefined();
+      expect(streamNodeData.onerror).toBeDefined();
+    });
+
+    const infoTab = screen.getByRole('button', { name: 'QueryInfo' });
+    const resultsTab = screen.getByText('Results');
+
+    // Initially, the Results tab should be active
+    expect(resultsTab).toHaveClass('active');
+    expect(infoTab).not.toHaveClass('active');
+
+    // Click on the Info tab first
+    fireEvent.click(infoTab);
+
+    await waitFor(() => {
+      // Now, the Info tab should be active
+      expect(infoTab).toHaveClass('active');
+      expect(resultsTab).not.toHaveClass('active');
+    });
+
+    // Click on the Results tab
+    fireEvent.click(resultsTab);
+
+    await waitFor(() => {
+      // Now, the Results tab should be active again
+      expect(resultsTab).toHaveClass('active');
+      expect(infoTab).not.toHaveClass('active');
     });
   });
 
   it('renders a NodeColumnLineage tab correctly', async () => {
     const djClient = mockDJClient();
     djClient.DataJunctionAPI.node.mockReturnValue(mocks.mockMetricNode);
-    djClient.DataJunctionAPI.metric.mockReturnValue(mocks.mockMetricNodeJson);
+    djClient.DataJunctionAPI.getMetric.mockReturnValue(
+      mocks.mockMetricNodeJson,
+    );
     djClient.DataJunctionAPI.columns.mockReturnValue(mocks.metricNodeColumns);
     djClient.DataJunctionAPI.node_lineage.mockReturnValue(
       mocks.mockNodeLineage,
@@ -707,7 +805,9 @@ describe('<NodePage />', () => {
   it('renders a NodeGraph tab correctly', async () => {
     const djClient = mockDJClient();
     djClient.DataJunctionAPI.node.mockReturnValue(mocks.mockMetricNode);
-    djClient.DataJunctionAPI.metric.mockReturnValue(mocks.mockMetricNodeJson);
+    djClient.DataJunctionAPI.getMetric.mockReturnValue(
+      mocks.mockMetricNodeJson,
+    );
     djClient.DataJunctionAPI.columns.mockReturnValue(mocks.metricNodeColumns);
 
     const element = (

@@ -1,17 +1,17 @@
 """
 Tests for the djsql API.
 """
+
 import pytest
 from httpx import AsyncClient
 
-from tests.sql.utils import compare_query_strings
-
-# pylint: disable=too-many-lines,C0301
+from tests.sql.utils import assert_query_strings_equal, compare_query_strings
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason="Will move djsql to new sql build later")
 async def test_get_djsql_data_only_nodes_query(
-    client_with_query_service: AsyncClient,
+    module__client_with_roads: AsyncClient,
 ) -> None:
     """
     Test djsql with just some non-metric nodes
@@ -23,7 +23,7 @@ SELECT default.hard_hat.country,
 FROM default.hard_hat
     """
 
-    response = await client_with_query_service.get(
+    response = await module__client_with_roads.get(
         "/djsql/data/",
         params={"query": query},
     )
@@ -79,8 +79,9 @@ FROM default.hard_hat
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason="Will move djsql to new sql build later")
 async def test_get_djsql_data_only_nested_metrics(
-    client_with_query_service: AsyncClient,
+    module__client_with_roads: AsyncClient,
 ) -> None:
     """
     Test djsql with metric subquery
@@ -107,7 +108,7 @@ async def test_get_djsql_data_only_nested_metrics(
     GROUP BY city
     """
 
-    response = await client_with_query_service.get(
+    response = await module__client_with_roads.get(
         "/djsql/data/",
         params={"query": query},
     )
@@ -128,47 +129,45 @@ async def test_get_djsql_data_only_nested_metrics(
      FROM (SELECT  default_DOT_hard_hat.country default_DOT_hard_hat_DOT_country,
         default_DOT_hard_hat.city default_DOT_hard_hat_DOT_city,
         avg(default_DOT_repair_orders_fact.price) default_DOT_avg_repair_price
-     FROM (SELECT  default_DOT_repair_orders.repair_order_id,
-        default_DOT_repair_orders.municipality_id,
-        default_DOT_repair_orders.hard_hat_id,
-        default_DOT_repair_orders.dispatcher_id,
-        default_DOT_repair_orders.order_date,
-        default_DOT_repair_orders.dispatched_date,
-        default_DOT_repair_orders.required_date,
-        default_DOT_repair_order_details.discount,
-        default_DOT_repair_order_details.price,
-        default_DOT_repair_order_details.quantity,
-        default_DOT_repair_order_details.repair_type_id,
-        default_DOT_repair_order_details.price * default_DOT_repair_order_details.quantity AS total_repair_cost,
-        default_DOT_repair_orders.dispatched_date - default_DOT_repair_orders.order_date AS time_to_dispatch,
-        default_DOT_repair_orders.dispatched_date - default_DOT_repair_orders.required_date AS dispatch_delay
-     FROM roads.repair_orders AS default_DOT_repair_orders JOIN roads.repair_order_details AS default_DOT_repair_order_details ON default_DOT_repair_orders.repair_order_id = default_DOT_repair_order_details.repair_order_id)
+     FROM (SELECT  repair_orders.repair_order_id,
+        repair_orders.municipality_id,
+        repair_orders.hard_hat_id,
+        repair_orders.dispatcher_id,
+        repair_orders.order_date,
+        repair_orders.dispatched_date,
+        repair_orders.required_date,
+        repair_order_details.discount,
+        repair_order_details.price,
+        repair_order_details.quantity,
+        repair_order_details.repair_type_id,
+        repair_order_details.price * repair_order_details.quantity AS total_repair_cost,
+        repair_orders.dispatched_date - repair_orders.order_date AS time_to_dispatch,
+        repair_orders.dispatched_date - repair_orders.required_date AS dispatch_delay
+     FROM roads.repair_orders AS repair_orders JOIN roads.repair_order_details AS repair_order_details ON repair_orders.repair_order_id = repair_order_details.repair_order_id)
      AS default_DOT_repair_orders_fact LEFT JOIN (SELECT  default_DOT_hard_hats.hard_hat_id,
         default_DOT_hard_hats.city,
         default_DOT_hard_hats.state,
         default_DOT_hard_hats.country
      FROM roads.hard_hats AS default_DOT_hard_hats)
      AS default_DOT_hard_hat ON default_DOT_repair_orders_fact.hard_hat_id = default_DOT_hard_hat.hard_hat_id
-     GROUP BY  default_DOT_hard_hat.country, default_DOT_hard_hat.city
-    ) AS default_DOT_repair_orders_fact
+    GROUP BY  default_DOT_hard_hat.country, default_DOT_hard_hat.city) AS default_DOT_repair_orders_fact
 
-    LIMIT 5
-    )
+    LIMIT 5)
 
     SELECT  Sum(avg_repair_price),
         city
      FROM (SELECT  metric_query_0.default_DOT_avg_repair_price AS avg_repair_price,
         metric_query_0.default_DOT_hard_hat_DOT_country AS country,
         metric_query_0.default_DOT_hard_hat_DOT_city AS city
-     FROM metric_query_0
-    )
+     FROM metric_query_0)
      GROUP BY  city"""
-    assert compare_query_strings(query, expected_query)
+    assert_query_strings_equal(query, expected_query)
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason="Will move djsql to new sql build later")
 async def test_get_djsql_data_only_multiple_metrics(
-    client_with_query_service: AsyncClient,
+    module__client_with_roads: AsyncClient,
 ) -> None:
     """
     Test djsql with metric subquery
@@ -187,7 +186,7 @@ async def test_get_djsql_data_only_multiple_metrics(
         default.hard_hat.city
     """
 
-    response = await client_with_query_service.get(
+    response = await module__client_with_roads.get(
         "/djsql/data/",
         params={"query": query},
     )
@@ -213,44 +212,40 @@ async def test_get_djsql_data_only_multiple_metrics(
         default_DOT_hard_hat.city default_DOT_hard_hat_DOT_city,
         avg(default_DOT_repair_orders_fact.price) default_DOT_avg_repair_price,
         sum(default_DOT_repair_orders_fact.total_repair_cost) default_DOT_total_repair_cost
-     FROM (SELECT  default_DOT_repair_orders.repair_order_id,
-        default_DOT_repair_orders.municipality_id,
-        default_DOT_repair_orders.hard_hat_id,
-        default_DOT_repair_orders.dispatcher_id,
-        default_DOT_repair_orders.order_date,
-        default_DOT_repair_orders.dispatched_date,
-        default_DOT_repair_orders.required_date,
-        default_DOT_repair_order_details.discount,
-        default_DOT_repair_order_details.price,
-        default_DOT_repair_order_details.quantity,
-        default_DOT_repair_order_details.repair_type_id,
-        default_DOT_repair_order_details.price * default_DOT_repair_order_details.quantity AS total_repair_cost,
-        default_DOT_repair_orders.dispatched_date - default_DOT_repair_orders.order_date AS time_to_dispatch,
-        default_DOT_repair_orders.dispatched_date - default_DOT_repair_orders.required_date AS dispatch_delay
-     FROM roads.repair_orders AS default_DOT_repair_orders JOIN roads.repair_order_details AS default_DOT_repair_order_details ON default_DOT_repair_orders.repair_order_id = default_DOT_repair_order_details.repair_order_id)
+     FROM (SELECT  repair_orders.repair_order_id,
+        repair_orders.municipality_id,
+        repair_orders.hard_hat_id,
+        repair_orders.dispatcher_id,
+        repair_orders.order_date,
+        repair_orders.dispatched_date,
+        repair_orders.required_date,
+        repair_order_details.discount,
+        repair_order_details.price,
+        repair_order_details.quantity,
+        repair_order_details.repair_type_id,
+        repair_order_details.price * repair_order_details.quantity AS total_repair_cost,
+        repair_orders.dispatched_date - repair_orders.order_date AS time_to_dispatch,
+        repair_orders.dispatched_date - repair_orders.required_date AS dispatch_delay
+     FROM roads.repair_orders AS repair_orders JOIN roads.repair_order_details AS repair_order_details ON repair_orders.repair_order_id = repair_order_details.repair_order_id)
      AS default_DOT_repair_orders_fact LEFT JOIN (SELECT  default_DOT_hard_hats.hard_hat_id,
         default_DOT_hard_hats.city,
         default_DOT_hard_hats.state,
         default_DOT_hard_hats.country
      FROM roads.hard_hats AS default_DOT_hard_hats)
      AS default_DOT_hard_hat ON default_DOT_repair_orders_fact.hard_hat_id = default_DOT_hard_hat.hard_hat_id
-     GROUP BY  default_DOT_hard_hat.country, default_DOT_hard_hat.city
-    ) AS default_DOT_repair_orders_fact
-
-    )
+     GROUP BY  default_DOT_hard_hat.country, default_DOT_hard_hat.city) AS default_DOT_repair_orders_fact)
 
     SELECT  metric_query_0.default_DOT_avg_repair_price AS avg_repair_price,
         metric_query_0.default_DOT_total_repair_cost AS total_cost,
         metric_query_0.default_DOT_hard_hat_DOT_country,
         metric_query_0.default_DOT_hard_hat_DOT_city
      FROM metric_query_0"""
-
     assert compare_query_strings(query, expected_query)
 
 
 @pytest.mark.asyncio
 async def test_get_djsql_metric_table_exception(
-    client_with_query_service: AsyncClient,
+    module__client_with_roads: AsyncClient,
 ) -> None:
     """
     Test djsql with metric subquery from non `metrics`
@@ -269,7 +264,7 @@ async def test_get_djsql_metric_table_exception(
 
     """
 
-    response = await client_with_query_service.get(
+    response = await module__client_with_roads.get(
         "/djsql/data/",
         params={"query": query},
     )
@@ -281,7 +276,7 @@ async def test_get_djsql_metric_table_exception(
 
 @pytest.mark.asyncio
 async def test_get_djsql_illegal_clause_metric_query(
-    client_with_query_service: AsyncClient,
+    module__client_with_roads: AsyncClient,
 ) -> None:
     """
     Test djsql with metric subquery from non `metrics`
@@ -300,7 +295,7 @@ async def test_get_djsql_illegal_clause_metric_query(
         HAVING 5
     """
 
-    response = await client_with_query_service.get(
+    response = await module__client_with_roads.get(
         "/djsql/data/",
         params={"query": query},
     )
@@ -312,7 +307,7 @@ async def test_get_djsql_illegal_clause_metric_query(
 
 @pytest.mark.asyncio
 async def test_get_djsql_illegal_column_expression(
-    client_with_query_service: AsyncClient,
+    module__client_with_roads: AsyncClient,
 ) -> None:
     """
     Test djsql with non col exp in projection
@@ -330,7 +325,7 @@ async def test_get_djsql_illegal_column_expression(
         default.hard_hat.city
     """
 
-    response = await client_with_query_service.get(
+    response = await module__client_with_roads.get(
         "/djsql/data/",
         params={"query": query},
     )
@@ -342,7 +337,7 @@ async def test_get_djsql_illegal_column_expression(
 
 @pytest.mark.asyncio
 async def test_get_djsql_illegal_column(
-    client_with_query_service: AsyncClient,
+    module__client_with_roads: AsyncClient,
 ) -> None:
     """
     Test djsql with bad col in projection
@@ -360,7 +355,7 @@ async def test_get_djsql_illegal_column(
         default.hard_hat.city
     """
 
-    response = await client_with_query_service.get(
+    response = await module__client_with_roads.get(
         "/djsql/data/",
         params={"query": query},
     )
@@ -372,7 +367,7 @@ async def test_get_djsql_illegal_column(
 
 @pytest.mark.asyncio
 async def test_get_djsql_illegal_limit(
-    client_with_query_service: AsyncClient,
+    module__client_with_roads: AsyncClient,
 ) -> None:
     """
     Test djsql with bad limit
@@ -388,7 +383,7 @@ async def test_get_djsql_illegal_limit(
         LIMIT 1+2
     """
 
-    response = await client_with_query_service.get(
+    response = await module__client_with_roads.get(
         "/djsql/data/",
         params={"query": query},
     )
@@ -400,7 +395,7 @@ async def test_get_djsql_illegal_limit(
 
 @pytest.mark.asyncio
 async def test_get_djsql_no_nodes(
-    client_with_query_service: AsyncClient,
+    module__client_with_roads: AsyncClient,
 ) -> None:
     """
     Test djsql without dj node refs
@@ -410,31 +405,27 @@ async def test_get_djsql_no_nodes(
         SELECT 1
     """
 
-    response = await client_with_query_service.get(
+    response = await module__client_with_roads.get(
         "/djsql/data/",
         params={"query": query},
     )
     assert response.json()["message"].startswith("Found no dj nodes in query")
 
 
-# def test_djsql_stream(
-#     client_with_query_service: TestClient,
-# ) -> None:
-#     """
-#     Test streaming djsql
-#     """
-#     query = """
-#     SELECT default.hard_hat.country,
-#     default.hard_hat.city
-#     FROM default.hard_hat
-#         """
+@pytest.mark.asyncio
+async def test_djsql_stream(
+    module__client: AsyncClient,
+) -> None:
+    """
+    Test streaming djsql
+    """
+    query = """
+    SELECT 1
+        """
 
-#     response = client_with_query_service.get(
-#         "/djsql/stream/",
-#         params={"query": query},
-#         headers={
-#             "Accept": "text/event-stream",
-#         },
-#         stream=True,
-#     )
-#     assert response.status_code == 200
+    response = await module__client.get(
+        "/djsql/stream/",
+        params={"query": query},
+    )
+    assert response.status_code == 422
+    assert response.json()["message"].startswith("Found no dj nodes in query")

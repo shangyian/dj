@@ -1,4 +1,5 @@
 """Query request schema."""
+
 from datetime import datetime, timezone
 from functools import partial
 from http import HTTPStatus
@@ -48,7 +49,7 @@ class QueryBuildType(StrEnum):
     NODE = "node"
 
 
-class QueryRequest(Base):  # type: ignore  # pylint: disable=too-few-public-methods
+class QueryRequest(Base):  # type: ignore
     """
     A query request represents a request for DJ to build a query.
 
@@ -159,6 +160,8 @@ class QueryRequest(Base):  # type: ignore  # pylint: disable=too-few-public-meth
         DateTime(timezone=True),
         default=partial(datetime.now, timezone.utc),
     )
+    # External identifier for the query
+    query_id: Mapped[Optional[str]]
 
     @classmethod
     async def get_query_request(
@@ -220,7 +223,7 @@ class QueryRequest(Base):  # type: ignore  # pylint: disable=too-few-public-meth
         query: str,
         columns: List[Dict[str, Any]],
         other_args: Optional[Dict[str, Any]] = None,
-    ):
+    ) -> "QueryRequest":
         """
         Retrieves saved query for a node SQL request
         """
@@ -234,6 +237,7 @@ class QueryRequest(Base):  # type: ignore  # pylint: disable=too-few-public-meth
             engine_version=engine_version,
             limit=limit,
             orderby=orderby,
+            other_args=other_args,
         )
         if query_request:  # pragma: no cover
             query_request.query = query
@@ -265,9 +269,10 @@ class QueryRequest(Base):  # type: ignore  # pylint: disable=too-few-public-meth
             )
             session.add(query_request)
             await session.commit()
+        return query_request
 
     @classmethod
-    async def to_versioned_query_request(  # pylint: disable=too-many-locals
+    async def to_versioned_query_request(
         cls,
         session: AsyncSession,
         nodes: List[str],
@@ -278,7 +283,7 @@ class QueryRequest(Base):  # type: ignore  # pylint: disable=too-few-public-meth
     ) -> Dict[str, List[str]]:
         """
         Prepare for searching in saved query requests by appending version numbers to all nodes
-        being worked with, from the nodes we're retrieving the queries of to the
+        being worked with.
         """
         nodes_objs = [
             await Node.get_by_name(
@@ -292,6 +297,7 @@ class QueryRequest(Base):  # type: ignore  # pylint: disable=too-few-public-meth
                         ),
                     ),
                 ],
+                raise_if_not_exists=True,
             )
             for node in nodes
         ]
@@ -318,7 +324,7 @@ class QueryRequest(Base):  # type: ignore  # pylint: disable=too-few-public-meth
         invalid_dimensions = sorted(
             list(set(dimensions).difference(available_dimensions)),
         )
-        if invalid_dimensions:
+        if dimensions and invalid_dimensions:
             raise DJInvalidInputException(
                 f"{', '.join(invalid_dimensions)} are not available "
                 f"dimensions on {', '.join(nodes)}",

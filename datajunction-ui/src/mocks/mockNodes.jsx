@@ -41,7 +41,9 @@ export const mocks = {
         type: 'string',
         attributes: [],
         dimension: null,
-        partition: null,
+        partition: {
+          type_: 'categorical',
+        },
       },
     ],
     updated_at: '2024-01-24T16:39:14.029366+00:00',
@@ -276,12 +278,82 @@ export const mocks = {
         label: 'Unitless',
       },
       direction: 'neutral',
+      max_decimal_exponent: null,
+      min_decimal_exponent: null,
+      significant_digits: 4,
     },
     upstream_node: 'default.repair_orders',
     expression: 'count(repair_order_id)',
     aggregate_expression: 'count(repair_order_id)',
     required_dimensions: [],
   },
+
+  mockGetSourceNode: {
+    name: 'default.num_repair_orders',
+    type: 'SOURCE',
+    current: {
+      displayName: 'source.prodhive.dse.playback_f',
+      description:
+        'This source node was automatically created as a registered table.',
+      primaryKey: [],
+      parents: [],
+      metricMetadata: null,
+      requiredDimensions: [],
+      mode: 'PUBLISHED',
+    },
+    tags: [],
+  },
+
+  mockGetMetricNode: {
+    name: 'default.num_repair_orders',
+    type: 'METRIC',
+    current: {
+      displayName: 'Default: Num Repair Orders',
+      description: 'Number of repair orders',
+      primaryKey: ['repair_order_id', 'country'],
+      query:
+        'SELECT count(repair_order_id) default_DOT_num_repair_orders FROM default.repair_orders',
+      parents: [
+        {
+          name: 'default.repair_orders',
+        },
+      ],
+      metricMetadata: {
+        direction: 'NEUTRAL',
+        unit: {
+          name: 'UNITLESS',
+        },
+        expression: 'count(repair_order_id)',
+        significantDigits: 5,
+        incompatibleDruidFunctions: ['IF'],
+      },
+      requiredDimensions: [],
+      mode: 'PUBLISHED',
+    },
+    tags: [{ name: 'purpose', displayName: 'Purpose' }],
+  },
+
+  mockGetTransformNode: {
+    name: 'default.repair_order_transform',
+    type: 'TRANSFORM',
+    current: {
+      displayName: 'Default: Repair Order Transform',
+      description: 'Repair order dimension',
+      primaryKey: [],
+      query:
+        'SELECT repair_order_id, municipality_id, hard_hat_id, dispatcher_id FROM default.repair_orders',
+      parents: [
+        {
+          name: 'default.repair_orders',
+        },
+      ],
+      metricMetadata: null,
+      requiredDimensions: [],
+      mode: 'PUBLISHED',
+    },
+    tags: [],
+  },
+
   attributes: [
     {
       uniqueness_scope: [],
@@ -420,11 +492,13 @@ export const mocks = {
       post: { status: 'invalid' },
       details: {
         materialization: 'druid_metrics_cube__incremental_time__xyz',
-        partition: {
-          column_name: 'xyz.abc',
-          values: null,
-          range: ['20240201', '20240301'],
-        },
+        partition: [
+          {
+            column_name: 'xyz.abc',
+            values: null,
+            range: ['20240201', '20240301'],
+          },
+        ],
       },
       created_at: '2023-08-21T16:48:56.950482+00:00',
     },
@@ -461,12 +535,14 @@ export const mocks = {
     {
       backfills: [
         {
-          spec: {
-            column_name: 'default_DOT_hard_hat_DOT_hire_date',
-            values: null,
-            range: ['20230101', '20230102'],
-          },
-          urls: [],
+          spec: [
+            {
+              column_name: 'default_DOT_hard_hat_DOT_hire_date',
+              values: null,
+              range: ['20230101', '20230102'],
+            },
+          ],
+          urls: ['a', 'b'],
         },
       ],
       name: 'country_birth_date_contractor_id_379232101',
@@ -477,6 +553,7 @@ export const mocks = {
           "SELECT  default_DOT_hard_hats.address,\n\tdefault_DOT_hard_hats.birth_date,\n\tdefault_DOT_hard_hats.city,\n\tdefault_DOT_hard_hats.contractor_id,\n\tdefault_DOT_hard_hats.country,\n\tdefault_DOT_hard_hats.first_name,\n\tdefault_DOT_hard_hats.hard_hat_id,\n\tdefault_DOT_hard_hats.hire_date,\n\tdefault_DOT_hard_hats.last_name,\n\tdefault_DOT_hard_hats.manager,\n\tdefault_DOT_hard_hats.postal_code,\n\tdefault_DOT_hard_hats.state,\n\tdefault_DOT_hard_hats.title \n FROM roads.hard_hats AS default_DOT_hard_hats \n WHERE  default_DOT_hard_hats.country IN ('DE', 'MY') AND default_DOT_hard_hats.contractor_id BETWEEN 1 AND 10\n\n",
         upstream_tables: ['default.roads.hard_hats'],
       },
+      strategy: 'incremental_time',
       schedule: '0 * * * *',
       job: 'SparkSqlMaterializationJob',
       output_tables: ['common.a', 'common.b'],
@@ -910,234 +987,20 @@ export const mocks = {
     },
   ],
   mockMetricNodeJson: {
-    namespace: 'default',
-    node_revision_id: 24,
-    node_id: 24,
-    type: 'metric',
-    name: 'default.avg_repair_price',
-    display_name: 'Default: Avg Repair Price',
-    version: 'v1.0',
-    status: 'valid',
-    mode: 'published',
-    catalog: {
-      id: 1,
-      uuid: '0fc18295-e1a2-4c3c-b72a-894725c12488',
-      created_at: '2023-08-21T16:48:51.146121+00:00',
-      updated_at: '2023-08-21T16:48:51.146122+00:00',
-      extra_params: {},
-      name: 'warehouse',
-    },
-    schema_: null,
-    table: null,
-    description: 'Average repair price',
-    query:
-      'SELECT  avg(price) default_DOT_avg_repair_price \n FROM default.repair_order_details\n\n',
-    availability: null,
-    columns: [
-      {
-        name: 'default_DOT_avg_repair_price',
-        type: 'double',
-        display_name: 'Default DOT avg repair price',
-        attributes: [],
-        dimension: null,
+    name: 'default.num_repair_orders',
+    current: {
+      parents: [
+        {
+          name: 'default.repair_orders',
+        },
+      ],
+      metricMetadata: {
+        direction: null,
+        unit: null,
+        expression: 'count(repair_order_id)',
+        incompatibleDruidFunctions: [],
       },
-    ],
-    updated_at: '2023-08-21T16:48:56.932231+00:00',
-    materializations: [],
-    parents: [
-      {
-        name: 'default.repair_order_details',
-      },
-    ],
-    created_at: '2023-08-21T16:48:56.932162+00:00',
-    tags: [],
-    primary_key: [],
-    createNodeClientCode:
-      'dj = DJBuilder(DJ_URL)\n\navg_repair_price = dj.create_metric(\n    description="Average repair price",\n    display_name="Default: Avg Repair Price",\n    name="default.avg_repair_price",\n    primary_key=[],\n    query="""SELECT  avg(price) default_DOT_avg_repair_price \n FROM default.repair_order_details\n\n"""\n)',
-    dimensions: [
-      {
-        name: 'default.date_dim.dateint',
-        type: 'timestamp',
-        path: [
-          'default.repair_order_details.repair_order_id',
-          'default.repair_order.hard_hat_id',
-          'default.hard_hat.birth_date',
-        ],
-      },
-      {
-        name: 'default.date_dim.dateint',
-        type: 'timestamp',
-        path: [
-          'default.repair_order_details.repair_order_id',
-          'default.repair_order.hard_hat_id',
-          'default.hard_hat.hire_date',
-        ],
-      },
-      {
-        name: 'default.date_dim.day',
-        type: 'int',
-        path: [
-          'default.repair_order_details.repair_order_id',
-          'default.repair_order.hard_hat_id',
-          'default.hard_hat.birth_date',
-        ],
-      },
-      {
-        name: 'default.date_dim.day',
-        type: 'int',
-        path: [
-          'default.repair_order_details.repair_order_id',
-          'default.repair_order.hard_hat_id',
-          'default.hard_hat.hire_date',
-        ],
-      },
-      {
-        name: 'default.date_dim.month',
-        type: 'int',
-        path: [
-          'default.repair_order_details.repair_order_id',
-          'default.repair_order.hard_hat_id',
-          'default.hard_hat.birth_date',
-        ],
-      },
-      {
-        name: 'default.date_dim.month',
-        type: 'int',
-        path: [
-          'default.repair_order_details.repair_order_id',
-          'default.repair_order.hard_hat_id',
-          'default.hard_hat.hire_date',
-        ],
-      },
-      {
-        name: 'default.date_dim.year',
-        type: 'int',
-        path: [
-          'default.repair_order_details.repair_order_id',
-          'default.repair_order.hard_hat_id',
-          'default.hard_hat.birth_date',
-        ],
-      },
-      {
-        name: 'default.date_dim.year',
-        type: 'int',
-        path: [
-          'default.repair_order_details.repair_order_id',
-          'default.repair_order.hard_hat_id',
-          'default.hard_hat.hire_date',
-        ],
-      },
-      {
-        name: 'default.hard_hat.address',
-        type: 'string',
-        path: [
-          'default.repair_order_details.repair_order_id',
-          'default.repair_order.hard_hat_id',
-        ],
-      },
-      {
-        name: 'default.hard_hat.birth_date',
-        type: 'date',
-        path: [
-          'default.repair_order_details.repair_order_id',
-          'default.repair_order.hard_hat_id',
-        ],
-      },
-      {
-        name: 'default.hard_hat.city',
-        type: 'string',
-        path: [
-          'default.repair_order_details.repair_order_id',
-          'default.repair_order.hard_hat_id',
-        ],
-      },
-      {
-        name: 'default.hard_hat.contractor_id',
-        type: 'int',
-        path: [
-          'default.repair_order_details.repair_order_id',
-          'default.repair_order.hard_hat_id',
-        ],
-      },
-      {
-        name: 'default.hard_hat.country',
-        type: 'string',
-        path: [
-          'default.repair_order_details.repair_order_id',
-          'default.repair_order.hard_hat_id',
-        ],
-      },
-      {
-        name: 'default.hard_hat.first_name',
-        type: 'string',
-        path: [
-          'default.repair_order_details.repair_order_id',
-          'default.repair_order.hard_hat_id',
-        ],
-      },
-      {
-        name: 'default.hard_hat.hard_hat_id',
-        type: 'int',
-        path: [
-          'default.repair_order_details.repair_order_id',
-          'default.repair_order.hard_hat_id',
-        ],
-      },
-      {
-        name: 'default.hard_hat.hire_date',
-        type: 'date',
-        path: [
-          'default.repair_order_details.repair_order_id',
-          'default.repair_order.hard_hat_id',
-        ],
-      },
-      {
-        name: 'default.hard_hat.last_name',
-        type: 'string',
-        path: [
-          'default.repair_order_details.repair_order_id',
-          'default.repair_order.hard_hat_id',
-        ],
-      },
-      {
-        name: 'default.hard_hat.manager',
-        type: 'int',
-        path: [
-          'default.repair_order_details.repair_order_id',
-          'default.repair_order.hard_hat_id',
-        ],
-      },
-      {
-        name: 'default.hard_hat.postal_code',
-        type: 'string',
-        path: [
-          'default.repair_order_details.repair_order_id',
-          'default.repair_order.hard_hat_id',
-        ],
-      },
-      {
-        name: 'default.hard_hat.state',
-        type: 'string',
-        path: [
-          'default.repair_order_details.repair_order_id',
-          'default.repair_order.hard_hat_id',
-        ],
-      },
-      {
-        name: 'default.hard_hat.title',
-        type: 'string',
-        path: [
-          'default.repair_order_details.repair_order_id',
-          'default.repair_order.hard_hat_id',
-        ],
-      },
-    ],
-    metric_metadata: {
-      unit: {
-        name: 'unitless',
-        label: 'Unitless',
-      },
-      direction: 'neutral',
+      requiredDimensions: [],
     },
   },
   mockNodeDAG: [
@@ -1553,4 +1416,53 @@ export const mocks = {
       tag_type: 'reports',
     },
   ],
+  materializationInfo: {
+    job_types: [
+      {
+        name: 'spark_sql',
+        label: 'Spark SQL',
+        description: 'Spark SQL materialization job',
+        allowed_node_types: ['transform', 'dimension', 'cube'],
+        job_class: 'SparkSqlMaterializationJob',
+      },
+      {
+        name: 'druid_measures_cube',
+        label: 'Druid Measures Cube (Pre-Agg Cube)',
+        description:
+          "Used to materialize a cube's measures to Druid for low-latency access to a set of metrics and dimensions. While the logical cube definition is at the level of metrics and dimensions, this materialized Druid cube will contain measures and dimensions, with rollup configured on the measures where appropriate.",
+        allowed_node_types: ['cube'],
+        job_class: 'DruidMeasuresCubeMaterializationJob',
+      },
+      {
+        name: 'druid_metrics_cube',
+        label: 'Druid Metrics Cube (Post-Agg Cube)',
+        description:
+          "Used to materialize a cube of metrics and dimensions to Druid for low-latency access. The materialized cube is at the metric level, meaning that all metrics will be aggregated to the level of the cube's dimensions.",
+        allowed_node_types: ['cube'],
+        job_class: 'DruidMetricsCubeMaterializationJob',
+      },
+    ],
+    strategies: [
+      {
+        name: 'full',
+        label: 'Full',
+      },
+      {
+        name: 'snapshot',
+        label: 'Snapshot',
+      },
+      {
+        name: 'snapshot_partition',
+        label: 'Snapshot Partition',
+      },
+      {
+        name: 'incremental_time',
+        label: 'Incremental Time',
+      },
+      {
+        name: 'view',
+        label: 'View',
+      },
+    ],
+  },
 };

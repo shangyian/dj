@@ -64,7 +64,9 @@ async def get_node_columns(
             ],
         )
         available = [
-            col for col in node.current.columns if col.name == node_column.column  # type: ignore
+            col
+            for col in node.current.columns  # type: ignore
+            if col.name == node_column.column
         ]
         if len(available) == 0:
             raise DJDoesNotExistException(
@@ -86,14 +88,16 @@ async def list_measures(
     statement = select(Measure.name)
     if prefix:
         statement = statement.where(
-            Measure.name.like(f"{prefix}%"),  # type: ignore  # pylint: disable=no-member
+            Measure.name.like(f"{prefix}%"),  # type: ignore
         )
     return (await session.execute(statement)).scalars().all()
 
 
 @router.get("/measures/{measure_name}", response_model=MeasureOutput)
 async def get_measure(
-    measure_name: str, *, session: AsyncSession = Depends(get_session)
+    measure_name: str,
+    *,
+    session: AsyncSession = Depends(get_session),
 ) -> MeasureOutput:
     """
     Get info on a measure.
@@ -109,7 +113,9 @@ async def get_measure(
     name="Add a Measure",
 )
 async def add_measure(
-    data: CreateMeasure, *, session: AsyncSession = Depends(get_session)
+    data: CreateMeasure,
+    *,
+    session: AsyncSession = Depends(get_session),
 ) -> MeasureOutput:
     """
     Add a measure

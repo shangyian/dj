@@ -1,12 +1,13 @@
 import { useEffect, useState } from 'react';
-import ClientCodePopover from './ClientCodePopover';
 import * as React from 'react';
 import EditColumnPopover from './EditColumnPopover';
+import EditColumnDescriptionPopover from './EditColumnDescriptionPopover';
 import LinkDimensionPopover from './LinkDimensionPopover';
 import { labelize } from '../../../utils/form';
 import PartitionColumnPopover from './PartitionColumnPopover';
 import { Light as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { foundation } from 'react-syntax-highlighter/src/styles/hljs';
+import { link } from 'fs';
 
 export default function NodeColumnTab({ node, djClient }) {
   const [attributes, setAttributes] = useState([]);
@@ -16,7 +17,9 @@ export default function NodeColumnTab({ node, djClient }) {
 
   useEffect(() => {
     const fetchData = async () => {
-      setColumns(await djClient.columns(node));
+      if (node) {
+        setColumns(await djClient.columns(node));
+      }
     };
     fetchData().catch(console.error);
   }, [djClient, node]);
@@ -35,8 +38,11 @@ export default function NodeColumnTab({ node, djClient }) {
   useEffect(() => {
     const fetchData = async () => {
       const dimensions = await djClient.dimensions();
-      const options = dimensions.map(name => {
-        return { value: name, label: name };
+      const options = dimensions.map(dim => {
+        return {
+          value: dim.name,
+          label: `${dim.name} (${dim.indegree} links)`,
+        };
       });
       setDimensions(options);
     };
@@ -58,28 +64,16 @@ export default function NodeColumnTab({ node, djClient }) {
     if (col.partition) {
       return (
         <>
-          <span
-            className="node_type badge node_type__blank"
-            key={`col-attr-partition-type`}
-          >
-            <span
-              className="partition_value badge"
-              key={`col-attr-partition-type`}
-            >
+          <span className="node_type badge node_type__blank">
+            <span className="partition_value badge">
               <b>Type:</b> {col.partition.type_}
             </span>
             <br />
-            <span
-              className="partition_value badge"
-              key={`col-attr-partition-type`}
-            >
+            <span className="partition_value badge">
               <b>Format:</b> <code>{col.partition.format}</code>
             </span>
             <br />
-            <span
-              className="partition_value badge"
-              key={`col-attr-partition-type`}
-            >
+            <span className="partition_value badge">
               <b>Granularity:</b> <code>{col.partition.granularity}</code>
             </span>
           </span>
@@ -90,7 +84,7 @@ export default function NodeColumnTab({ node, djClient }) {
   };
 
   const columnList = columns => {
-    return columns.map(col => {
+    return columns?.map(col => {
       const dimensionLinks = (links.length > 0 ? links : node?.dimension_links)
         .map(link => [
           link.dimension.name,
@@ -123,6 +117,24 @@ export default function NodeColumnTab({ node, djClient }) {
           </td>
           <td>
             <span
+              className=""
+              role="columnheader"
+              aria-label="ColumnDescription"
+              aria-hidden="false"
+            >
+              {col.description || ''}
+              <EditColumnDescriptionPopover
+                column={col}
+                node={node}
+                onSubmit={async () => {
+                  const res = await djClient.node(node.name);
+                  setColumns(res.columns);
+                }}
+              />
+            </span>
+          </td>
+          <td>
+            <span
               className={`node_type__${
                 node.type === 'cube' ? col.type : 'transform'
               } badge node_type`}
@@ -135,21 +147,24 @@ export default function NodeColumnTab({ node, djClient }) {
           </td>
           {node.type !== 'cube' ? (
             <td>
-              {referencedDimensionNode !== null ? (
-                <a href={`/nodes/${referencedDimensionNode}`}>
-                  {referencedDimensionNode}
-                </a>
-              ) : (
-                ''
-              )}
+              {dimensionLinks.length > 0
+                ? dimensionLinks.map(link => (
+                    <span
+                      className="rounded-pill badge bg-secondary-soft"
+                      style={{ fontSize: '14px' }}
+                      key={link[0]}
+                    >
+                      <a href={`/nodes/${link[0]}`}>{link[0]}</a>
+                    </span>
+                  ))
+                : ''}
               <LinkDimensionPopover
                 column={col}
-                referencedDimensionNode={referencedDimensionNode}
+                dimensionNodes={dimensionLinks.map(link => link[0])}
                 node={node}
                 options={dimensions}
                 onSubmit={async () => {
                   const res = await djClient.node(node.name);
-                  setColumns(res.columns);
                   setLinks(res.dimension_links);
                 }}
               />
@@ -197,6 +212,7 @@ export default function NodeColumnTab({ node, djClient }) {
             <tr>
               <th className="text-start">Column</th>
               <th>Display Name</th>
+              <th>Description</th>
               <th>Type</th>
               {node?.type !== 'cube' ? (
                 <>
@@ -226,7 +242,7 @@ export default function NodeColumnTab({ node, djClient }) {
           <tbody>
             {node?.dimension_links.map(link => {
               return (
-                <tr>
+                <tr key={link.dimension.name}>
                   <td>
                     <a href={'/nodes/' + link.dimension.name}>
                       {link.dimension.name}

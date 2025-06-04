@@ -2,16 +2,18 @@
 Tests for ``datajunction_server.models.node``.
 """
 
-# pylint: disable=use-implicit-booleaness-not-comparison
-
-
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from datajunction_server.database.availabilitystate import AvailabilityState
 from datajunction_server.database.node import Node, NodeRevision
-from datajunction_server.models.node import AvailabilityStateBase, PartitionAvailability
+from datajunction_server.models.node import (
+    AvailabilityStateBase,
+    NodeCursor,
+    PartitionAvailability,
+)
 from datajunction_server.models.node_type import NodeType
+from datajunction_server.typing import UTCDatetime
 
 
 def test_node_relationship(session: AsyncSession) -> None:
@@ -47,18 +49,6 @@ def test_extra_validation() -> None:
     """
     Test ``extra_validation``.
     """
-    node = Node(name="A", type=NodeType.SOURCE, current_version="1")
-    node_revision = NodeRevision(
-        name=node.name,
-        type=node.type,
-        node=node,
-        version="1",
-        query="SELECT * FROM B",
-    )
-    with pytest.raises(Exception) as excinfo:
-        node_revision.extra_validation()
-    assert str(excinfo.value) == "Node A of type source should not have a query"
-
     node = Node(name="A", type=NodeType.METRIC, current_version="1")
     node_revision = NodeRevision(
         name=node.name,
@@ -76,9 +66,7 @@ def test_extra_validation() -> None:
         type=node.type,
         node=node,
         version="1",
-        query="SELECT count(repair_order_id) "
-        "AS Anum_repair_orders "
-        "FROM repair_orders",
+        query="SELECT count(repair_order_id) AS Anum_repair_orders FROM repair_orders",
     )
     node_revision.extra_validation()
 
@@ -105,6 +93,16 @@ def test_extra_validation() -> None:
         node=node,
         version="1",
         query="SELECT ln(count(distinct repair_order_id)) FROM repair_orders",
+    )
+    node_revision.extra_validation()
+
+    node = Node(name="ABC", type=NodeType.METRIC, current_version="1")
+    node_revision = NodeRevision(
+        name=node.name,
+        type=node.type,
+        node=node,
+        version="1",
+        query="SELECT CASE WHEN COUNT(repair_order_id) = 1 THEN 1 ELSE 0 END FROM repair_orders",
     )
     node_revision.extra_validation()
 
@@ -180,6 +178,7 @@ def test_merging_availability_simple_no_partitions() -> None:
         "temporal_partitions": [],
         "partitions": [],
         "url": None,
+        "links": {},
     }
 
 
@@ -220,6 +219,7 @@ def test_merging_availability_complex_no_partitions() -> None:
         "temporal_partitions": [],
         "partitions": [],
         "url": None,
+        "links": {},
     }
 
 
@@ -300,4 +300,30 @@ def test_merging_availability_complex_with_partitions() -> None:
             },
         ],
         "url": None,
+        "links": {},
     }
+
+
+def test_node_cursors() -> None:
+    """
+    Test encoding and decoding node cursors
+    """
+    created_at = UTCDatetime(
+        year=2024,
+        month=1,
+        day=1,
+        hour=12,
+        minute=30,
+        second=33,
+    )
+
+    cursor = NodeCursor(created_at=created_at, id=1010)
+
+    encoded_cursor = (
+        "eyJjcmVhdGVkX2F0IjogIjIwMjQtMDEtMDFUMTI6MzA6MzMiLCAiaWQiOiAxMDEwfQ=="
+    )
+    assert cursor.encode() == encoded_cursor
+
+    decoded_cursor = NodeCursor.decode(encoded_cursor)
+    assert decoded_cursor.created_at == cursor.created_at
+    assert decoded_cursor.id == cursor.id

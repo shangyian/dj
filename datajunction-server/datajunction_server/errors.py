@@ -1,6 +1,7 @@
 """
 Errors and warnings.
 """
+
 from http import HTTPStatus
 from typing import Any, Dict, List, Literal, Optional, TypedDict
 
@@ -33,11 +34,13 @@ class ErrorCode(IntEnum):
     INVALID_DIMENSION_JOIN = 205
     INVALID_COLUMN = 206
     QUERY_SERVICE_ERROR = 207
+    INVALID_ORDER_BY = 208
 
     # SQL Build Error
     COMPOUND_BUILD_EXCEPTION = 300
     MISSING_PARENT = 301
     TYPE_INFERENCE = 302
+    MISSING_PARAMETER = 303
 
     # Authentication
     AUTHENTICATION_ERROR = 400
@@ -48,6 +51,11 @@ class ErrorCode(IntEnum):
     # Authorization
     UNAUTHORIZED_ACCESS = 500
     INCOMPLETE_AUTHORIZATION = 501
+
+    # Node validation
+    INVALID_PARENT = 600
+    INVALID_DIMENSION = 601
+    INVALID_METRIC = 602
 
 
 class DebugType(TypedDict, total=False):
@@ -161,7 +169,7 @@ class DJException(Exception):
     # status code that should be returned when ``DJException`` is caught by the API layer
     http_status_code: int = 500
 
-    def __init__(  # pylint: disable=too-many-arguments
+    def __init__(
         self,
         message: Optional[str] = None,
         errors: Optional[List[DJError]] = None,
@@ -231,12 +239,29 @@ class DJInvalidInputException(DJException):
     http_status_code: int = HTTPStatus.UNPROCESSABLE_ENTITY
 
 
+class DJInvalidMetricQueryException(DJInvalidInputException):
+    """
+    Exception raised when the metric query provided by the user is invalid.
+    """
+
+    http_status_code: int = HTTPStatus.BAD_REQUEST
+
+
 class DJNotImplementedException(DJException):
     """
     Exception raised when some functionality hasn't been implemented in DJ yet.
     """
 
     dbapi_exception: DBAPIExceptions = "NotSupportedError"
+    http_status_code: int = 500
+
+
+class DJDatabaseException(DJException):
+    """
+    Exception raised when the database returns an error.
+    """
+
+    dbapi_exception: DBAPIExceptions = "DatabaseError"
     http_status_code: int = 500
 
 
@@ -276,6 +301,14 @@ class DJQueryServiceClientException(DJException):
     http_status_code: int = 500
 
 
+class DJQueryServiceClientEntityNotFound(DJException):
+    """
+    Exception raised when an entity is not found on the query service
+    """
+
+    http_status_code: int = 404
+
+
 class DJActionNotAllowedException(DJException):
     """
     Exception raised when an action is not allowed.
@@ -285,4 +318,53 @@ class DJActionNotAllowedException(DJException):
 class DJPluginNotFoundException(DJException):
     """
     Exception raised when plugin is not found.
+    """
+
+
+class DJQueryBuildException(DJException):
+    """
+    Exception raised when query building fails.
+    """
+
+
+class DJQueryBuildError(DJError):
+    """
+    Query build error
+    """
+
+
+class DJAuthorizationException(DJException):
+    """
+    Exception raised when the user is not authorized to perform a particular request
+    """
+
+    http_status_code: int = HTTPStatus.FORBIDDEN
+    message: str = "You do not have permission to perform this action."
+
+
+class DJAuthenticationException(DJException):
+    """
+    Exception raised when the user fails to authenticate.
+    """
+
+    http_status_code: int = HTTPStatus.UNAUTHORIZED
+    message: str = "Authentication failed. Please log in and try again."
+
+
+class DJUninitializedResourceException(DJInternalErrorException):
+    """
+    Raised when a required system resource (e.g., DatabaseSessionManager) is not initialized.
+    """
+
+
+class DJConfigurationException(DJException):
+    """
+    Exception raised when there is a missing or incorrect system configuration
+    that prevents the operation from proceeding.
+    """
+
+
+class DJGraphCycleException(DJException):
+    """
+    Exception raised when a cycle is detected in a graph during topological sorting.
     """

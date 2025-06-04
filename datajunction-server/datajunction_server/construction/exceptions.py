@@ -4,7 +4,7 @@ Exceptions used in construction
 
 from typing import List, Optional
 
-from datajunction_server.errors import DJError, DJException
+from datajunction_server.errors import DJError, DJQueryBuildException
 
 
 class CompoundBuildException:
@@ -19,7 +19,9 @@ class CompoundBuildException:
     def __new__(cls, *args, **kwargs):
         if not cls._instance:
             cls._instance = super(CompoundBuildException, cls).__new__(
-                cls, *args, **kwargs
+                cls,
+                *args,
+                **kwargs,
             )
             cls.errors = []
         return cls._instance
@@ -42,7 +44,7 @@ class CompoundBuildException:
         Accumulate DJ exceptions
         """
         if self._raise:
-            raise DJException(
+            raise DJQueryBuildException(
                 message=message or error.message,
                 errors=[error],
             )

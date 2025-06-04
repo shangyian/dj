@@ -2,24 +2,16 @@
 Main DJ server app.
 """
 
-# All the models need to be imported here so that SQLModel can define their
-# relationships at runtime without causing circular imports.
-# See https://sqlmodel.tiangolo.com/tutorial/code-structure/#make-circular-imports-work.
-# pylint: disable=unused-import,ungrouped-imports
-
 import logging
+from datajunction_server.api import setup_logging  # noqa
+
 from http import HTTPStatus
-from logging import config
-from os import path
 from typing import TYPE_CHECKING
 
 from fastapi import Depends, FastAPI, Request
-from fastapi.responses import JSONResponse, RedirectResponse, Response
+from fastapi.responses import JSONResponse
 from fastapi_cache import FastAPICache
 from fastapi_cache.backends.inmemory import InMemoryBackend
-from jose import JWTError
-from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
-from sqlalchemy import select
 from starlette.middleware.cors import CORSMiddleware
 
 from datajunction_server import __version__
@@ -27,6 +19,7 @@ from datajunction_server.api import (
     attributes,
     catalogs,
     client,
+    collection,
     cubes,
     data,
     dimensions,
@@ -39,33 +32,25 @@ from datajunction_server.api import (
     metrics,
     namespaces,
     nodes,
+    notifications,
     sql,
     tags,
+    users,
 )
-from datajunction_server.api.access.authentication import whoami
+
+from datajunction_server.api.access.authentication import basic, whoami
 from datajunction_server.api.attributes import default_attribute_types
 from datajunction_server.api.catalogs import default_catalog
-from datajunction_server.api.graphql.main import graphql_app
+from datajunction_server.api.graphql.main import graphql_app, schema as graphql_schema  # noqa: F401
 from datajunction_server.constants import AUTH_COOKIE, LOGGED_IN_FLAG_COOKIE
-from datajunction_server.database.catalog import Catalog
-from datajunction_server.database.column import Column
-from datajunction_server.database.database import Table
-from datajunction_server.database.engine import Engine
-from datajunction_server.database.node import NodeRevision
-from datajunction_server.database.user import User
 from datajunction_server.errors import DJException
 from datajunction_server.utils import get_settings
 
 if TYPE_CHECKING:  # pragma: no cover
-    from opentelemetry import trace
+    pass
 
 _logger = logging.getLogger(__name__)
 settings = get_settings()
-
-config.fileConfig(
-    path.join(path.dirname(path.abspath(__file__)), "logging.conf"),
-    disable_existing_loggers=False,
-)
 
 dependencies = [Depends(default_attribute_types), Depends(default_catalog)]
 
@@ -89,6 +74,7 @@ app.add_middleware(
 )
 
 app.include_router(catalogs.router)
+app.include_router(collection.router)
 app.include_router(engines.router)
 app.include_router(metrics.router)
 app.include_router(djsql.router)
@@ -107,6 +93,9 @@ app.include_router(client.router)
 app.include_router(dimensions.router)
 app.include_router(graphql_app, prefix="/graphql")
 app.include_router(whoami.router)
+app.include_router(users.router)
+app.include_router(basic.router)
+app.include_router(notifications.router)
 
 
 @app.on_event("startup")
@@ -118,7 +107,7 @@ async def startup():
 
 
 @app.exception_handler(DJException)
-async def dj_exception_handler(  # pylint: disable=unused-argument
+async def dj_exception_handler(
     request: Request,
     exc: DJException,
 ) -> JSONResponse:
@@ -137,12 +126,6 @@ async def dj_exception_handler(  # pylint: disable=unused-argument
         response.delete_cookie(LOGGED_IN_FLAG_COOKIE)
     return response
 
-
-# Only mount basic auth router if a server secret is configured
-if settings.secret:  # pragma: no cover
-    from datajunction_server.api.access.authentication import basic
-
-    app.include_router(basic.router)
 
 # Only mount github auth router if a github client id and secret are configured
 if all(

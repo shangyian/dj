@@ -1,7 +1,9 @@
-# pylint: skip-file
 # mypy: ignore-errors
+import copy
 import inspect
 import logging
+from functools import lru_cache
+import re
 from typing import TYPE_CHECKING, List, Optional, Tuple, Union, cast
 
 import antlr4
@@ -32,14 +34,14 @@ logger = logging.getLogger(__name__)
 
 class RemoveIdentifierBackticks(antlr4.ParseTreeListener):
     @staticmethod
-    def exitQuotedIdentifier(ctx):  # pylint: disable=invalid-name,unused-argument
+    def exitQuotedIdentifier(ctx):
         def identity(token):
             return token
 
         return identity
 
     @staticmethod
-    def enterNonReserved(ctx):  # pylint: disable=invalid-name,unused-argument
+    def enterNonReserved(ctx):
         def add_backtick(token):
             return "`{0}`".format(token)
 
@@ -55,7 +57,7 @@ class ParseErrorListener(ErrorListener):
         column,
         msg,
         e,
-    ):  # pylint: disable=invalid-name,no-self-use,too-many-arguments
+    ):
         raise SqlSyntaxError(f"Parse error {line}:{column}:", msg)
 
 
@@ -68,12 +70,12 @@ class UpperCaseCharStream:
     def __init__(self, wrapped):
         self.wrapped = wrapped
 
-    def getText(self, interval, *args):  # pylint: disable=invalid-name
+    def getText(self, interval, *args):
         if args or (self.size() > 0 and (interval.b - interval.a >= 0)):
             return self.wrapped.getText(interval, *args)
         return ""
 
-    def LA(self, i: int):  # pylint: disable=invalid-name
+    def LA(self, i: int):
         token = self.wrapped.LA(i)
         if token in (0, -1):
             return token
@@ -179,13 +181,31 @@ def parse_rule(sql: str, rule: str) -> Union[ast.Node, "ColumnType"]:
     return ast_tree
 
 
+@lru_cache(maxsize=128)
+def _cached_parse(sql: Optional[str]) -> ast.Query:
+    """
+    Parse a string sql query into a DJ query AST and cache it.
+    """
+    return parse(sql)
+
+
 def parse(sql: Optional[str]) -> ast.Query:
     """
     Parse a string sql query into a DJ ast Query
     """
     if not sql:
         raise DJParseException("Empty query provided!")
-    return cast(ast.Query, parse_rule(sql, "singleStatement"))
+    try:
+        return cast(ast.Query, parse_rule(sql, "singleStatement"))
+    except SqlParsingError as exc:
+        raise DJParseException(message=f"Error parsing SQL `{sql}`: {exc}") from exc
+
+
+def cached_parse(sql: Optional[str]) -> ast.Query:
+    """
+    Parse a string sql query into a DJ ast Query
+    """
+    return copy.deepcopy(_cached_parse(sql))
 
 
 TERMINAL_NODE = antlr4.tree.Tree.TerminalNodeImpl
@@ -271,6 +291,11 @@ def _(ctx: sbp.StatementDefaultContext):
 
 
 @visit.register
+def _(ctx: sbp.InlineTableDefault1Context):
+    return visit(ctx.inlineTable())
+
+
+@visit.register
 def _(ctx: sbp.InlineTableDefault2Context):
     return visit(ctx.inlineTable())
 
@@ -287,19 +312,20 @@ def _(ctx: sbp.InlineTableContext):
     alias, columns = visit(ctx.tableAlias())
 
     # Generate default column aliases if they weren't specified
+    col_args = args[0] if isinstance(args[0], list) else args
     inline_table_columns = (
-        [ast.Column(col, _type=value.type) for col, value in zip(columns, args[0])]
+        [ast.Column(col, _type=value.type) for col, value in zip(columns, col_args)]
         if columns
         else [
             ast.Column(ast.Name(f"col{idx + 1}"), _type=value.type)
-            for idx, value in enumerate(args[0])
+            for idx, value in enumerate(col_args)
         ]
     )
     return ast.InlineTable(
         name=alias,
         _columns=inline_table_columns,
         explicit_columns=len(columns) > 0,
-        values=[value for value in args],
+        values=[[value] if not isinstance(value, list) else value for value in args],
     )
 
 
@@ -471,7 +497,7 @@ def _(ctx: sbp.QueryPrimaryContext):
 
 @visit.register
 def _(ctx: sbp.RegularQuerySpecificationContext):
-    quantifier, projection = visit(ctx.selectClause())
+    quantifier, projection, hints = visit(ctx.selectClause())
     from_ = visit(ctx.fromClause()) if ctx.fromClause() else None
     laterals = visit(ctx.lateralView())
     group_by = visit(ctx.aggregationClause()) if ctx.aggregationClause() else []
@@ -489,6 +515,7 @@ def _(ctx: sbp.RegularQuerySpecificationContext):
         where=where,
         group_by=group_by,
         having=having,
+        hints=hints,
     )
     if from_ and from_.laterals:
         select.lateral_views += from_.laterals
@@ -535,7 +562,23 @@ def _(ctx: sbp.SelectClauseContext):
     if quant := ctx.setQuantifier():
         quantifier = visit(quant)
     projection = visit(ctx.namedExpressionSeq())
-    return quantifier, projection
+    hints = [statement for hint in ctx.hints for statement in visit(hint)]
+    return quantifier, projection, hints
+
+
+@visit.register
+def _(ctx: sbp.HintContext) -> List[ast.Hint]:
+    return [visit(statement) for statement in ctx.hintStatements]
+
+
+@visit.register
+def _(ctx: sbp.HintStatementContext) -> ast.Hint:
+    name = visit(ctx.hintName)
+    parameters = [visit(param) for param in ctx.parameters]
+    return ast.Hint(
+        name=name,
+        parameters=parameters,
+    )
 
 
 @visit.register
@@ -615,6 +658,16 @@ def _(ctx: sbp.NumericLiteralContext):
 
 
 @visit.register
+def _(ctx: sbp.ParameterLiteralContext):
+    raw = ctx.getText()
+    match = re.match(r'^:("?`?)([\w.]+)(`?"?)$', raw)
+    if not match:
+        raise ValueError(f"Invalid query parameter format: {raw}")
+    param_name = match.group(2)
+    return ast.QueryParameter(name=param_name, quote_style=match.group(3))
+
+
+@visit.register
 def _(ctx: sbp.StringLitContext):
     if string := ctx.STRING():
         return string.getSymbol().text.strip("'")
@@ -636,7 +689,9 @@ def _(ctx: sbp.DereferenceContext):
 @visit.register
 def _(ctx: sbp.FunctionCallContext):
     name = visit(ctx.functionName())
-    quantifier = visit(ctx.setQuantifier()) if ctx.setQuantifier() else ""
+    quantifier = (
+        ast.SetQuantifier(visit(ctx.setQuantifier())) if ctx.setQuantifier() else None
+    )
     over = visit(ctx.windowSpec()) if ctx.windowSpec() else None
     args = visit(ctx.argument)
     return ast.Function(name, args, quantifier=quantifier, over=over)

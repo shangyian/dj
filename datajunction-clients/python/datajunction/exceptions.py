@@ -1,4 +1,5 @@
 """DJ client exceptions"""
+
 from typing import List
 
 
@@ -12,6 +13,10 @@ class DJNamespaceAlreadyExists(DJClientException):
     """
     Raised when a namespace to be created already exists.
     """
+
+    def __init__(self, ns_name: str, *args) -> None:
+        self.message = f"Namespace `{ns_name}` already exists."
+        super().__init__(self.message, *args)
 
 
 class DJTagAlreadyExists(DJClientException):
@@ -34,16 +39,6 @@ class DJTagDoesNotExist(DJClientException):
         super().__init__(self.message, *args)
 
 
-class DJNodeAlreadyExists(DJClientException):
-    """
-    Raised when a node to be created already exists.
-    """
-
-    def __init__(self, node_name: str, *args) -> None:
-        self.message = f"Node `{node_name}` already exists."
-        super().__init__(self.message, *args)
-
-
 class DJDeploymentFailure(DJClientException):
     """
     Raised when a deployment of a project includes any errors
@@ -62,4 +57,17 @@ class DJTableAlreadyRegistered(DJClientException):
 
     def __init__(self, catalog: str, schema: str, table: str, *args) -> None:
         self.message = f"Table `{catalog}.{schema}.{table}` is already registered."
+        super().__init__(self.message, *args)
+
+
+class DJViewAlreadyRegistered(DJClientException):
+    """
+    Raised when a view is already regsistered in DJ.
+    """
+
+    def __init__(self, catalog: str, schema: str, view: str, *args) -> None:
+        self.message = (
+            f"View `{catalog}.{schema}.{view}` is already registered, "
+            "use replace=True to force a refresh."
+        )
         super().__init__(self.message, *args)

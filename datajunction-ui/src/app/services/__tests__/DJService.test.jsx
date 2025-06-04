@@ -203,6 +203,7 @@ describe('DataJunctionAPI', () => {
         metric_metadata: {
           direction: 'neutral',
           unit: '',
+          significant_digits: null,
         },
       }),
       credentials: 'include',
@@ -426,9 +427,12 @@ describe('DataJunctionAPI', () => {
     const nmspce = 'sampleNamespace';
     fetch.mockResponseOnce(JSON.stringify({}));
     await DataJunctionAPI.namespace(nmspce);
-    expect(fetch).toHaveBeenCalledWith(`${DJ_URL}/namespaces/${nmspce}/`, {
-      credentials: 'include',
-    });
+    expect(fetch).toHaveBeenCalledWith(
+      `${DJ_URL}/namespaces/${nmspce}?edited_by=undefined&with_edited_by=true`,
+      {
+        credentials: 'include',
+      },
+    );
   });
 
   it('calls sql correctly', async () => {
@@ -457,8 +461,8 @@ describe('DataJunctionAPI', () => {
   it('calls materializations correctly', async () => {
     const nodeName = 'default.sample_node';
     const mockMaterializations = [
-      { name: 'materialization1', clientCode: 'from dj import DJClient' },
-      { name: 'materialization2', clientCode: 'from dj import DJClient' },
+      { name: 'materialization1' },
+      { name: 'materialization2' },
     ];
 
     // Mock the first fetch call to return the list of materializations
@@ -481,14 +485,6 @@ describe('DataJunctionAPI', () => {
       },
     );
 
-    // Check the subsequent fetch calls for clientCode
-    mockMaterializations.forEach(mat => {
-      expect(fetch).toHaveBeenCalledWith(
-        `${DJ_URL}/datajunction-clients/python/add_materialization/${nodeName}/${mat.name}`,
-        { credentials: 'include' },
-      );
-    });
-
     // Ensure the result contains the clientCode for each materialization
     expect(result).toEqual(mockMaterializations);
   });
@@ -497,9 +493,9 @@ describe('DataJunctionAPI', () => {
     const sampleNode = {
       name: 'sampleNode',
       columns: [
-        { name: 'column1', dimension: { name: 'dimension1' }, clientCode: {} },
+        { name: 'column1', dimension: { name: 'dimension1' } },
         { name: 'column2', dimension: null },
-        { name: 'column3', dimension: { name: 'dimension2' }, clientCode: {} },
+        { name: 'column3', dimension: { name: 'dimension2' } },
       ],
     };
 
@@ -511,18 +507,6 @@ describe('DataJunctionAPI', () => {
     fetch.mockResponses(...mockClientCodeResponses);
 
     const result = await DataJunctionAPI.columns(sampleNode);
-
-    // Check the fetch calls for clientCode for columns with a dimension
-    sampleNode.columns.forEach(col => {
-      if (col.dimension) {
-        expect(fetch).toHaveBeenCalledWith(
-          `${DJ_URL}/datajunction-clients/python/link_dimension/${sampleNode.name}/${col.name}/${col.dimension.name}`,
-          { credentials: 'include' },
-        );
-      }
-    });
-
-    // Ensure the result contains the clientCode for columns with a dimension and leaves others unchanged
     expect(result).toEqual(sampleNode.columns);
   });
 
@@ -610,6 +594,50 @@ describe('DataJunctionAPI', () => {
     expect(global.EventSource).toHaveBeenCalledWith(
       `${DJ_URL}/stream/?${params}&limit=10000&async_=true`,
       { withCredentials: true },
+    );
+  });
+
+  it('calls streamNodeData correctly', () => {
+    const nodes = ['transform1'];
+    const dimensionSelection = ['dimension1', 'dimension2'];
+    const filters = 'sampleFilter';
+
+    DataJunctionAPI.streamNodeData(nodes[0], {
+      dimensions: dimensionSelection,
+      filters: filters,
+    });
+
+    const params = new URLSearchParams();
+    params.append('dimensions', dimensionSelection, 'filters', filters);
+
+    expect(global.EventSource).toHaveBeenCalledWith(
+      `${DJ_URL}/stream/transform1?filters=sampleFilter&dimensions=dimension1&dimensions=dimension2&limit=1000&async_=true`,
+      { withCredentials: true },
+    );
+  });
+
+  it('calls nodeData correctly', () => {
+    const nodes = ['transform1'];
+    const dimensionSelection = ['dimension1', 'dimension2'];
+    const filters = 'sampleFilter';
+    fetch.mockResponseOnce(JSON.stringify({}));
+
+    DataJunctionAPI.nodeData(nodes[0], {
+      dimensions: dimensionSelection,
+      filters: filters,
+    });
+
+    const params = new URLSearchParams();
+    params.append('dimensions', dimensionSelection, 'filters', filters);
+
+    expect(fetch).toHaveBeenCalledWith(
+      `${DJ_URL}/data/transform1?filters=sampleFilter&dimensions=dimension1&dimensions=dimension2&limit=1000&async_=true`,
+      {
+        credentials: 'include',
+        headers: {
+          'Cache-Control': 'max-age=86400',
+        },
+      },
     );
   });
 
@@ -981,13 +1009,12 @@ describe('DataJunctionAPI', () => {
 
   it('calls runBackfill correctly', async () => {
     fetch.mockResponseOnce(JSON.stringify({}));
-    await DataJunctionAPI.runBackfill(
-      'default.hard_hat',
-      'spark',
-      'hire_date',
-      '20230101',
-      '20230202',
-    );
+    await DataJunctionAPI.runBackfill('default.hard_hat', 'spark', [
+      {
+        columnName: 'hire_date',
+        range: ['20230101', '20230202'],
+      },
+    ]);
     expect(fetch).toHaveBeenCalledWith(
       `${DJ_URL}/nodes/default.hard_hat/materializations/spark/backfill`,
       {
@@ -995,11 +1022,119 @@ describe('DataJunctionAPI', () => {
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({
-          column_name: 'hire_date',
-          range: ['20230101', '20230202'],
-        }),
+        body: JSON.stringify([
+          {
+            column_name: 'hire_date',
+            range: ['20230101', '20230202'],
+          },
+        ]),
         method: 'POST',
+      },
+    );
+  });
+
+  it('calls materializationInfo correctly', async () => {
+    fetch.mockResponseOnce(JSON.stringify({}));
+    await DataJunctionAPI.materializationInfo();
+    expect(fetch).toHaveBeenCalledWith(`${DJ_URL}/materialization/info`, {
+      credentials: 'include',
+    });
+  });
+
+  it('calls revalidate correctly', async () => {
+    fetch.mockResponseOnce(JSON.stringify({}));
+    await DataJunctionAPI.revalidate('default.hard_hat');
+    expect(fetch).toHaveBeenCalledWith(
+      `${DJ_URL}/nodes/default.hard_hat/validate`,
+      {
+        credentials: 'include',
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+      },
+    );
+  });
+
+  it('calls deleteMaterialization correctly', () => {
+    const nodeName = 'transform1';
+    const materializationName = 'sampleMaterialization';
+    fetch.mockResponseOnce(JSON.stringify({}));
+
+    DataJunctionAPI.deleteMaterialization(nodeName, materializationName);
+    expect(fetch).toHaveBeenCalledWith(
+      `${DJ_URL}/nodes/${nodeName}/materializations?materialization_name=${materializationName}`,
+      {
+        method: 'DELETE',
+        credentials: 'include',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+      },
+    );
+  });
+
+  it('calls listNodesForLanding correctly', () => {
+    fetch.mockResponseOnce(JSON.stringify({}));
+
+    DataJunctionAPI.listNodesForLanding(
+      '',
+      ['source'],
+      [],
+      '',
+      null,
+      null,
+      100,
+    );
+    expect(fetch).toHaveBeenCalledWith(
+      `${DJ_URL}/graphql`,
+      expect.objectContaining({
+        method: 'POST',
+        credentials: 'include',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+      }),
+    );
+  });
+
+  it('calls getMetric correctly', async () => {
+    fetch.mockResponseOnce(
+      JSON.stringify({
+        data: { findNodes: [{ name: 'default.num_repair_orders' }] },
+      }),
+    );
+    await DataJunctionAPI.getMetric('default.num_repair_orders');
+    expect(fetch).toHaveBeenCalledWith(
+      `${DJ_URL}/graphql`,
+      expect.objectContaining({
+        method: 'POST',
+        credentials: 'include',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+      }),
+    );
+  });
+
+  it('calls notebookExportCube correctly', async () => {
+    fetch.mockResponseOnce(JSON.stringify({}));
+    await DataJunctionAPI.notebookExportCube('default.repairs_cube');
+    expect(fetch).toHaveBeenCalledWith(
+      `${DJ_URL}/datajunction-clients/python/notebook/?cube=default.repairs_cube`,
+      {
+        credentials: 'include',
+      },
+    );
+  });
+
+  it('calls notebookExportNamespace correctly', async () => {
+    fetch.mockResponseOnce(JSON.stringify({}));
+    await DataJunctionAPI.notebookExportNamespace('default');
+    expect(fetch).toHaveBeenCalledWith(
+      `${DJ_URL}/datajunction-clients/python/notebook/?namespace=default`,
+      {
+        credentials: 'include',
       },
     );
   });

@@ -1,9 +1,10 @@
 """Namespace database schema."""
+
 from typing import List, Optional
 
 from sqlalchemy import DateTime, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, joinedload, load_only, mapped_column, selectinload
 from sqlalchemy.sql.operators import is_, or_
 
 from datajunction_server.database.base import Base
@@ -11,10 +12,11 @@ from datajunction_server.database.node import Node, NodeRevision
 from datajunction_server.errors import DJDoesNotExistException
 from datajunction_server.models.node import NodeMinimumDetail
 from datajunction_server.models.node_type import NodeType
+from datajunction_server.sql.dag import _node_output_options
 from datajunction_server.typing import UTCDatetime
 
 
-class NodeNamespace(Base):  # pylint: disable=too-few-public-methods
+class NodeNamespace(Base):
     """
     A node namespace
     """
@@ -40,7 +42,7 @@ class NodeNamespace(Base):  # pylint: disable=too-few-public-methods
         statement = (
             select(
                 NodeNamespace.namespace,
-                func.count(Node.id).label("num_nodes"),  # pylint: disable=not-callable
+                func.count(Node.id).label("num_nodes"),
             )
             .join(
                 Node,
@@ -81,33 +83,42 @@ class NodeNamespace(Base):  # pylint: disable=too-few-public-methods
         cls,
         session: AsyncSession,
         namespace: str,
-        node_type: NodeType = None,
+        node_type: Optional[NodeType] = None,
         include_deactivated: bool = False,
+        with_edited_by: bool = False,
     ) -> List["NodeMinimumDetail"]:
         """
         List node names in namespace.
         """
         await cls.get(session, namespace)
 
-        list_nodes_query = select(
-            Node.name,
-            NodeRevision.display_name,
-            NodeRevision.description,
-            Node.type,
-            Node.current_version.label(  # type: ignore # pylint: disable=no-member
-                "version",
-            ),
-            NodeRevision.status,
-            NodeRevision.mode,
-            NodeRevision.updated_at,
-        ).where(
-            or_(
-                Node.namespace.like(f"{namespace}.%"),  # pylint: disable=no-member
-                Node.namespace == namespace,
-            ),
-            Node.current_version == NodeRevision.version,
-            Node.name == NodeRevision.name,
-            Node.type == node_type if node_type else True,
+        list_nodes_query = (
+            select(Node)
+            .where(
+                or_(
+                    Node.namespace.like(f"{namespace}.%"),
+                    Node.namespace == namespace,
+                ),
+                Node.type == node_type if node_type else True,
+            )
+            .options(
+                load_only(
+                    Node.name,
+                    Node.type,
+                    Node.current_version,
+                ),
+                joinedload(Node.current).options(
+                    load_only(
+                        NodeRevision.display_name,
+                        NodeRevision.description,
+                        NodeRevision.status,
+                        NodeRevision.mode,
+                        NodeRevision.updated_at,
+                    ),
+                ),
+                selectinload(Node.tags),
+                *([selectinload(Node.history)] if with_edited_by else []),
+            )
         )
         if include_deactivated is False:
             list_nodes_query = list_nodes_query.where(is_(Node.deactivated_at, None))
@@ -116,13 +127,50 @@ class NodeNamespace(Base):  # pylint: disable=too-few-public-methods
         return [
             NodeMinimumDetail(
                 name=row.name,
-                display_name=row.display_name,
-                description=row.description,
-                version=row.version,
+                display_name=row.current.display_name,
+                description=row.current.description,
+                version=row.current_version,
                 type=row.type,
-                status=row.status,
-                mode=row.mode,
-                updated_at=row.updated_at,
+                status=row.current.status,
+                mode=row.current.mode,
+                updated_at=row.current.updated_at,
+                tags=row.tags,
+                edited_by=(
+                    None
+                    if not with_edited_by
+                    else list({entry.user for entry in row.history if entry.user})
+                ),
             )
-            for row in result.all()
+            for row in result.unique().scalars().all()
         ]
+
+    @classmethod
+    async def list_all_nodes(
+        cls,
+        session: AsyncSession,
+        namespace: str,
+        include_deactivated: bool = False,
+    ) -> List["Node"]:
+        """
+        List all nodes in the namespace.
+        """
+        await cls.get(session, namespace)
+
+        list_nodes_query = (
+            select(Node)
+            .where(
+                or_(
+                    Node.namespace.like(f"{namespace}.%"),
+                    Node.namespace == namespace,
+                ),
+            )
+            .options(
+                *_node_output_options(),
+            )
+        )
+        if include_deactivated is False:  # pragma: no cover
+            list_nodes_query = list_nodes_query.where(is_(Node.deactivated_at, None))
+
+        result = await session.execute(list_nodes_query)
+        nodes = result.unique().scalars().all()
+        return nodes

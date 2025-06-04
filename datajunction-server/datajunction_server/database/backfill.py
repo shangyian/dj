@@ -1,4 +1,5 @@
 """Backfill database schema."""
+
 from typing import TYPE_CHECKING, List, Optional
 
 from sqlalchemy import JSON, BigInteger, ForeignKey, Integer
@@ -11,7 +12,7 @@ if TYPE_CHECKING:
     from datajunction_server.database.materialization import Materialization
 
 
-class Backfill(Base):  # type: ignore  # pylint: disable=too-few-public-methods
+class Backfill(Base):  # type: ignore
     """
     A backfill run is linked to a materialization config, where users provide the range
     (of a temporal partition) to backfill for the node.
@@ -24,7 +25,7 @@ class Backfill(Base):  # type: ignore  # pylint: disable=too-few-public-methods
         primary_key=True,
     )
 
-    # The column reference that this partition is defined on
+    # The column reference that this backfill is defined on
     materialization_id: Mapped[int] = mapped_column(
         ForeignKey(
             "materialization.id",
@@ -37,9 +38,9 @@ class Backfill(Base):  # type: ignore  # pylint: disable=too-few-public-methods
     )
 
     # Backfilled values and range
-    spec: Mapped[Optional[PartitionBackfill]] = mapped_column(
+    spec: Mapped[List[PartitionBackfill]] = mapped_column(
         JSON,
-        default={},
+        default=[],
     )
 
     urls: Mapped[Optional[List[str]]] = mapped_column(

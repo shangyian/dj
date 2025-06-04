@@ -1,7 +1,8 @@
 """Database schema"""
+
 from datetime import datetime, timezone
 from functools import partial
-from typing import Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 from uuid import UUID, uuid4
 
 from sqlalchemy import JSON, BigInteger, DateTime, ForeignKey, Integer, String
@@ -9,11 +10,13 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy_utils import UUIDType
 
 from datajunction_server.database.base import Base
-from datajunction_server.database.column import Column
 from datajunction_server.typing import UTCDatetime
 
+if TYPE_CHECKING:
+    from datajunction_server.database.column import Column
 
-class Database(Base):  # pylint: disable=too-few-public-methods
+
+class Database(Base):
     """
     A database.
 
@@ -100,7 +103,7 @@ class Table(Base):
         """
         # Catalogs will soon be required and this return can be simplified
         return (
-            self.catalog.name if self.catalog else None,  # pylint: disable=no-member
+            self.catalog.name if self.catalog else None,
             self.schema_,
             self.table,
         )
@@ -109,7 +112,7 @@ class Table(Base):
         return hash(self.id)
 
 
-class TableColumns(Base):  # pylint: disable=too-few-public-methods
+class TableColumns(Base):
     """
     Join table for table columns.
     """

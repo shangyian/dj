@@ -1,6 +1,7 @@
 """
 Models for measures.
 """
+
 from typing import TYPE_CHECKING, List, Optional
 
 from pydantic.class_validators import root_validator
@@ -64,7 +65,7 @@ class ColumnOutput(BaseModel):
     node: str
 
     @root_validator(pre=True)
-    def transform(cls, values):  # pylint: disable=no-self-argument
+    def transform(cls, values):
         """
         Transforms the values for output
         """
@@ -74,7 +75,7 @@ class ColumnOutput(BaseModel):
             "node": values.get("node_revisions")[0].name,
         }
 
-    class Config:  # pylint: disable=missing-class-docstring, too-few-public-methods
+    class Config:
         orm_mode = True
 
 
@@ -89,5 +90,5 @@ class MeasureOutput(BaseModel):
     columns: List[ColumnOutput]
     additive: AggregationRule
 
-    class Config:  # pylint: disable=missing-class-docstring, too-few-public-methods
+    class Config:
         orm_mode = True

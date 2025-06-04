@@ -3,19 +3,24 @@ Tests for ``datajunction_server.utils``.
 """
 
 import logging
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from pytest_mock import MockerFixture
+from sqlalchemy import select
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.background import BackgroundTasks
 from testcontainers.postgres import PostgresContainer
 from yarl import URL
 
 from datajunction_server.config import Settings
-from datajunction_server.errors import DJException
+from datajunction_server.database.user import OAuthProvider, User
+from datajunction_server.errors import DJDatabaseException, DJException
 from datajunction_server.utils import (
     Version,
+    execute_with_retry,
+    get_and_update_current_user,
     get_engine,
     get_issue_url,
     get_query_service_client,
@@ -56,7 +61,7 @@ def test_get_settings(mocker: MockerFixture) -> None:
     Test ``get_settings``.
     """
     mocker.patch("datajunction_server.utils.load_dotenv")
-    Settings = mocker.patch(  # pylint: disable=invalid-name, redefined-outer-name
+    Settings = mocker.patch(
         "datajunction_server.utils.Settings",
     )
 
@@ -132,3 +137,81 @@ def test_version_parse() -> None:
     with pytest.raises(DJException) as excinfo:
         Version.parse("0")
     assert str(excinfo.value) == "Unparseable version 0!"
+
+
+@pytest.mark.asyncio
+async def test_get_and_update_current_user(session: AsyncSession):
+    """
+    Test upserting the current user
+    """
+    example_user = User(
+        id=1,
+        username="userfoo",
+        password="passwordfoo",
+        name="djuser",
+        email="userfoo@datajunction.io",
+        oauth_provider=OAuthProvider.BASIC,
+    )
+
+    # Confirm that the current user is returned after upserting
+    current_user = await get_and_update_current_user(
+        session=session,
+        current_user=example_user,
+    )
+    assert current_user.id == example_user.id
+    assert current_user.username == example_user.username
+
+    # Confirm that the user was upserted
+    result = await session.execute(select(User).where(User.username == "userfoo"))
+    found_user = result.unique().scalar_one_or_none()
+    assert found_user.id == 1
+    assert found_user.username == "userfoo"
+    assert (
+        found_user.password is None
+    )  # If the user is added via upsert, auth is externally managed
+    assert found_user.name == "djuser"
+    assert found_user.email == "userfoo@datajunction.io"
+    assert found_user.oauth_provider == "basic"
+
+
+@pytest.mark.asyncio
+async def test_execute_with_retry_success_after_flaky_connection():
+    """
+    Test that execute_with_retry succeeds after a flaky connection.
+    """
+    session = AsyncMock(spec=AsyncSession)
+    statement = MagicMock()
+
+    # Simulate flaky DB: first 2 calls raise OperationalError, 3rd returns success
+    mock_result = MagicMock()
+    mock_result.unique.return_value.scalars.return_value.all.return_value = [
+        "node1",
+        "node2",
+    ]
+    session.execute.side_effect = [
+        OperationalError("flaky", None, None),
+        OperationalError("still flaky", None, None),
+        mock_result,
+    ]
+
+    result = await execute_with_retry(session, statement, retries=5, base_delay=0.01)
+    values = result.unique().scalars().all()
+    assert values == ["node1", "node2"]
+    assert session.execute.call_count == 3
+
+
+@pytest.mark.asyncio
+async def test_execute_with_retry_exhausts_retries():
+    """
+    Test that execute_with_retry exhausts retries and fails.
+    """
+    session = AsyncMock(spec=AsyncSession)
+    statement = MagicMock()
+
+    # Always fail
+    session.execute.side_effect = OperationalError("permanent fail", None, None)
+
+    with pytest.raises(DJDatabaseException):
+        await execute_with_retry(session, statement, retries=3, base_delay=0.01)
+
+    assert session.execute.call_count == 4  # initial try + 3 retries

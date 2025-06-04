@@ -1,6 +1,7 @@
 """
 Basic OAuth Authentication Router
 """
+
 from datetime import timedelta
 from http import HTTPStatus
 
@@ -12,13 +13,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from datajunction_server.constants import AUTH_COOKIE, LOGGED_IN_FLAG_COOKIE
 from datajunction_server.database.user import OAuthProvider, User
-from datajunction_server.errors import DJError, DJException, ErrorCode
+from datajunction_server.errors import DJAlreadyExistsException, DJError, ErrorCode
 from datajunction_server.internal.access.authentication.basic import (
     get_password_hash,
     validate_user_password,
 )
 from datajunction_server.internal.access.authentication.tokens import create_token
-from datajunction_server.utils import get_session
+from datajunction_server.utils import Settings, get_session, get_settings
 
 router = APIRouter(tags=["Basic OAuth2"])
 
@@ -34,9 +35,8 @@ async def create_a_user(
     Create a new user
     """
     user_result = await session.execute(select(User).where(User.username == username))
-    if user_result.scalar_one_or_none():
-        raise DJException(
-            http_status_code=HTTPStatus.CONFLICT,
+    if user_result.unique().scalar_one_or_none():
+        raise DJAlreadyExistsException(
             errors=[
                 DJError(
                     code=ErrorCode.ALREADY_EXISTS,
@@ -63,6 +63,7 @@ async def create_a_user(
 async def login(
     form_data: OAuth2PasswordRequestForm = Depends(),
     session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
 ):
     """
     Get a JWT token and set it as an HTTP only cookie
@@ -72,10 +73,18 @@ async def login(
         password=form_data.password,
         session=session,
     )
-    response = Response(status_code=HTTPStatus.OK)
+    response = JSONResponse(
+        content={"message": "Logged in successfully"},
+        status_code=HTTPStatus.OK,
+    )
     response.set_cookie(
         AUTH_COOKIE,
-        create_token({"username": user.username}, expires_delta=timedelta(days=365)),
+        create_token(
+            {"username": user.username},
+            secret=settings.secret,
+            iss=settings.url,
+            expires_delta=timedelta(days=365),
+        ),
         httponly=True,
     )
     response.set_cookie(

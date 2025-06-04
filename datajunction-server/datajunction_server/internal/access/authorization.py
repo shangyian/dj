@@ -1,7 +1,8 @@
 """
 Authorization related functionality
 """
-from typing import Iterable, List, Optional, Union
+
+from typing import Iterable, List, Union
 
 from datajunction_server.database.node import Node, NodeRevision
 from datajunction_server.database.user import User
@@ -15,8 +16,8 @@ from datajunction_server.models.user import UserOutput
 
 
 def validate_access_requests(
-    validate_access: ValidateAccessFn,  # pylint: disable=W0621
-    user: Optional[User],
+    validate_access: ValidateAccessFn,
+    user: User,
     resource_requests: Iterable[ResourceRequest],
     raise_: bool = False,
 ) -> List[Union[NodeRevision, Node, ResourceRequest]]:

@@ -1,6 +1,7 @@
 """
 A secure API router for routes that require authentication
 """
+
 from http import HTTPStatus
 from typing import Any, Callable
 
@@ -13,13 +14,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.requests import Request
 
 from datajunction_server.constants import AUTH_COOKIE
-from datajunction_server.errors import DJError, DJException, ErrorCode
+from datajunction_server.errors import DJAuthenticationException, DJError, ErrorCode
 from datajunction_server.internal.access.authentication.basic import get_user
 from datajunction_server.internal.access.authentication.tokens import decode_token
 from datajunction_server.utils import get_session, get_settings
 
 
-class DJHTTPBearer(HTTPBearer):  # pylint: disable=too-few-public-methods
+class DJHTTPBearer(HTTPBearer):
     """
     A custom HTTPBearer that accepts a cookie or bearer token
     """
@@ -35,7 +36,7 @@ class DJHTTPBearer(HTTPBearer):  # pylint: disable=too-few-public-methods
             try:
                 jwt_data = decode_token(jwt)
             except (JWEError, JWTError) as exc:
-                raise DJException(
+                raise DJAuthenticationException(
                     http_status_code=HTTPStatus.UNAUTHORIZED,
                     errors=[
                         DJError(
@@ -54,7 +55,7 @@ class DJHTTPBearer(HTTPBearer):  # pylint: disable=too-few-public-methods
         scheme, credentials = get_authorization_scheme_param(authorization)
         if not (authorization and scheme and credentials):
             if self.auto_error:
-                raise DJException(
+                raise DJAuthenticationException(
                     http_status_code=HTTPStatus.FORBIDDEN,
                     errors=[
                         DJError(
@@ -66,7 +67,7 @@ class DJHTTPBearer(HTTPBearer):  # pylint: disable=too-few-public-methods
             return  # pragma: no cover
         if scheme.lower() != "bearer":
             if self.auto_error:
-                raise DJException(
+                raise DJAuthenticationException(
                     http_status_code=HTTPStatus.FORBIDDEN,
                     errors=[
                         DJError(
@@ -90,7 +91,11 @@ class TrailingSlashAPIRouter(APIRouter):
     """
 
     def api_route(
-        self, path: str, *, include_in_schema: bool = True, **kwargs: Any
+        self,
+        path: str,
+        *,
+        include_in_schema: bool = True,
+        **kwargs: Any,
     ) -> Callable[[DecoratedCallable], DecoratedCallable]:
         """
         For any given API route path, we always add both the path without the trailing slash
@@ -101,12 +106,16 @@ class TrailingSlashAPIRouter(APIRouter):
             path = path[:-1]
 
         add_path = super().api_route(
-            path, include_in_schema=include_in_schema, **kwargs
+            path,
+            include_in_schema=include_in_schema,
+            **kwargs,
         )
 
         path_with_trailing_slash = path + "/"
         add_trailing_slash_path = super().api_route(
-            path_with_trailing_slash, include_in_schema=False, **kwargs
+            path_with_trailing_slash,
+            include_in_schema=False,
+            **kwargs,
         )
 
         def decorator(func: DecoratedCallable) -> DecoratedCallable:

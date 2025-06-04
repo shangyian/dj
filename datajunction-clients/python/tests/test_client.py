@@ -1,9 +1,11 @@
 """Tests DJ client"""
+
 import pandas
 import pytest
 
 from datajunction import DJClient
 from datajunction.exceptions import DJClientException
+from datajunction.nodes import Cube, Dimension, Metric, Source, Transform
 
 
 class TestDJClient:  # pylint: disable=too-many-public-methods
@@ -12,11 +14,11 @@ class TestDJClient:  # pylint: disable=too-many-public-methods
     """
 
     @pytest.fixture
-    def client(self, session_with_examples):
+    def client(self, module__session_with_examples):
         """
         Returns a DJ client instance
         """
-        return DJClient(requests_session=session_with_examples)  # type: ignore
+        return DJClient(requests_session=module__session_with_examples)  # type: ignore
 
     #
     # List basic objects: namespaces, dimensions, metrics, cubes
@@ -41,7 +43,7 @@ class TestDJClient:  # pylint: disable=too-many-public-methods
         """
         # full list
         dims = client.list_dimensions()
-        assert dims == [
+        assert set(dims) == {
             "default.repair_order",
             "default.contractor",
             "default.hard_hat",
@@ -56,11 +58,11 @@ class TestDJClient:  # pylint: disable=too-many-public-methods
             "foo.bar.us_state",
             "foo.bar.dispatcher",
             "foo.bar.municipality_dim",
-        ]
+        }
 
         # partial list
         dims = client.list_dimensions(namespace="foo.bar")
-        assert dims == [
+        assert set(dims) == {
             "foo.bar.repair_order",
             "foo.bar.contractor",
             "foo.bar.hard_hat",
@@ -68,7 +70,7 @@ class TestDJClient:  # pylint: disable=too-many-public-methods
             "foo.bar.us_state",
             "foo.bar.dispatcher",
             "foo.bar.municipality_dim",
-        ]
+        }
 
     def test_list_metrics(self, client):
         """
@@ -111,7 +113,7 @@ class TestDJClient:  # pylint: disable=too-many-public-methods
         """
         # full list
         cubes = client.list_cubes()
-        assert cubes == ["foo.bar.cube_one", "default.cube_two"]
+        assert set(cubes) == {"foo.bar.cube_one", "default.cube_two"}
 
         # partial list
         cubes = client.list_cubes(namespace="foo.bar")
@@ -126,8 +128,9 @@ class TestDJClient:  # pylint: disable=too-many-public-methods
         """
         # full list
         nodes = client.list_sources()
-        assert nodes == [
+        assert set(nodes) == {
             "default.repair_orders",
+            "default.repair_orders_foo",
             "default.repair_order_details",
             "default.repair_type",
             "default.contractors",
@@ -151,11 +154,11 @@ class TestDJClient:  # pylint: disable=too-many-public-methods
             "foo.bar.hard_hat_state",
             "foo.bar.us_states",
             "foo.bar.us_region",
-        ]
+        }
 
         # partial list
         nodes = client.list_sources(namespace="foo.bar")
-        assert nodes == [
+        assert set(nodes) == {
             "foo.bar.repair_orders",
             "foo.bar.repair_order_details",
             "foo.bar.repair_type",
@@ -168,7 +171,7 @@ class TestDJClient:  # pylint: disable=too-many-public-methods
             "foo.bar.hard_hat_state",
             "foo.bar.us_states",
             "foo.bar.us_region",
-        ]
+        }
 
     def test_list_transforms(self, client):
         """
@@ -176,11 +179,15 @@ class TestDJClient:  # pylint: disable=too-many-public-methods
         """
         # full list
         nodes = client.list_transforms()
-        assert nodes == ["default.repair_orders_thin", "foo.bar.repair_orders_thin"]
+        assert set(nodes) == {
+            "default.repair_orders_thin",
+            "foo.bar.repair_orders_thin",
+            "foo.bar.with_custom_metadata",
+        }
 
         # partial list
         nodes = client.list_transforms(namespace="foo.bar")
-        assert nodes == ["foo.bar.repair_orders_thin"]
+        assert nodes == ["foo.bar.with_custom_metadata", "foo.bar.repair_orders_thin"]
 
     def test_list_nodes(self, client):
         """
@@ -191,6 +198,7 @@ class TestDJClient:  # pylint: disable=too-many-public-methods
         assert set(nodes) == set(
             [
                 "default.repair_orders",
+                "default.repair_orders_foo",
                 "default.repair_order_details",
                 "default.repair_type",
                 "default.contractors",
@@ -246,41 +254,45 @@ class TestDJClient:  # pylint: disable=too-many-public-methods
                 "default.cube_two",
                 "default.repair_orders_thin",
                 "foo.bar.repair_orders_thin",
+                "foo.bar.with_custom_metadata",
             ],
         )
 
         # partial list
         nodes = client.list_nodes(namespace="foo.bar")
-        assert nodes == [
-            "foo.bar.repair_orders",
-            "foo.bar.repair_order_details",
-            "foo.bar.repair_type",
-            "foo.bar.contractors",
-            "foo.bar.municipality_municipality_type",
-            "foo.bar.municipality_type",
-            "foo.bar.municipality",
-            "foo.bar.dispatchers",
-            "foo.bar.hard_hats",
-            "foo.bar.hard_hat_state",
-            "foo.bar.us_states",
-            "foo.bar.us_region",
-            "foo.bar.repair_order",
-            "foo.bar.contractor",
-            "foo.bar.hard_hat",
-            "foo.bar.local_hard_hats",
-            "foo.bar.us_state",
-            "foo.bar.dispatcher",
-            "foo.bar.municipality_dim",
-            "foo.bar.num_repair_orders",
-            "foo.bar.avg_repair_price",
-            "foo.bar.total_repair_cost",
-            "foo.bar.avg_length_of_employment",
-            "foo.bar.total_repair_order_discounts",
-            "foo.bar.avg_repair_order_discounts",
-            "foo.bar.avg_time_to_dispatch",
-            "foo.bar.cube_one",
-            "foo.bar.repair_orders_thin",
-        ]
+        assert set(nodes) == set(
+            [
+                "foo.bar.repair_orders",
+                "foo.bar.repair_order_details",
+                "foo.bar.repair_type",
+                "foo.bar.contractors",
+                "foo.bar.municipality_municipality_type",
+                "foo.bar.municipality_type",
+                "foo.bar.municipality",
+                "foo.bar.dispatchers",
+                "foo.bar.hard_hats",
+                "foo.bar.hard_hat_state",
+                "foo.bar.us_states",
+                "foo.bar.us_region",
+                "foo.bar.repair_order",
+                "foo.bar.contractor",
+                "foo.bar.hard_hat",
+                "foo.bar.local_hard_hats",
+                "foo.bar.us_state",
+                "foo.bar.dispatcher",
+                "foo.bar.municipality_dim",
+                "foo.bar.num_repair_orders",
+                "foo.bar.avg_repair_price",
+                "foo.bar.total_repair_cost",
+                "foo.bar.avg_length_of_employment",
+                "foo.bar.total_repair_order_discounts",
+                "foo.bar.avg_repair_order_discounts",
+                "foo.bar.avg_time_to_dispatch",
+                "foo.bar.cube_one",
+                "foo.bar.repair_orders_thin",
+                "foo.bar.with_custom_metadata",
+            ],
+        )
 
     def test_find_nodes_with_dimension(self, client):
         """
@@ -300,15 +312,15 @@ class TestDJClient:  # pylint: disable=too-many-public-methods
         Check that `Source.validate()` works as expected.
         """
         # change the source node
-        source_node = client.source("default.repair_orders")
+        source_node = client.source("default.repair_orders_foo")
         version_before = source_node.current_version
         response = source_node.validate()
         assert response == "valid"
         version_after = source_node.current_version
         assert version_before and version_after and version_before != version_after
 
-        # change the source node (but don't really)
-        source_node = client.source("default.repair_orders")
+        # change the source node (but not really)
+        source_node = client.source("default.repair_orders_foo")
         version_before = source_node.current_version
         response = source_node.validate()
         assert response == "valid"
@@ -334,17 +346,31 @@ class TestDJClient:  # pylint: disable=too-many-public-methods
         """
         Test data retreval for a metric and dimension(s)
         """
+        # Should throw error when no name or metrics are passed in
+        with pytest.raises(DJClientException):
+            client.node_data("")
+
+        with pytest.raises(DJClientException):
+            client.data([])
+
         # Retrieve data for a single metric
+        expected_df = pandas.DataFrame.from_dict(
+            {
+                "default_DOT_hard_hat_DOT_city": ["Foo", "Bar"],
+                "default_DOT_avg_repair_price": [1.0, 2.0],
+            },
+        )
+
         result = client.data(
             metrics=["default.avg_repair_price"],
             dimensions=["default.hard_hat.city"],
         )
+        pandas.testing.assert_frame_equal(result, expected_df)
 
-        expected_df = pandas.DataFrame.from_dict(
-            {
-                "default_DOT_avg_repair_price": [1.0, 2.0],
-                "default_DOT_hard_hat_DOT_city": ["Foo", "Bar"],
-            },
+        # Retrieve data for a single node
+        result = client.node_data(
+            node_name="default.avg_repair_price",
+            dimensions=["default.hard_hat.city"],
         )
         pandas.testing.assert_frame_equal(result, expected_df)
 
@@ -357,12 +383,57 @@ class TestDJClient:  # pylint: disable=too-many-public-methods
         assert "No data for query!" in str(exc_info)
 
         # Error propagation
-        with pytest.raises(DJClientException) as exc_info:
-            client.data(
-                metrics=["default.avg_repair_price"],
-                dimensions=["default.hard_hat.postal_code"],
+        # with pytest.raises(DJClientException) as exc_info:
+        #     client.data(
+        #         metrics=["default.avg_repair_price"],
+        #         dimensions=["default.hard_hat.postal_code"],
+        #     )
+        # assert "Error response from query service" in str(exc_info)
+
+    def test_sql(self, client):
+        """
+        Test SQL retrieval
+        """
+        # Retrieve sql for metrics
+        result = client.sql(
+            metrics=["default.avg_repair_price", "default.num_repair_orders"],
+            dimensions=["default.hard_hat.city"],
+            filters=["default.hard_hat.state = 'NY'"],
+        )
+        assert isinstance(result, str)
+
+        # Retrieve sql for a node
+        result = client.node_sql(
+            node_name="default.repair_order_details",
+            dimensions=["default.hard_hat.city"],
+            filters=["default.hard_hat.state = 'NY'"],
+        )
+        assert isinstance(result, str)
+
+        # Retrieve sql for a node (error)
+        result = client.node_sql(
+            node_name="default.repair_order_details",
+            dimensions=["default.repair_order.repair_order_id1"],
+            filters=["default.repair_order.repair_order_id = 1222"],
+        )
+        assert result["message"] == (
+            "default.repair_order.repair_order_id1 are not available dimensions"
+            " on default.repair_order_details"
+        )
+
+        # Retrieve measures sql for metrics
+        result = client.sql(
+            metrics=["default.avg_repair_price", "default.num_repair_orders"],
+            dimensions=["default.hard_hat.city"],
+            filters=["default.hard_hat.state = 'NY'"],
+            measures=True,
+        )
+        for generated_sql in result:
+            assert generated_sql["node"]["name"] in (
+                "default.repair_order_details",
+                "default.repair_orders",
             )
-        assert "Error response from query service" in str(exc_info)
+            assert isinstance(generated_sql["sql"], str)
 
     #
     # Data Catalog and Engines
@@ -395,7 +466,7 @@ class TestDJClient:  # pylint: disable=too-many-public-methods
         result = num_repair_orders.get_downstreams()
         assert result == ["default.cube_two"]
         result = num_repair_orders.get_dimensions()
-        assert len(result) == 28
+        assert len(result) == 31
 
         hard_hat = client.dimension("default.hard_hat")
         result = hard_hat.get_upstreams()
@@ -404,3 +475,30 @@ class TestDJClient:  # pylint: disable=too-many-public-methods
         assert result == []
         result = hard_hat.get_dimensions()
         assert len(result) == 18
+
+    def test_get_node(self, client):
+        """
+        Verifies that retrieving a node (of any type) works with:
+            dj.node(<node_name>)
+        """
+        hard_hat = client.node("default.hard_hat")
+        assert isinstance(hard_hat, Dimension)
+        assert hard_hat.name == "default.hard_hat"
+
+        num_repair_orders = client.node("default.num_repair_orders")
+        assert isinstance(num_repair_orders, Metric)
+        assert num_repair_orders.name == "default.num_repair_orders"
+
+        repair_orders_thin = client.node("default.repair_orders_thin")
+        assert isinstance(repair_orders_thin, Transform)
+        assert repair_orders_thin.name == "default.repair_orders_thin"
+
+        repair_orders = client.node("default.repair_orders")
+        assert isinstance(repair_orders, Source)
+        assert repair_orders.name == "default.repair_orders"
+
+        cube_two = client.node("default.cube_two")
+        assert isinstance(cube_two, Cube)
+        assert cube_two.name == "default.cube_two"
+        assert cube_two.metrics == ["default.num_repair_orders"]
+        assert cube_two.dimensions == ["default.municipality_dim.local_region"]

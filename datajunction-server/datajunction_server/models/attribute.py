@@ -1,6 +1,8 @@
 """
 Models for attributes.
 """
+
+from enum import Enum
 from typing import List, Optional
 
 from pydantic.main import BaseModel
@@ -44,5 +46,15 @@ class AttributeTypeBase(MutableAttributeTypeFields):
 
     id: int
 
-    class Config:  # pylint: disable=missing-class-docstring, too-few-public-methods
+    class Config:
         orm_mode = True
+
+
+class ColumnAttributes(str, Enum):
+    """
+    Managed by default column attributes
+    """
+
+    PRIMARY_KEY = "primary_key"
+    DIMENSION = "dimension"
+    HIDDEN = "hidden"

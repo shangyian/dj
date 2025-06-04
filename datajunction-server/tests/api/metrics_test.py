@@ -1,8 +1,9 @@
-# pylint: disable=too-many-lines
 """
 Tests for the metrics API.
 """
+
 import pytest
+from pytest_mock import MockerFixture
 from httpx import AsyncClient
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -11,22 +12,386 @@ from datajunction_server.database.attributetype import AttributeType, ColumnAttr
 from datajunction_server.database.column import Column
 from datajunction_server.database.database import Database
 from datajunction_server.database.node import Node, NodeRevision
+from datajunction_server.database.user import User
 from datajunction_server.models.node_type import NodeType
 from datajunction_server.sql.parsing.types import FloatType, IntegerType, StringType
 
+expected_dimensions = [
+    {
+        "name": "default.dispatcher.company_name",
+        "node_name": "default.dispatcher",
+        "node_display_name": "Dispatcher",
+        "filter_only": False,
+        "type": "string",
+        "path": ["default.repair_orders_fact"],
+        "properties": [],
+    },
+    {
+        "name": "default.dispatcher.dispatcher_id",
+        "node_name": "default.dispatcher",
+        "node_display_name": "Dispatcher",
+        "filter_only": False,
+        "type": "int",
+        "path": ["default.repair_orders_fact"],
+        "properties": ["primary_key"],
+    },
+    {
+        "name": "default.dispatcher.phone",
+        "node_name": "default.dispatcher",
+        "node_display_name": "Dispatcher",
+        "filter_only": False,
+        "type": "string",
+        "path": ["default.repair_orders_fact"],
+        "properties": [],
+    },
+    {
+        "name": "default.hard_hat.address",
+        "node_name": "default.hard_hat",
+        "node_display_name": "Hard Hat",
+        "filter_only": False,
+        "type": "string",
+        "path": ["default.repair_orders_fact"],
+        "properties": [],
+    },
+    {
+        "name": "default.hard_hat.birth_date",
+        "node_name": "default.hard_hat",
+        "node_display_name": "Hard Hat",
+        "filter_only": False,
+        "type": "timestamp",
+        "path": ["default.repair_orders_fact"],
+        "properties": [],
+    },
+    {
+        "name": "default.hard_hat.city",
+        "node_name": "default.hard_hat",
+        "node_display_name": "Hard Hat",
+        "filter_only": False,
+        "type": "string",
+        "path": ["default.repair_orders_fact"],
+        "properties": [],
+    },
+    {
+        "name": "default.hard_hat.contractor_id",
+        "node_name": "default.hard_hat",
+        "node_display_name": "Hard Hat",
+        "filter_only": False,
+        "type": "int",
+        "path": ["default.repair_orders_fact"],
+        "properties": [],
+    },
+    {
+        "name": "default.hard_hat.country",
+        "node_name": "default.hard_hat",
+        "node_display_name": "Hard Hat",
+        "filter_only": False,
+        "type": "string",
+        "path": ["default.repair_orders_fact"],
+        "properties": [],
+    },
+    {
+        "name": "default.hard_hat.first_name",
+        "node_name": "default.hard_hat",
+        "node_display_name": "Hard Hat",
+        "filter_only": False,
+        "type": "string",
+        "path": ["default.repair_orders_fact"],
+        "properties": [],
+    },
+    {
+        "name": "default.hard_hat.hard_hat_id",
+        "node_name": "default.hard_hat",
+        "node_display_name": "Hard Hat",
+        "filter_only": False,
+        "type": "int",
+        "path": ["default.repair_orders_fact"],
+        "properties": ["primary_key"],
+    },
+    {
+        "name": "default.hard_hat.hire_date",
+        "node_name": "default.hard_hat",
+        "node_display_name": "Hard Hat",
+        "filter_only": False,
+        "type": "timestamp",
+        "path": ["default.repair_orders_fact"],
+        "properties": [],
+    },
+    {
+        "name": "default.hard_hat.last_name",
+        "node_name": "default.hard_hat",
+        "node_display_name": "Hard Hat",
+        "filter_only": False,
+        "type": "string",
+        "path": ["default.repair_orders_fact"],
+        "properties": [],
+    },
+    {
+        "name": "default.hard_hat.manager",
+        "node_name": "default.hard_hat",
+        "node_display_name": "Hard Hat",
+        "filter_only": False,
+        "type": "int",
+        "path": ["default.repair_orders_fact"],
+        "properties": [],
+    },
+    {
+        "name": "default.hard_hat.postal_code",
+        "node_name": "default.hard_hat",
+        "node_display_name": "Hard Hat",
+        "filter_only": False,
+        "type": "string",
+        "path": ["default.repair_orders_fact"],
+        "properties": [],
+    },
+    {
+        "name": "default.hard_hat.state",
+        "node_name": "default.hard_hat",
+        "node_display_name": "Hard Hat",
+        "filter_only": False,
+        "type": "string",
+        "path": ["default.repair_orders_fact"],
+        "properties": [],
+    },
+    {
+        "name": "default.hard_hat.title",
+        "node_name": "default.hard_hat",
+        "node_display_name": "Hard Hat",
+        "filter_only": False,
+        "type": "string",
+        "path": ["default.repair_orders_fact"],
+        "properties": [],
+    },
+    {
+        "name": "default.hard_hat_to_delete.address",
+        "node_name": "default.hard_hat_to_delete",
+        "node_display_name": "Hard Hat To Delete",
+        "filter_only": False,
+        "type": "string",
+        "path": ["default.repair_orders_fact"],
+        "properties": [],
+    },
+    {
+        "name": "default.hard_hat_to_delete.birth_date",
+        "node_name": "default.hard_hat_to_delete",
+        "node_display_name": "Hard Hat To Delete",
+        "filter_only": False,
+        "type": "timestamp",
+        "path": ["default.repair_orders_fact"],
+        "properties": [],
+    },
+    {
+        "name": "default.hard_hat_to_delete.city",
+        "node_name": "default.hard_hat_to_delete",
+        "node_display_name": "Hard Hat To Delete",
+        "filter_only": False,
+        "type": "string",
+        "path": ["default.repair_orders_fact"],
+        "properties": [],
+    },
+    {
+        "name": "default.hard_hat_to_delete.contractor_id",
+        "node_name": "default.hard_hat_to_delete",
+        "node_display_name": "Hard Hat To Delete",
+        "filter_only": False,
+        "type": "int",
+        "path": ["default.repair_orders_fact"],
+        "properties": [],
+    },
+    {
+        "name": "default.hard_hat_to_delete.country",
+        "node_name": "default.hard_hat_to_delete",
+        "node_display_name": "Hard Hat To Delete",
+        "filter_only": False,
+        "type": "string",
+        "path": ["default.repair_orders_fact"],
+        "properties": [],
+    },
+    {
+        "name": "default.hard_hat_to_delete.first_name",
+        "node_name": "default.hard_hat_to_delete",
+        "node_display_name": "Hard Hat To Delete",
+        "filter_only": False,
+        "type": "string",
+        "path": ["default.repair_orders_fact"],
+        "properties": [],
+    },
+    {
+        "name": "default.hard_hat_to_delete.hard_hat_id",
+        "node_name": "default.hard_hat_to_delete",
+        "node_display_name": "Hard Hat To Delete",
+        "filter_only": False,
+        "type": "int",
+        "path": ["default.repair_orders_fact"],
+        "properties": ["primary_key"],
+    },
+    {
+        "name": "default.hard_hat_to_delete.hire_date",
+        "node_name": "default.hard_hat_to_delete",
+        "node_display_name": "Hard Hat To Delete",
+        "filter_only": False,
+        "type": "timestamp",
+        "path": ["default.repair_orders_fact"],
+        "properties": [],
+    },
+    {
+        "name": "default.hard_hat_to_delete.last_name",
+        "node_name": "default.hard_hat_to_delete",
+        "node_display_name": "Hard Hat To Delete",
+        "filter_only": False,
+        "type": "string",
+        "path": ["default.repair_orders_fact"],
+        "properties": [],
+    },
+    {
+        "name": "default.hard_hat_to_delete.manager",
+        "node_name": "default.hard_hat_to_delete",
+        "node_display_name": "Hard Hat To Delete",
+        "filter_only": False,
+        "type": "int",
+        "path": ["default.repair_orders_fact"],
+        "properties": [],
+    },
+    {
+        "name": "default.hard_hat_to_delete.postal_code",
+        "node_name": "default.hard_hat_to_delete",
+        "node_display_name": "Hard Hat To Delete",
+        "filter_only": False,
+        "type": "string",
+        "path": ["default.repair_orders_fact"],
+        "properties": [],
+    },
+    {
+        "name": "default.hard_hat_to_delete.state",
+        "node_name": "default.hard_hat_to_delete",
+        "node_display_name": "Hard Hat To Delete",
+        "filter_only": False,
+        "type": "string",
+        "path": ["default.repair_orders_fact"],
+        "properties": [],
+    },
+    {
+        "name": "default.hard_hat_to_delete.title",
+        "node_name": "default.hard_hat_to_delete",
+        "node_display_name": "Hard Hat To Delete",
+        "filter_only": False,
+        "type": "string",
+        "path": ["default.repair_orders_fact"],
+        "properties": [],
+    },
+    {
+        "name": "default.municipality_dim.contact_name",
+        "node_name": "default.municipality_dim",
+        "node_display_name": "Municipality Dim",
+        "filter_only": False,
+        "type": "string",
+        "path": ["default.repair_orders_fact"],
+        "properties": [],
+    },
+    {
+        "name": "default.municipality_dim.contact_title",
+        "node_name": "default.municipality_dim",
+        "node_display_name": "Municipality Dim",
+        "filter_only": False,
+        "type": "string",
+        "path": ["default.repair_orders_fact"],
+        "properties": [],
+    },
+    {
+        "name": "default.municipality_dim.local_region",
+        "node_name": "default.municipality_dim",
+        "node_display_name": "Municipality Dim",
+        "filter_only": False,
+        "type": "string",
+        "path": ["default.repair_orders_fact"],
+        "properties": [],
+    },
+    {
+        "name": "default.municipality_dim.municipality_id",
+        "node_name": "default.municipality_dim",
+        "node_display_name": "Municipality Dim",
+        "filter_only": False,
+        "type": "string",
+        "path": ["default.repair_orders_fact"],
+        "properties": ["primary_key"],
+    },
+    {
+        "name": "default.municipality_dim.municipality_type_desc",
+        "node_name": "default.municipality_dim",
+        "node_display_name": "Municipality Dim",
+        "filter_only": False,
+        "type": "string",
+        "path": ["default.repair_orders_fact"],
+        "properties": [],
+    },
+    {
+        "name": "default.municipality_dim.municipality_type_id",
+        "node_name": "default.municipality_dim",
+        "node_display_name": "Municipality Dim",
+        "filter_only": False,
+        "type": "string",
+        "path": ["default.repair_orders_fact"],
+        "properties": [],
+    },
+    {
+        "name": "default.municipality_dim.state_id",
+        "node_name": "default.municipality_dim",
+        "node_display_name": "Municipality Dim",
+        "filter_only": False,
+        "type": "int",
+        "path": ["default.repair_orders_fact"],
+        "properties": [],
+    },
+    {
+        "name": "default.us_state.state_id",
+        "node_name": "default.us_state",
+        "node_display_name": "Us State",
+        "filter_only": False,
+        "type": "int",
+        "path": ["default.repair_orders_fact", "default.hard_hat"],
+        "properties": [],
+    },
+    {
+        "name": "default.us_state.state_name",
+        "node_name": "default.us_state",
+        "node_display_name": "Us State",
+        "filter_only": False,
+        "type": "string",
+        "path": ["default.repair_orders_fact", "default.hard_hat"],
+        "properties": [],
+    },
+    {
+        "name": "default.us_state.state_region",
+        "node_name": "default.us_state",
+        "node_display_name": "Us State",
+        "filter_only": False,
+        "type": "int",
+        "path": ["default.repair_orders_fact", "default.hard_hat"],
+        "properties": [],
+    },
+    {
+        "name": "default.us_state.state_short",
+        "node_name": "default.us_state",
+        "node_display_name": "Us State",
+        "filter_only": False,
+        "type": "string",
+        "path": ["default.repair_orders_fact", "default.hard_hat"],
+        "properties": ["primary_key"],
+    },
+]
+
 
 @pytest.mark.asyncio
-async def test_read_metrics(client_with_roads: AsyncClient) -> None:
+async def test_read_metrics(module__client_with_roads: AsyncClient) -> None:
     """
     Test ``GET /metrics/``.
     """
-    response = await client_with_roads.get("/metrics/")
+    response = await module__client_with_roads.get("/metrics/")
     data = response.json()
 
     assert response.status_code == 200
     assert len(data) > 5
 
-    response = await client_with_roads.get("/metrics/default.num_repair_orders")
+    response = await module__client_with_roads.get("/metrics/default.num_repair_orders")
     data = response.json()
     assert data["metric_metadata"] == {
         "direction": "higher_is_better",
@@ -37,23 +402,60 @@ async def test_read_metrics(client_with_roads: AsyncClient) -> None:
             "label": "Dollar",
             "name": "DOLLAR",
         },
+        "max_decimal_exponent": None,
+        "min_decimal_exponent": None,
+        "significant_digits": None,
     }
     assert data["upstream_node"] == "default.repair_orders_fact"
     assert data["expression"] == "count(repair_order_id)"
 
-    response = await client_with_roads.get("/metrics/default.discounted_orders_rate")
+    response = await module__client_with_roads.get(
+        "/metrics/default.discounted_orders_rate",
+    )
     data = response.json()
     assert data["incompatible_druid_functions"] == ["IF"]
+    assert data["measures"] == [
+        {
+            "aggregation": "SUM",
+            "expression": "if(discount > 0.0, 1, 0)",
+            "name": "discount_sum_62846f49",
+            "rule": {
+                "level": None,
+                "type": "full",
+            },
+        },
+        {
+            "aggregation": "COUNT",
+            "expression": "*",
+            "name": "count_3389dae3",
+            "rule": {
+                "level": None,
+                "type": "full",
+            },
+        },
+    ]
+    assert data["derived_query"] == (
+        "SELECT  CAST(sum(discount_sum_62846f49) AS DOUBLE) / SUM(count_3389dae3) AS "
+        "default_DOT_discounted_orders_rate \n FROM default.repair_orders_fact"
+    )
+    assert data["derived_expression"] == (
+        "CAST(sum(discount_sum_62846f49) AS DOUBLE) / SUM(count_3389dae3) "
+        "AS default_DOT_discounted_orders_rate"
+    )
 
 
 @pytest.mark.asyncio
-async def test_read_metric(session: AsyncSession, client: AsyncClient) -> None:
+async def test_read_metric(
+    module__session: AsyncSession,
+    module__client: AsyncClient,
+    module__current_user: User,
+) -> None:
     """
     Test ``GET /metric/{node_id}/``.
     """
-    await client.get("/attributes/")
+    await module__client.get("/attributes/")
     dimension_attribute = (
-        await session.execute(
+        await module__session.execute(
             select(AttributeType).where(AttributeType.name == "dimension"),
         )
     ).scalar_one()
@@ -81,12 +483,14 @@ async def test_read_metric(session: AsyncSession, client: AsyncClient) -> None:
                 order=3,
             ),
         ],
+        created_by_id=module__current_user.id,
     )
     parent_node = Node(
         name=parent_rev.name,
         namespace="default",
         type=NodeType.SOURCE,
         current_version="1",
+        created_by_id=module__current_user.id,
     )
     parent_rev.node = parent_node
 
@@ -95,6 +499,7 @@ async def test_read_metric(session: AsyncSession, client: AsyncClient) -> None:
         namespace="default",
         type=NodeType.METRIC,
         current_version="1",
+        created_by_id=module__current_user.id,
     )
     child_rev = NodeRevision(
         name=child_node.name,
@@ -103,12 +508,13 @@ async def test_read_metric(session: AsyncSession, client: AsyncClient) -> None:
         version="1",
         query="SELECT COUNT(*) FROM parent",
         parents=[parent_node],
+        created_by_id=module__current_user.id,
     )
 
-    session.add(child_rev)
-    await session.commit()
+    module__session.add(child_rev)
+    await module__session.commit()
 
-    response = await client.get("/metrics/child/")
+    response = await module__client.get("/metrics/child/")
     data = response.json()
 
     assert response.status_code == 200
@@ -116,34 +522,41 @@ async def test_read_metric(session: AsyncSession, client: AsyncClient) -> None:
     assert data["query"] == "SELECT COUNT(*) FROM parent"
     assert data["dimensions"] == [
         {
-            "is_primary_key": False,
+            "filter_only": False,
             "name": "parent.ds",
             "node_display_name": "Parent",
             "node_name": "parent",
             "path": [],
             "type": "string",
+            "properties": ["dimension"],
         },
         {
-            "is_primary_key": False,
+            "filter_only": False,
             "name": "parent.foo",
             "node_display_name": "Parent",
             "node_name": "parent",
             "path": [],
             "type": "float",
+            "properties": ["dimension"],
         },
         {
-            "is_primary_key": False,
+            "filter_only": False,
             "name": "parent.user_id",
             "node_display_name": "Parent",
             "node_name": "parent",
             "path": [],
             "type": "int",
+            "properties": ["dimension"],
         },
     ]
 
 
 @pytest.mark.asyncio
-async def test_read_metrics_errors(session: AsyncSession, client: AsyncClient) -> None:
+async def test_read_metrics_errors(
+    module__session: AsyncSession,
+    module__client: AsyncClient,
+    module__current_user: User,
+) -> None:
     """
     Test errors on ``GET /metrics/{node_id}/``.
     """
@@ -153,6 +566,7 @@ async def test_read_metrics_errors(session: AsyncSession, client: AsyncClient) -
         namespace="default",
         type=NodeType.TRANSFORM,
         current_version="1",
+        created_by_id=module__current_user.id,
     )
     node_revision = NodeRevision(
         name=node.name,
@@ -160,280 +574,76 @@ async def test_read_metrics_errors(session: AsyncSession, client: AsyncClient) -
         node=node,
         version="1",
         query="SELECT 1 AS col",
+        created_by_id=module__current_user.id,
     )
-    session.add(database)
-    session.add(node_revision)
-    await session.execute(text("CREATE TABLE my_table (one TEXT)"))
-    await session.commit()
+    module__session.add(database)
+    module__session.add(node_revision)
+    await module__session.execute(text("CREATE TABLE my_table (one TEXT)"))
+    await module__session.commit()
 
-    response = await client.get("/metrics/foo")
+    response = await module__client.get("/metrics/foo")
     assert response.status_code == 404
     data = response.json()
     assert data["message"] == "A node with name `foo` does not exist."
 
-    response = await client.get("/metrics/a-metric")
+    response = await module__client.get("/metrics/a-metric")
     assert response.status_code == 400
     assert response.json() == {"detail": "Not a metric node: `a-metric`"}
 
 
 @pytest.mark.asyncio
 async def test_common_dimensions(
-    client_with_roads: AsyncClient,
+    module__client_with_roads: AsyncClient,
 ) -> None:
     """
     Test ``GET /metrics/common/dimensions``.
     """
-    response = await client_with_roads.get(
+    response = await module__client_with_roads.get(
         "/metrics/common/dimensions?"
         "metric=default.total_repair_order_discounts"
         "&metric=default.total_repair_cost",
     )
     assert response.status_code == 200
-
-    assert response.json() == [
-        {
-            "is_primary_key": False,
-            "name": "default.dispatcher.company_name",
-            "node_display_name": "Default: Dispatcher",
-            "node_name": "default.dispatcher",
-            "path": ["default.repair_orders_fact"],
-            "type": "string",
-        },
-        {
-            "is_primary_key": True,
-            "name": "default.dispatcher.dispatcher_id",
-            "node_display_name": "Default: Dispatcher",
-            "node_name": "default.dispatcher",
-            "path": ["default.repair_orders_fact"],
-            "type": "int",
-        },
-        {
-            "is_primary_key": False,
-            "name": "default.dispatcher.phone",
-            "node_display_name": "Default: Dispatcher",
-            "node_name": "default.dispatcher",
-            "path": ["default.repair_orders_fact"],
-            "type": "string",
-        },
-        {
-            "is_primary_key": False,
-            "name": "default.hard_hat.address",
-            "node_display_name": "Default: Hard Hat",
-            "node_name": "default.hard_hat",
-            "path": ["default.repair_orders_fact"],
-            "type": "string",
-        },
-        {
-            "is_primary_key": False,
-            "name": "default.hard_hat.birth_date",
-            "node_display_name": "Default: Hard Hat",
-            "node_name": "default.hard_hat",
-            "path": ["default.repair_orders_fact"],
-            "type": "timestamp",
-        },
-        {
-            "is_primary_key": False,
-            "name": "default.hard_hat.city",
-            "node_display_name": "Default: Hard Hat",
-            "node_name": "default.hard_hat",
-            "path": ["default.repair_orders_fact"],
-            "type": "string",
-        },
-        {
-            "is_primary_key": False,
-            "name": "default.hard_hat.contractor_id",
-            "node_display_name": "Default: Hard Hat",
-            "node_name": "default.hard_hat",
-            "path": ["default.repair_orders_fact"],
-            "type": "int",
-        },
-        {
-            "is_primary_key": False,
-            "name": "default.hard_hat.country",
-            "node_display_name": "Default: Hard Hat",
-            "node_name": "default.hard_hat",
-            "path": ["default.repair_orders_fact"],
-            "type": "string",
-        },
-        {
-            "is_primary_key": False,
-            "name": "default.hard_hat.first_name",
-            "node_display_name": "Default: Hard Hat",
-            "node_name": "default.hard_hat",
-            "path": ["default.repair_orders_fact"],
-            "type": "string",
-        },
-        {
-            "is_primary_key": True,
-            "name": "default.hard_hat.hard_hat_id",
-            "node_display_name": "Default: Hard Hat",
-            "node_name": "default.hard_hat",
-            "path": ["default.repair_orders_fact"],
-            "type": "int",
-        },
-        {
-            "is_primary_key": False,
-            "name": "default.hard_hat.hire_date",
-            "node_display_name": "Default: Hard Hat",
-            "node_name": "default.hard_hat",
-            "path": ["default.repair_orders_fact"],
-            "type": "timestamp",
-        },
-        {
-            "is_primary_key": False,
-            "name": "default.hard_hat.last_name",
-            "node_display_name": "Default: Hard Hat",
-            "node_name": "default.hard_hat",
-            "path": ["default.repair_orders_fact"],
-            "type": "string",
-        },
-        {
-            "is_primary_key": False,
-            "name": "default.hard_hat.manager",
-            "node_display_name": "Default: Hard Hat",
-            "node_name": "default.hard_hat",
-            "path": ["default.repair_orders_fact"],
-            "type": "int",
-        },
-        {
-            "is_primary_key": False,
-            "name": "default.hard_hat.postal_code",
-            "node_display_name": "Default: Hard Hat",
-            "node_name": "default.hard_hat",
-            "path": ["default.repair_orders_fact"],
-            "type": "string",
-        },
-        {
-            "is_primary_key": False,
-            "name": "default.hard_hat.state",
-            "node_display_name": "Default: Hard Hat",
-            "node_name": "default.hard_hat",
-            "path": ["default.repair_orders_fact"],
-            "type": "string",
-        },
-        {
-            "is_primary_key": False,
-            "name": "default.hard_hat.title",
-            "node_display_name": "Default: Hard Hat",
-            "node_name": "default.hard_hat",
-            "path": ["default.repair_orders_fact"],
-            "type": "string",
-        },
-        {
-            "is_primary_key": False,
-            "name": "default.municipality_dim.contact_name",
-            "node_display_name": "Default: Municipality Dim",
-            "node_name": "default.municipality_dim",
-            "path": ["default.repair_orders_fact"],
-            "type": "string",
-        },
-        {
-            "is_primary_key": False,
-            "name": "default.municipality_dim.contact_title",
-            "node_display_name": "Default: Municipality Dim",
-            "node_name": "default.municipality_dim",
-            "path": ["default.repair_orders_fact"],
-            "type": "string",
-        },
-        {
-            "is_primary_key": False,
-            "name": "default.municipality_dim.local_region",
-            "node_display_name": "Default: Municipality Dim",
-            "node_name": "default.municipality_dim",
-            "path": ["default.repair_orders_fact"],
-            "type": "string",
-        },
-        {
-            "is_primary_key": True,
-            "name": "default.municipality_dim.municipality_id",
-            "node_display_name": "Default: Municipality Dim",
-            "node_name": "default.municipality_dim",
-            "path": ["default.repair_orders_fact"],
-            "type": "string",
-        },
-        {
-            "is_primary_key": False,
-            "name": "default.municipality_dim.municipality_type_desc",
-            "node_display_name": "Default: Municipality Dim",
-            "node_name": "default.municipality_dim",
-            "path": ["default.repair_orders_fact"],
-            "type": "string",
-        },
-        {
-            "is_primary_key": False,
-            "name": "default.municipality_dim.municipality_type_id",
-            "node_display_name": "Default: Municipality Dim",
-            "node_name": "default.municipality_dim",
-            "path": ["default.repair_orders_fact"],
-            "type": "string",
-        },
-        {
-            "is_primary_key": False,
-            "name": "default.municipality_dim.state_id",
-            "node_display_name": "Default: Municipality Dim",
-            "node_name": "default.municipality_dim",
-            "path": ["default.repair_orders_fact"],
-            "type": "int",
-        },
-        {
-            "is_primary_key": False,
-            "name": "default.us_state.state_id",
-            "node_display_name": "Default: Us State",
-            "node_name": "default.us_state",
-            "path": [
-                "default.repair_orders_fact",
-                "default.hard_hat",
-            ],
-            "type": "int",
-        },
-        {
-            "is_primary_key": False,
-            "name": "default.us_state.state_name",
-            "node_display_name": "Default: Us State",
-            "node_name": "default.us_state",
-            "path": [
-                "default.repair_orders_fact",
-                "default.hard_hat",
-            ],
-            "type": "string",
-        },
-        {
-            "is_primary_key": False,
-            "name": "default.us_state.state_region",
-            "node_display_name": "Default: Us State",
-            "node_name": "default.us_state",
-            "path": [
-                "default.repair_orders_fact",
-                "default.hard_hat",
-            ],
-            "type": "int",
-        },
-        {
-            "is_primary_key": True,
-            "name": "default.us_state.state_short",
-            "node_display_name": "Default: Us State",
-            "node_name": "default.us_state",
-            "path": [
-                "default.repair_orders_fact",
-                "default.hard_hat",
-            ],
-            "type": "string",
-        },
-    ]
+    assert response.json() == expected_dimensions
 
 
 @pytest.mark.asyncio
 async def test_no_common_dimensions(
-    client_example_loader,
+    module__client_with_roads: AsyncClient,
 ) -> None:
     """
     Test getting common dimensions for metrics that have none in common
     """
-    custom_client = await client_example_loader(["BASIC", "ROADS"])
-    response = await custom_client.get(
+    await module__client_with_roads.post(
+        "/nodes/source/",
+        json={
+            "columns": [
+                {
+                    "name": "counts",
+                    "type": "struct<a string, b bigint>",
+                },
+            ],
+            "description": "Collection of dreams",
+            "mode": "published",
+            "name": "basic.dreams_1",
+            "catalog": "public",
+            "schema_": "basic",
+            "table": "dreams",
+        },
+    )
+
+    response = await module__client_with_roads.post(
+        "/nodes/metric/",
+        json={
+            "query": "SELECT SUM(counts.b) FROM basic.dreams_1",
+            "description": "Dream Counts",
+            "mode": "published",
+            "name": "basic.dream_count_1",
+        },
+    )
+    response = await module__client_with_roads.get(
         "/metrics/common/dimensions?"
-        "metric=basic.num_comments&metric=default.total_repair_order_discounts"
-        "&metric=default.total_repair_cost",
+        "metric=basic.dream_count_1&metric=default.total_repair_order_discounts",
     )
     assert response.status_code == 200
     assert response.json() == []
@@ -441,32 +651,31 @@ async def test_no_common_dimensions(
 
 @pytest.mark.asyncio
 async def test_raise_common_dimensions_not_a_metric_node(
-    client_example_loader,
+    module__client_with_account_revenue,
 ) -> None:
     """
     Test raising ``GET /metrics/common/dimensions`` when not a metric node
     """
-    custom_client = await client_example_loader(["ROADS", "ACCOUNT_REVENUE"])
-    response = await custom_client.get(
+    response = await module__client_with_account_revenue.get(
         "/metrics/common/dimensions?"
         "metric=default.total_repair_order_discounts"
         "&metric=default.payment_type",
     )
-    assert response.status_code == 500
+    assert response.status_code == 422
     assert response.json()["message"] == "Not a metric node: default.payment_type"
 
 
 @pytest.mark.asyncio
 async def test_raise_common_dimensions_metric_not_found(
-    client_with_service_setup: AsyncClient,
+    module__client_with_roads: AsyncClient,
 ) -> None:
     """
     Test raising ``GET /metrics/common/dimensions`` when metric not found
     """
-    response = await client_with_service_setup.get(
+    response = await module__client_with_roads.get(
         "/metrics/common/dimensions?metric=default.foo&metric=default.bar",
     )
-    assert response.status_code == 500
+    assert response.status_code == 422
     assert response.json() == {
         "errors": [
             {
@@ -482,538 +691,338 @@ async def test_raise_common_dimensions_metric_not_found(
 
 
 @pytest.mark.asyncio
-async def test_get_dimensions(client_with_roads: AsyncClient):
+async def test_get_dimensions(module__client_with_roads: AsyncClient):
     """
     Testing get dimensions for a metric
     """
-    response = await client_with_roads.get("/metrics/default.avg_repair_price/")
+    response = await module__client_with_roads.get("/metrics/default.avg_repair_price/")
 
     data = response.json()
-    assert data["dimensions"] == [
-        {
-            "is_primary_key": False,
-            "name": "default.dispatcher.company_name",
-            "node_display_name": "Default: Dispatcher",
-            "node_name": "default.dispatcher",
-            "path": ["default.repair_orders_fact"],
-            "type": "string",
-        },
-        {
-            "is_primary_key": True,
-            "name": "default.dispatcher.dispatcher_id",
-            "node_display_name": "Default: Dispatcher",
-            "node_name": "default.dispatcher",
-            "path": ["default.repair_orders_fact"],
-            "type": "int",
-        },
-        {
-            "is_primary_key": False,
-            "name": "default.dispatcher.phone",
-            "node_display_name": "Default: Dispatcher",
-            "node_name": "default.dispatcher",
-            "path": ["default.repair_orders_fact"],
-            "type": "string",
-        },
-        {
-            "is_primary_key": False,
-            "name": "default.hard_hat.address",
-            "node_display_name": "Default: Hard Hat",
-            "node_name": "default.hard_hat",
-            "path": ["default.repair_orders_fact"],
-            "type": "string",
-        },
-        {
-            "is_primary_key": False,
-            "name": "default.hard_hat.birth_date",
-            "node_display_name": "Default: Hard Hat",
-            "node_name": "default.hard_hat",
-            "path": ["default.repair_orders_fact"],
-            "type": "timestamp",
-        },
-        {
-            "is_primary_key": False,
-            "name": "default.hard_hat.city",
-            "node_display_name": "Default: Hard Hat",
-            "node_name": "default.hard_hat",
-            "path": ["default.repair_orders_fact"],
-            "type": "string",
-        },
-        {
-            "is_primary_key": False,
-            "name": "default.hard_hat.contractor_id",
-            "node_display_name": "Default: Hard Hat",
-            "node_name": "default.hard_hat",
-            "path": ["default.repair_orders_fact"],
-            "type": "int",
-        },
-        {
-            "is_primary_key": False,
-            "name": "default.hard_hat.country",
-            "node_display_name": "Default: Hard Hat",
-            "node_name": "default.hard_hat",
-            "path": ["default.repair_orders_fact"],
-            "type": "string",
-        },
-        {
-            "is_primary_key": False,
-            "name": "default.hard_hat.first_name",
-            "node_display_name": "Default: Hard Hat",
-            "node_name": "default.hard_hat",
-            "path": ["default.repair_orders_fact"],
-            "type": "string",
-        },
-        {
-            "is_primary_key": True,
-            "name": "default.hard_hat.hard_hat_id",
-            "node_display_name": "Default: Hard Hat",
-            "node_name": "default.hard_hat",
-            "path": ["default.repair_orders_fact"],
-            "type": "int",
-        },
-        {
-            "is_primary_key": False,
-            "name": "default.hard_hat.hire_date",
-            "node_display_name": "Default: Hard Hat",
-            "node_name": "default.hard_hat",
-            "path": ["default.repair_orders_fact"],
-            "type": "timestamp",
-        },
-        {
-            "is_primary_key": False,
-            "name": "default.hard_hat.last_name",
-            "node_display_name": "Default: Hard Hat",
-            "node_name": "default.hard_hat",
-            "path": ["default.repair_orders_fact"],
-            "type": "string",
-        },
-        {
-            "is_primary_key": False,
-            "name": "default.hard_hat.manager",
-            "node_display_name": "Default: Hard Hat",
-            "node_name": "default.hard_hat",
-            "path": ["default.repair_orders_fact"],
-            "type": "int",
-        },
-        {
-            "is_primary_key": False,
-            "name": "default.hard_hat.postal_code",
-            "node_display_name": "Default: Hard Hat",
-            "node_name": "default.hard_hat",
-            "path": ["default.repair_orders_fact"],
-            "type": "string",
-        },
-        {
-            "is_primary_key": False,
-            "name": "default.hard_hat.state",
-            "node_display_name": "Default: Hard Hat",
-            "node_name": "default.hard_hat",
-            "path": ["default.repair_orders_fact"],
-            "type": "string",
-        },
-        {
-            "is_primary_key": False,
-            "name": "default.hard_hat.title",
-            "node_display_name": "Default: Hard Hat",
-            "node_name": "default.hard_hat",
-            "path": ["default.repair_orders_fact"],
-            "type": "string",
-        },
-        {
-            "is_primary_key": False,
-            "name": "default.municipality_dim.contact_name",
-            "node_display_name": "Default: Municipality Dim",
-            "node_name": "default.municipality_dim",
-            "path": ["default.repair_orders_fact"],
-            "type": "string",
-        },
-        {
-            "is_primary_key": False,
-            "name": "default.municipality_dim.contact_title",
-            "node_display_name": "Default: Municipality Dim",
-            "node_name": "default.municipality_dim",
-            "path": ["default.repair_orders_fact"],
-            "type": "string",
-        },
-        {
-            "is_primary_key": False,
-            "name": "default.municipality_dim.local_region",
-            "node_display_name": "Default: Municipality Dim",
-            "node_name": "default.municipality_dim",
-            "path": ["default.repair_orders_fact"],
-            "type": "string",
-        },
-        {
-            "is_primary_key": True,
-            "name": "default.municipality_dim.municipality_id",
-            "node_display_name": "Default: Municipality Dim",
-            "node_name": "default.municipality_dim",
-            "path": ["default.repair_orders_fact"],
-            "type": "string",
-        },
-        {
-            "is_primary_key": False,
-            "name": "default.municipality_dim.municipality_type_desc",
-            "node_display_name": "Default: Municipality Dim",
-            "node_name": "default.municipality_dim",
-            "path": ["default.repair_orders_fact"],
-            "type": "string",
-        },
-        {
-            "is_primary_key": False,
-            "name": "default.municipality_dim.municipality_type_id",
-            "node_display_name": "Default: Municipality Dim",
-            "node_name": "default.municipality_dim",
-            "path": ["default.repair_orders_fact"],
-            "type": "string",
-        },
-        {
-            "is_primary_key": False,
-            "name": "default.municipality_dim.state_id",
-            "node_display_name": "Default: Municipality Dim",
-            "node_name": "default.municipality_dim",
-            "path": ["default.repair_orders_fact"],
-            "type": "int",
-        },
-        {
-            "is_primary_key": False,
-            "name": "default.us_state.state_id",
-            "node_display_name": "Default: Us State",
-            "node_name": "default.us_state",
-            "path": [
-                "default.repair_orders_fact",
-                "default.hard_hat",
-            ],
-            "type": "int",
-        },
-        {
-            "is_primary_key": False,
-            "name": "default.us_state.state_name",
-            "node_display_name": "Default: Us State",
-            "node_name": "default.us_state",
-            "path": [
-                "default.repair_orders_fact",
-                "default.hard_hat",
-            ],
-            "type": "string",
-        },
-        {
-            "is_primary_key": False,
-            "name": "default.us_state.state_region",
-            "node_display_name": "Default: Us State",
-            "node_name": "default.us_state",
-            "path": [
-                "default.repair_orders_fact",
-                "default.hard_hat",
-            ],
-            "type": "int",
-        },
-        {
-            "is_primary_key": True,
-            "name": "default.us_state.state_short",
-            "node_display_name": "Default: Us State",
-            "node_name": "default.us_state",
-            "path": [
-                "default.repair_orders_fact",
-                "default.hard_hat",
-            ],
-            "type": "string",
-        },
-    ]
+    assert data["dimensions"] == expected_dimensions
 
 
 @pytest.mark.asyncio
 async def test_get_multi_link_dimensions(
-    client_example_loader,
+    module__client_with_dimension_link,
 ):
     """
     In some cases, the same dimension may be linked to different columns on a node.
     The returned dimension attributes should the join path between the given dimension
     attribute and the original node, in order to help disambiguate the source of the dimension.
     """
-    custom_client = await client_example_loader(["DIMENSION_LINK"])
-    response = await custom_client.get("/metrics/default.avg_user_age/")
+    response = await module__client_with_dimension_link.get(
+        "/metrics/default.avg_user_age/",
+    )
     assert response.json()["dimensions"] == [
         {
-            "is_primary_key": True,
             "name": "default.date_dim.dateint[birth_country->formation_date]",
-            "node_display_name": "Default: Date Dim",
+            "node_display_name": "Date Dim",
             "node_name": "default.date_dim",
             "path": [
                 "default.user_dim.birth_country",
                 "default.special_country_dim.formation_date",
             ],
             "type": "int",
+            "filter_only": False,
+            "properties": ["primary_key"],
         },
         {
-            "is_primary_key": True,
             "name": "default.date_dim.dateint[birth_country->last_election_date]",
-            "node_display_name": "Default: Date Dim",
+            "node_display_name": "Date Dim",
             "node_name": "default.date_dim",
             "path": [
                 "default.user_dim.birth_country",
                 "default.special_country_dim.last_election_date",
             ],
             "type": "int",
+            "filter_only": False,
+            "properties": ["primary_key"],
         },
         {
-            "is_primary_key": True,
             "name": "default.date_dim.dateint[residence_country->formation_date]",
-            "node_display_name": "Default: Date Dim",
+            "node_display_name": "Date Dim",
             "node_name": "default.date_dim",
             "path": [
                 "default.user_dim.residence_country",
                 "default.special_country_dim.formation_date",
             ],
             "type": "int",
+            "filter_only": False,
+            "properties": ["primary_key"],
         },
         {
-            "is_primary_key": True,
             "name": "default.date_dim.dateint[residence_country->last_election_date]",
-            "node_display_name": "Default: Date Dim",
+            "node_display_name": "Date Dim",
             "node_name": "default.date_dim",
             "path": [
                 "default.user_dim.residence_country",
                 "default.special_country_dim.last_election_date",
             ],
             "type": "int",
+            "filter_only": False,
+            "properties": ["primary_key"],
         },
         {
-            "is_primary_key": False,
             "name": "default.date_dim.day[birth_country->formation_date]",
-            "node_display_name": "Default: Date Dim",
+            "node_display_name": "Date Dim",
             "node_name": "default.date_dim",
             "path": [
                 "default.user_dim.birth_country",
                 "default.special_country_dim.formation_date",
             ],
             "type": "int",
+            "filter_only": False,
+            "properties": [],
         },
         {
-            "is_primary_key": False,
             "name": "default.date_dim.day[birth_country->last_election_date]",
-            "node_display_name": "Default: Date Dim",
+            "node_display_name": "Date Dim",
             "node_name": "default.date_dim",
             "path": [
                 "default.user_dim.birth_country",
                 "default.special_country_dim.last_election_date",
             ],
             "type": "int",
+            "filter_only": False,
+            "properties": [],
         },
         {
-            "is_primary_key": False,
             "name": "default.date_dim.day[residence_country->formation_date]",
-            "node_display_name": "Default: Date Dim",
+            "node_display_name": "Date Dim",
             "node_name": "default.date_dim",
             "path": [
                 "default.user_dim.residence_country",
                 "default.special_country_dim.formation_date",
             ],
             "type": "int",
+            "filter_only": False,
+            "properties": [],
         },
         {
-            "is_primary_key": False,
             "name": "default.date_dim.day[residence_country->last_election_date]",
-            "node_display_name": "Default: Date Dim",
+            "node_display_name": "Date Dim",
             "node_name": "default.date_dim",
             "path": [
                 "default.user_dim.residence_country",
                 "default.special_country_dim.last_election_date",
             ],
             "type": "int",
+            "filter_only": False,
+            "properties": [],
         },
         {
-            "is_primary_key": False,
             "name": "default.date_dim.month[birth_country->formation_date]",
-            "node_display_name": "Default: Date Dim",
+            "node_display_name": "Date Dim",
             "node_name": "default.date_dim",
             "path": [
                 "default.user_dim.birth_country",
                 "default.special_country_dim.formation_date",
             ],
             "type": "int",
+            "filter_only": False,
+            "properties": [],
         },
         {
-            "is_primary_key": False,
             "name": "default.date_dim.month[birth_country->last_election_date]",
-            "node_display_name": "Default: Date Dim",
+            "node_display_name": "Date Dim",
             "node_name": "default.date_dim",
             "path": [
                 "default.user_dim.birth_country",
                 "default.special_country_dim.last_election_date",
             ],
             "type": "int",
+            "filter_only": False,
+            "properties": [],
         },
         {
-            "is_primary_key": False,
             "name": "default.date_dim.month[residence_country->formation_date]",
-            "node_display_name": "Default: Date Dim",
+            "node_display_name": "Date Dim",
             "node_name": "default.date_dim",
             "path": [
                 "default.user_dim.residence_country",
                 "default.special_country_dim.formation_date",
             ],
             "type": "int",
+            "filter_only": False,
+            "properties": [],
         },
         {
-            "is_primary_key": False,
             "name": "default.date_dim.month[residence_country->last_election_date]",
-            "node_display_name": "Default: Date Dim",
+            "node_display_name": "Date Dim",
             "node_name": "default.date_dim",
             "path": [
                 "default.user_dim.residence_country",
                 "default.special_country_dim.last_election_date",
             ],
             "type": "int",
+            "filter_only": False,
+            "properties": [],
         },
         {
-            "is_primary_key": False,
             "name": "default.date_dim.year[birth_country->formation_date]",
-            "node_display_name": "Default: Date Dim",
+            "node_display_name": "Date Dim",
             "node_name": "default.date_dim",
             "path": [
                 "default.user_dim.birth_country",
                 "default.special_country_dim.formation_date",
             ],
             "type": "int",
+            "filter_only": False,
+            "properties": [],
         },
         {
-            "is_primary_key": False,
             "name": "default.date_dim.year[birth_country->last_election_date]",
-            "node_display_name": "Default: Date Dim",
+            "node_display_name": "Date Dim",
             "node_name": "default.date_dim",
             "path": [
                 "default.user_dim.birth_country",
                 "default.special_country_dim.last_election_date",
             ],
             "type": "int",
+            "filter_only": False,
+            "properties": [],
         },
         {
-            "is_primary_key": False,
             "name": "default.date_dim.year[residence_country->formation_date]",
-            "node_display_name": "Default: Date Dim",
+            "node_display_name": "Date Dim",
             "node_name": "default.date_dim",
             "path": [
                 "default.user_dim.residence_country",
                 "default.special_country_dim.formation_date",
             ],
             "type": "int",
+            "filter_only": False,
+            "properties": [],
         },
         {
-            "is_primary_key": False,
             "name": "default.date_dim.year[residence_country->last_election_date]",
-            "node_display_name": "Default: Date Dim",
+            "node_display_name": "Date Dim",
             "node_name": "default.date_dim",
             "path": [
                 "default.user_dim.residence_country",
                 "default.special_country_dim.last_election_date",
             ],
             "type": "int",
+            "filter_only": False,
+            "properties": [],
         },
         {
-            "is_primary_key": True,
             "name": "default.special_country_dim.country_code[birth_country]",
-            "node_display_name": "Default: Special Country Dim",
+            "node_display_name": "Special Country Dim",
             "node_name": "default.special_country_dim",
             "path": ["default.user_dim.birth_country"],
             "type": "string",
+            "filter_only": False,
+            "properties": ["primary_key"],
         },
         {
-            "is_primary_key": True,
             "name": "default.special_country_dim.country_code[residence_country]",
-            "node_display_name": "Default: Special Country Dim",
+            "node_display_name": "Special Country Dim",
             "node_name": "default.special_country_dim",
             "path": ["default.user_dim.residence_country"],
             "type": "string",
+            "filter_only": False,
+            "properties": ["primary_key"],
         },
         {
-            "is_primary_key": False,
             "name": "default.special_country_dim.formation_date[birth_country]",
-            "node_display_name": "Default: Special Country Dim",
+            "node_display_name": "Special Country Dim",
             "node_name": "default.special_country_dim",
             "path": ["default.user_dim.birth_country"],
             "type": "int",
+            "filter_only": False,
+            "properties": [],
         },
         {
-            "is_primary_key": False,
             "name": "default.special_country_dim.formation_date[residence_country]",
-            "node_display_name": "Default: Special Country Dim",
+            "node_display_name": "Special Country Dim",
             "node_name": "default.special_country_dim",
             "path": ["default.user_dim.residence_country"],
             "type": "int",
+            "filter_only": False,
+            "properties": [],
         },
         {
-            "is_primary_key": False,
             "name": "default.special_country_dim.last_election_date[birth_country]",
-            "node_display_name": "Default: Special Country Dim",
+            "node_display_name": "Special Country Dim",
             "node_name": "default.special_country_dim",
             "path": ["default.user_dim.birth_country"],
             "type": "int",
+            "filter_only": False,
+            "properties": [],
         },
         {
-            "is_primary_key": False,
             "name": "default.special_country_dim.last_election_date[residence_country]",
-            "node_display_name": "Default: Special Country Dim",
+            "node_display_name": "Special Country Dim",
             "node_name": "default.special_country_dim",
             "path": ["default.user_dim.residence_country"],
             "type": "int",
+            "filter_only": False,
+            "properties": [],
         },
         {
-            "is_primary_key": False,
             "name": "default.special_country_dim.name[birth_country]",
-            "node_display_name": "Default: Special Country Dim",
+            "node_display_name": "Special Country Dim",
             "node_name": "default.special_country_dim",
             "path": ["default.user_dim.birth_country"],
             "type": "string",
+            "filter_only": False,
+            "properties": [],
         },
         {
-            "is_primary_key": False,
             "name": "default.special_country_dim.name[residence_country]",
-            "node_display_name": "Default: Special Country Dim",
+            "node_display_name": "Special Country Dim",
             "node_name": "default.special_country_dim",
             "path": ["default.user_dim.residence_country"],
             "type": "string",
+            "filter_only": False,
+            "properties": [],
         },
         {
-            "is_primary_key": False,
             "name": "default.user_dim.age",
-            "node_display_name": "Default: User Dim",
+            "node_display_name": "User Dim",
             "node_name": "default.user_dim",
             "path": [],
             "type": "int",
+            "filter_only": False,
+            "properties": [],
         },
         {
-            "is_primary_key": False,
             "name": "default.user_dim.birth_country",
-            "node_display_name": "Default: User Dim",
+            "node_display_name": "User Dim",
             "node_name": "default.user_dim",
             "path": [],
             "type": "string",
+            "filter_only": False,
+            "properties": [],
         },
         {
-            "is_primary_key": False,
             "name": "default.user_dim.residence_country",
-            "node_display_name": "Default: User Dim",
+            "node_display_name": "User Dim",
             "node_name": "default.user_dim",
             "path": [],
             "type": "string",
+            "filter_only": False,
+            "properties": [],
         },
         {
-            "is_primary_key": True,
             "name": "default.user_dim.user_id",
-            "node_display_name": "Default: User Dim",
+            "node_display_name": "User Dim",
             "node_name": "default.user_dim",
             "path": [],
             "type": "int",
+            "filter_only": False,
+            "properties": ["primary_key"],
         },
     ]
 
 
 @pytest.mark.asyncio
-async def test_type_inference_structs(client_with_service_setup: AsyncClient):
+async def test_type_inference_structs(module__client_with_roads: AsyncClient):
     """
     Testing type resolution for structs select
     """
-    await client_with_service_setup.post(
+    await module__client_with_roads.post(
         "/nodes/source/",
         json={
             "columns": [
@@ -1024,17 +1033,17 @@ async def test_type_inference_structs(client_with_service_setup: AsyncClient):
             ],
             "description": "Collection of dreams",
             "mode": "published",
-            "name": "basic.dreams",
+            "name": "basic.dreams_3",
             "catalog": "public",
             "schema_": "basic",
             "table": "dreams",
         },
     )
 
-    response = await client_with_service_setup.post(
+    response = await module__client_with_roads.post(
         "/nodes/metric/",
         json={
-            "query": "SELECT SUM(counts.b) FROM basic.dreams",
+            "query": "SELECT SUM(counts.b) FROM basic.dreams_3",
             "description": "Dream Counts",
             "mode": "published",
             "name": "basic.dream_count",
@@ -1044,12 +1053,12 @@ async def test_type_inference_structs(client_with_service_setup: AsyncClient):
 
 
 @pytest.mark.asyncio
-async def test_metric_expression_auto_aliased(client_with_service_setup: AsyncClient):
+async def test_metric_expression_auto_aliased(module__client_with_roads: AsyncClient):
     """
     Testing that a metric's expression column is automatically aliased
     """
-    await client_with_service_setup.post("/namespaces/basic")
-    await client_with_service_setup.post(
+    await module__client_with_roads.post("/namespaces/basic")
+    await module__client_with_roads.post(
         "/nodes/source/",
         json={
             "columns": [
@@ -1060,31 +1069,32 @@ async def test_metric_expression_auto_aliased(client_with_service_setup: AsyncCl
             ],
             "description": "Collection of dreams",
             "mode": "published",
-            "name": "basic.dreams",
+            "name": "basic.dreams_4",
             "catalog": "public",
             "schema_": "basic",
             "table": "dreams",
         },
     )
 
-    response = await client_with_service_setup.post(
+    response = await module__client_with_roads.post(
         "/nodes/metric/",
         json={
-            "query": "SELECT SUM(counts.b) + SUM(counts.b) FROM basic.dreams",
+            "query": "SELECT SUM(counts.b) + SUM(counts.b) FROM basic.dreams_4",
             "description": "Dream Counts",
             "mode": "published",
-            "name": "basic.dream_count",
+            "name": "basic.dream_count_4",
         },
     )
     assert response.status_code == 201
     data = response.json()
-    assert data["query"] == "SELECT SUM(counts.b) + SUM(counts.b) FROM basic.dreams"
+    assert data["query"] == "SELECT SUM(counts.b) + SUM(counts.b) FROM basic.dreams_4"
     assert data["columns"] == [
         {
             "attributes": [],
+            "description": None,
             "dimension": None,
-            "display_name": "Basic: Dream Count",
-            "name": "basic_DOT_dream_count",
+            "display_name": "Dream Count 4",
+            "name": "basic_DOT_dream_count_4",
             "partition": None,
             "type": "bigint",
         },
@@ -1093,13 +1103,14 @@ async def test_metric_expression_auto_aliased(client_with_service_setup: AsyncCl
 
 @pytest.mark.asyncio
 async def test_raise_on_malformated_expression_alias(
-    client_with_service_setup: AsyncClient,
+    module__client_with_roads: AsyncClient,
 ):
     """
     Test that using an invalid alias for a metric expression is saved, but the alias
     is overridden when creating the column name
     """
-    await client_with_service_setup.post(
+    await module__client_with_roads.post("/namespaces/basic")
+    response = await module__client_with_roads.post(
         "/nodes/source/",
         json={
             "columns": [
@@ -1110,35 +1121,36 @@ async def test_raise_on_malformated_expression_alias(
             ],
             "description": "Collection of dreams",
             "mode": "published",
-            "name": "basic.dreams",
+            "name": "basic.dreams_5",
             "catalog": "public",
             "schema_": "basic",
             "table": "dreams",
         },
     )
+    assert response.status_code == 200
 
-    response = await client_with_service_setup.post(
+    response = await module__client_with_roads.post(
         "/nodes/metric/",
         json={
-            "query": "SELECT SUM(counts.b) as foo FROM basic.dreams",
+            "query": "SELECT SUM(counts.b) as foo FROM basic.dreams_5",
             "description": "Dream Counts",
             "mode": "published",
-            "name": "basic.dream_count",
+            "name": "basic.dream_count_5",
         },
     )
     assert response.status_code == 201
     data = response.json()
-    assert data["query"] == "SELECT SUM(counts.b) as foo FROM basic.dreams"
-    assert data["columns"][0]["name"] == "basic_DOT_dream_count"
+    assert data["query"] == "SELECT SUM(counts.b) as foo FROM basic.dreams_5"
+    assert data["columns"][0]["name"] == "basic_DOT_dream_count_5"
 
 
 @pytest.mark.asyncio
-async def test_raise_on_multiple_expressions(client_with_service_setup: AsyncClient):
+async def test_raise_on_multiple_expressions(module__client_with_roads: AsyncClient):
     """
     Testing raising when there is more than one expression
     """
-    await client_with_service_setup.post("/namespaces/basic")
-    await client_with_service_setup.post(
+    await module__client_with_roads.post("/namespaces/basic")
+    response = await module__client_with_roads.post(
         "/nodes/source/",
         json={
             "columns": [
@@ -1149,20 +1161,21 @@ async def test_raise_on_multiple_expressions(client_with_service_setup: AsyncCli
             ],
             "description": "Collection of dreams",
             "mode": "published",
-            "name": "basic.dreams",
+            "name": "basic.dreams_2",
             "catalog": "public",
             "schema_": "basic",
             "table": "dreams",
         },
     )
+    assert response.status_code == 200
 
-    response = await client_with_service_setup.post(
+    response = await module__client_with_roads.post(
         "/nodes/metric/",
         json={
-            "query": "SELECT SUM(counts.b), COUNT(counts.b) FROM basic.dreams",
+            "query": "SELECT SUM(counts.b), COUNT(counts.b) FROM basic.dreams_2",
             "description": "Dream Counts",
             "mode": "published",
-            "name": "basic.dream_count",
+            "name": "basic.dream_count_2",
         },
     )
     assert response.status_code == 400
@@ -1172,11 +1185,11 @@ async def test_raise_on_multiple_expressions(client_with_service_setup: AsyncCli
 
 
 @pytest.mark.asyncio
-async def test_list_metric_metadata(client: AsyncClient):
+async def test_list_metric_metadata(module__client: AsyncClient):
     """
     Test listing metric metadata values
     """
-    metric_metadata_options = (await client.get("/metrics/metadata")).json()
+    metric_metadata_options = (await module__client.get("/metrics/metadata")).json()
     assert metric_metadata_options == {
         "directions": ["higher_is_better", "lower_is_better", "neutral"],
         "units": [
@@ -1268,3 +1281,85 @@ async def test_list_metric_metadata(client: AsyncClient):
             },
         ],
     }
+
+
+@pytest.mark.asyncio
+async def test_create_invalid_metric(module__client_with_roads: AsyncClient):
+    """
+    Validate that creating a metric with invalid SQL raises errors.
+    """
+    response = await module__client_with_roads.post(
+        "/nodes/metric/",
+        json={
+            "query": (
+                "SELECT sum(total_repair_cost), "
+                "sum(total_repair_cost) FROM default.repair_orders_fact"
+            ),
+            "description": "Something invalid",
+            "mode": "published",
+            "name": "default.invalid_metric_example",
+        },
+    )
+    assert response.json()["message"] == (
+        "Metric queries can only have a single expression, found 2"
+    )
+
+    response = await module__client_with_roads.post(
+        "/nodes/metric/",
+        json={
+            "query": (
+                "SELECT sum(total_repair_cost) FROM default.repair_orders_fact"
+                " WHERE total_repair_cost > 0"
+            ),
+            "description": "Something invalid",
+            "mode": "published",
+            "name": "default.invalid_metric_example",
+        },
+    )
+    assert response.json()["message"] == (
+        "Metric cannot have a WHERE clause. Please use IF(<clause>, ...) instead"
+    )
+
+    response = await module__client_with_roads.post(
+        "/nodes/metric/",
+        json={
+            "query": (
+                "SELECT sum(total_repair_cost) FROM default.repair_orders_fact "
+                "GROUP BY total_repair_cost HAVING count(*) > 0 ORDER BY 1"
+            ),
+            "description": "Something invalid",
+            "mode": "published",
+            "name": "default.invalid_metric_example",
+        },
+    )
+    assert response.json()["message"] == (
+        "Metric has an invalid query. The following are not allowed: GROUP BY, HAVING, ORDER BY"
+    )
+
+
+@pytest.mark.asyncio
+async def test_read_metrics_when_cached(
+    module__client: AsyncClient,
+    mocker: MockerFixture,
+) -> None:
+    """
+    Test ``GET /metrics/`` with mocked cache returning a list of strings.
+    """
+    mock_list_nodes = mocker.patch(
+        "datajunction_server.api.metrics.list_nodes",
+        return_value=["metric1", "metric2", "metric3"],
+    )
+
+    # Should be a cache miss, triggering a cache in a background task
+    response1 = await module__client.get(
+        "/metrics/",
+        headers={"Cache-Control": "no-cache"},
+    )
+    assert response1.status_code == 200
+
+    # Should be a cache hit
+    response2 = await module__client.get("/metrics/")
+    assert response2.status_code == 200
+
+    # list_nodes should only be called once since the second used the cache
+    mock_list_nodes.assert_called_once()

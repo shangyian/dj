@@ -1,3 +1,4 @@
+# pylint: disable=too-many-public-methods
 """DataJunction main client module."""
 
 import time
@@ -161,18 +162,55 @@ class DJClient(_internal.DJClient):
         filters: Optional[List[str]] = None,
         engine_name: Optional[str] = None,
         engine_version: Optional[str] = None,
+        measures: bool = False,
+        use_materialized: bool = True,
     ):
         """
-        Builds SQL for one or more metrics with the provided dimensions and filters.
+        Builds SQL for one or more metrics with the provided group by dimensions and filters.
         """
+        endpoint = "/sql/"
+        if measures:
+            endpoint = "/sql/measures/v2"
         response = self._session.get(
-            "/sql/",
+            endpoint,
             params={
                 "metrics": metrics,
                 "dimensions": dimensions or [],
                 "filters": filters or [],
                 "engine_name": engine_name or self.engine_name,
                 "engine_version": engine_version or self.engine_version,
+                "use_materialized": use_materialized,
+            },
+        )
+        if response.status_code != 200:
+            return response.json()
+        if not measures:
+            return response.json()["sql"]
+        return response.json()
+
+    #
+    # Get SQL for a node
+    #
+    def node_sql(  # pylint: disable=too-many-arguments
+        self,
+        node_name: str,
+        dimensions: Optional[List[str]] = None,
+        filters: Optional[List[str]] = None,
+        engine_name: Optional[str] = None,
+        engine_version: Optional[str] = None,
+        use_materialized: bool = True,
+    ):
+        """
+        Builds SQL for a node with the provided dimensions and filters.
+        """
+        response = self._session.get(
+            f"/sql/{node_name}",
+            params={
+                "dimensions": dimensions or [],
+                "filters": filters or [],
+                "engine_name": engine_name or self.engine_name,
+                "engine_version": engine_version or self.engine_version,
+                "use_materialized": use_materialized,
             },
         )
         if response.status_code == 200:
@@ -192,7 +230,50 @@ class DJClient(_internal.DJClient):
         async_: bool = True,
     ):
         """
+        Retrieves the data for one or more metrics with the provided dimensions and filters.
+        """
+        return self._data(
+            metrics=metrics,
+            dimensions=dimensions,
+            filters=filters,
+            engine_name=engine_name,
+            engine_version=engine_version,
+            async_=async_,
+        )
+
+    def node_data(  # pylint: disable=too-many-arguments,too-many-locals
+        self,
+        node_name: str,
+        dimensions: Optional[List[str]] = None,
+        filters: Optional[List[str]] = None,
+        engine_name: Optional[str] = None,
+        engine_version: Optional[str] = None,
+        async_: bool = True,
+    ):
+        """
         Retrieves the data for the node with the provided dimensions and filters.
+        """
+        return self._data(
+            node_name=node_name,
+            dimensions=dimensions,
+            filters=filters,
+            engine_name=engine_name,
+            engine_version=engine_version,
+            async_=async_,
+        )
+
+    def _data(  # pylint: disable=too-many-arguments,too-many-locals
+        self,
+        node_name: Optional[str] = None,
+        metrics: Optional[List[str]] = None,
+        dimensions: Optional[List[str]] = None,
+        filters: Optional[List[str]] = None,
+        engine_name: Optional[str] = None,
+        engine_version: Optional[str] = None,
+        async_: bool = True,
+    ):
+        """
+        Fetch data for a node or a set of metrics with dimensions and filters.
         """
         printed_links = False
         with alive_bar(
@@ -205,24 +286,40 @@ class DJClient(_internal.DJClient):
             poll_interval = 1  # Initial polling interval in seconds
             job_state = models.QueryState.UNKNOWN
             results = None
+            path = "/data/"
+            params = {
+                "dimensions": dimensions or [],
+                "filters": filters or [],
+                "engine_name": engine_name or self.engine_name,
+                "engine_version": engine_version or self.engine_version,
+                "async_": async_,
+            }
+
+            if (node_name and metrics) or not (node_name or metrics):
+                raise DJClientException(
+                    "Must supply either 'node_name' or 'metrics' to fetch data.",
+                )
+
+            if node_name:
+                path = f"{path}{node_name}"
+            elif metrics:  # pragma: no cover
+                params["metrics"] = metrics  # pragma: no cover
+
+            print(f"Fetching data for '{node_name}' or '{metrics}'")  # pragma: no cover
+
             while job_state not in models.END_JOB_STATES:
                 progress_bar()  # pylint: disable=not-callable
                 response = self._session.get(
-                    "/data/",
-                    params={
-                        "metrics": metrics,
-                        "dimensions": dimensions or [],
-                        "filters": filters or [],
-                        "engine_name": engine_name or self.engine_name,
-                        "engine_version": engine_version or self.engine_version,
-                        "async_": async_,
-                    },
+                    path,
+                    params=params,
                 )
                 results = response.json()
 
                 # Raise errors if any
                 if not response.status_code < 400:
-                    raise DJClientException(f"Error retrieving data: {response.text}")
+                    raise DJClientException(
+                        f"Error retrieving data: {response.text}",
+                    )  # pragma: no cover  # pylint: disable=line-too-long
                 if results["state"] not in models.QueryState.list():
                     raise DJClientException(  # pragma: no cover
                         f"Query state {results['state']} is not a DJ-parseable query state!"
@@ -284,10 +381,7 @@ class DJClient(_internal.DJClient):
             node_name,
             type_=models.NodeType.SOURCE.value,
         )
-        node = Source(
-            **node_dict,
-            dj_client=self,
-        )
+        node = Source.from_dict(dj_client=self, data=node_dict)
         node.primary_key = self._primary_key_from_columns(node_dict["columns"])
         return node
 
@@ -299,10 +393,7 @@ class DJClient(_internal.DJClient):
             node_name,
             type_=models.NodeType.TRANSFORM.value,
         )
-        node = Transform(
-            **node_dict,
-            dj_client=self,
-        )
+        node = Transform.from_dict(dj_client=self, data=node_dict)
         node.primary_key = self._primary_key_from_columns(node_dict["columns"])
         return node
 
@@ -314,10 +405,7 @@ class DJClient(_internal.DJClient):
             node_name,
             type_=models.NodeType.DIMENSION.value,
         )
-        node = Dimension(
-            **node_dict,
-            dj_client=self,
-        )
+        node = Dimension.from_dict(dj_client=self, data=node_dict)
         node.primary_key = self._primary_key_from_columns(node_dict["columns"])
         return node
 
@@ -329,10 +417,9 @@ class DJClient(_internal.DJClient):
             node_name,
             type_=models.NodeType.METRIC.value,
         )
-        node = Metric(
-            **node_dict,
-            dj_client=self,
-        )
+        metric_dict = self.get_metric(node_name)
+        node_dict["required_dimensions"] = metric_dict["required_dimensions"]
+        node = Metric.from_dict(dj_client=self, data=node_dict)
         node.primary_key = self._primary_key_from_columns(node_dict["columns"])
         return node
 
@@ -343,21 +430,34 @@ class DJClient(_internal.DJClient):
         node_dict = self._get_cube(node_name)
         if "name" not in node_dict:
             raise DJClientException(f"Cube `{node_name}` does not exist")
-        dimensions = [
-            f'{col["node_name"]}.{col["name"]}'
-            for col in node_dict["cube_elements"]
-            if col["type"] != "metric"
-        ]
-        metrics = [
-            f'{col["node_name"]}.{col["name"]}'
-            for col in node_dict["cube_elements"]
-            if col["type"] == "metric"
-        ]
-        return Cube(
-            **node_dict,
-            metrics=metrics,
-            dimensions=dimensions,
-            dj_client=self,
+        dimensions = node_dict["cube_node_dimensions"]
+        metrics = node_dict["cube_node_metrics"]
+        node_dict["metrics"] = metrics
+        node_dict["dimensions"] = dimensions
+        return Cube.from_dict(dj_client=self, data=node_dict)
+
+    def node(self, node_name: str):
+        """
+        Retrieves a node with the name if one exists
+        """
+        node_dict = self._verify_node_exists(node_name)
+        if not node_dict or "type" not in node_dict:
+            raise DJClientException(
+                f"Node `{node_name}` does not exist.",
+            )  # pragma: no cover
+        if node_dict["type"] == models.NodeType.SOURCE.value:
+            return self.source(node_name)
+        if node_dict["type"] == models.NodeType.DIMENSION.value:
+            return self.dimension(node_name)
+        if node_dict["type"] == models.NodeType.TRANSFORM.value:
+            return self.transform(node_name)
+        if node_dict["type"] == models.NodeType.METRIC.value:
+            return self.metric(node_name)
+        if node_dict["type"] == models.NodeType.CUBE.value:  # pragma: no cover
+            return self.cube(node_name)
+
+        raise DJClientException(  # pragma: no cover
+            f"Node `{node_name}` is of unknown type: {node_dict['type']}",
         )
 
     #

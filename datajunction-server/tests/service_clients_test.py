@@ -1,7 +1,8 @@
 """
 Tests for ``datajunction_server.service_clients``.
 """
-from unittest.mock import MagicMock
+
+from unittest.mock import ANY, MagicMock
 
 import pytest
 from pytest_mock import MockerFixture
@@ -11,8 +12,15 @@ from datajunction_server.database.engine import Engine
 from datajunction_server.errors import (
     DJDoesNotExistException,
     DJError,
+    DJQueryServiceClientEntityNotFound,
     DJQueryServiceClientException,
     ErrorCode,
+)
+from datajunction_server.models.cube_materialization import (
+    CubeMetric,
+    DruidCubeMaterializationInput,
+    MeasureKey,
+    NodeNameVersion,
 )
 from datajunction_server.models.materialization import (
     GenericMaterializationInput,
@@ -52,7 +60,6 @@ class TestRequestsSessionWithEndpoint:
             "GET",
             f"{self.example_endpoint}/pies/?flavor=blueberry",
             data=None,
-            headers=None,
         )
         prepped = requests_session.prepare_request(req)
         assert prepped.headers["Connection"] == "keep-alive"
@@ -83,7 +90,7 @@ class TestRequestsSessionWithEndpoint:
         )
 
 
-class TestQueryServiceClient:  # pylint: disable=too-few-public-methods
+class TestQueryServiceClient:
     """
     Test using the query service client.
     """
@@ -107,6 +114,7 @@ class TestQueryServiceClient:  # pylint: disable=too-few-public-methods
             "http://queryservice:8001/table/hive.test.pies/columns/",
             params={},
             allow_redirects=True,
+            headers=ANY,
         )
 
         query_service_client.get_columns_for_table(
@@ -120,6 +128,7 @@ class TestQueryServiceClient:  # pylint: disable=too-few-public-methods
             "http://queryservice:8001/table/hive.test.pies/columns/",
             params={"engine": "spark", "engine_version": "2.4.4"},
             allow_redirects=True,
+            headers=ANY,
         )
 
         # failed request with unknown reason
@@ -143,9 +152,124 @@ class TestQueryServiceClient:  # pylint: disable=too-few-public-methods
             status_code=200,
             json=MagicMock(return_value={"columns": []}),
         )
-        with pytest.raises(DJQueryServiceClientException) as exc_info:
+        with pytest.raises(DJDoesNotExistException) as exc_info:
             query_service_client.get_columns_for_table("hive", "test", "pies")
         assert "No columns found" in str(exc_info.value)
+
+    def test_query_service_client_create_view(self, mocker: MockerFixture) -> None:
+        """
+        Test creating a view using the query service client.
+        """
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "catalog_name": "public",
+            "engine_name": "postgres",
+            "engine_version": "15.2",
+            "id": "ef209eef-c31a-4089-aae6-833259a08e22",
+            "submitted_query": "CREATE OR REPLACE VIEW foo SELECT 1 as num",
+            "executed_query": "CREATE OR REPLACE VIEW foo SELECT 1 as num",
+            "scheduled": "2023-01-01T00:00:00.000000",
+            "started": "2023-01-01T00:00:00.000000",
+            "finished": "2023-01-01T00:00:00.000001",
+            "state": "FINISHED",
+            "progress": 1,
+            "results": [],
+            "next": None,
+            "previous": None,
+            "errors": [],
+        }
+
+        mock_request = mocker.patch(
+            "datajunction_server.service_clients.RequestsSessionWithEndpoint.post",
+            return_value=mock_response,
+        )
+
+        # successful request
+        query_service_client = QueryServiceClient(uri=self.endpoint)
+        query_create = QueryCreate(
+            catalog_name="default",
+            engine_name="postgres",
+            engine_version="15.2",
+            submitted_query="CREATE OR REPLACE VIEW foo SELECT 1 as num",
+            async_=False,
+        )
+        query_service_client.create_view(
+            view_name="foo",
+            query_create=query_create,
+        )
+
+        mock_request.assert_called_with(
+            "/queries/",
+            headers=ANY,
+            json={
+                "catalog_name": "default",
+                "engine_name": "postgres",
+                "engine_version": "15.2",
+                "submitted_query": "CREATE OR REPLACE VIEW foo SELECT 1 as num",
+                "async_": False,
+            },
+        )
+
+    def test_query_service_client_create_view_with_failure(
+        self,
+        mocker: MockerFixture,
+    ) -> None:
+        """
+        Test creating a view using the query service client with a filed response.
+        """
+
+        mock_response = MagicMock()
+        mock_response.status_code = 500
+        mock_response.json.return_value = {"message": "Errors", "errors": ["a", "b"]}
+        mock_request = mocker.patch(
+            "datajunction_server.service_clients.RequestsSessionWithEndpoint.post",
+            return_value=mock_response,
+        )
+
+        # successful request
+        query_service_client = QueryServiceClient(uri=self.endpoint)
+        query_create = QueryCreate(
+            catalog_name="default",
+            engine_name="postgres",
+            engine_version="15.2",
+            submitted_query="CREATE OR REPLACE VIEW foo SELECT 1 as num",
+            async_=False,
+        )
+
+        with pytest.raises(DJQueryServiceClientException) as exc_info:
+            query_service_client.create_view(
+                view_name="foo",
+                query_create=query_create,
+            )
+        assert "Error response from query service" in str(exc_info.value)
+        assert exc_info.value.errors == [
+            DJError(
+                code=ErrorCode.QUERY_SERVICE_ERROR,
+                message="a",
+                debug=None,
+                context="",
+            ),
+            DJError(
+                code=ErrorCode.QUERY_SERVICE_ERROR,
+                message="b",
+                debug=None,
+                context="",
+            ),
+        ]
+
+        mock_request.assert_called_with(
+            "/queries/",
+            headers=ANY,
+            json={
+                "catalog_name": "default",
+                "engine_name": "postgres",
+                "engine_version": "15.2",
+                "submitted_query": "CREATE OR REPLACE VIEW foo SELECT 1 as num",
+                "async_": False,
+            },
+        )
 
     def test_query_service_client_submit_query(self, mocker: MockerFixture) -> None:
         """
@@ -198,7 +322,7 @@ class TestQueryServiceClient:  # pylint: disable=too-few-public-methods
 
         mock_request.assert_called_with(
             "/queries/",
-            headers={"Cache-Control": ""},
+            headers=ANY,
             json={
                 "catalog_name": "default",
                 "engine_name": "postgres",
@@ -252,6 +376,7 @@ class TestQueryServiceClient:  # pylint: disable=too-few-public-methods
 
         mock_request.assert_called_with(
             "/queries/ef209eef-c31a-4089-aae6-833259a08e22/",
+            headers=ANY,
         )
 
     def test_query_service_client_materialize(self, mocker: MockerFixture) -> None:
@@ -303,7 +428,9 @@ class TestQueryServiceClient:  # pylint: disable=too-few-public-methods
                 "spark_conf": {},
                 "upstream_tables": ["default.hard_hats"],
                 "columns": [],
+                "lookback_window": "1 DAY",
             },
+            headers=ANY,
         )
 
     def test_query_service_client_deactivate_materialization(
@@ -332,36 +459,48 @@ class TestQueryServiceClient:  # pylint: disable=too-few-public-methods
         )
 
         mock_request.assert_called_with(
-            "/materialization/",
-            params={
-                "node_name": "default.hard_hat",
-                "materialization_name": "default",
-            },
+            "/materialization/default.hard_hat/default/",
+            headers=ANY,
         )
 
     def test_query_service_client_raising_error(self, mocker: MockerFixture) -> None:
         """
         Test handling an error response from the query service client
         """
-        mock_response = MagicMock()
-        mock_response.status_code = 400
-        mock_response.json.return_value = {"message": "Errors", "errors": ["a", "b"]}
+        mock_400_response = MagicMock()
+        mock_400_response.status_code = 400
+        mock_400_response.json.return_value = {
+            "message": "Errors",
+            "errors": ["a", "b"],
+        }
 
-        mocker.patch(
-            "datajunction_server.service_clients.RequestsSessionWithEndpoint.get",
-            return_value=mock_response,
-        )
-        mocker.patch(
-            "datajunction_server.service_clients.RequestsSessionWithEndpoint.post",
-            return_value=mock_response,
-        )
+        mock_404_response = MagicMock()
+        mock_404_response.status_code = 404
+        mock_404_response.json.return_value = {
+            "message": "Query not found",
+            "errors": ["a"],
+        }
 
         query_service_client = QueryServiceClient(uri=self.endpoint)
 
-        with pytest.raises(DJQueryServiceClientException) as exc_info:
-            query_service_client.get_query(
-                "ef209eef-c31a-4089-aae6-833259a08e22",
-            )
+        with mocker.patch(
+            "datajunction_server.service_clients.RequestsSessionWithEndpoint.get",
+            return_value=mock_400_response,
+        ):
+            with pytest.raises(DJQueryServiceClientException) as exc_info:
+                query_service_client.get_query(
+                    "ef209eef-c31a-4089-aae6-833259a08e22",
+                )
+
+        with mocker.patch(
+            "datajunction_server.service_clients.RequestsSessionWithEndpoint.get",
+            return_value=mock_404_response,
+        ):
+            with pytest.raises(DJQueryServiceClientEntityNotFound) as exc_info:
+                query_service_client.get_query(
+                    "ef209eef-c31a-4089-aae6-833259a08e22",
+                )
+
         assert "Error response from query service" in str(exc_info.value)
         query_create = QueryCreate(
             catalog_name="hive",
@@ -371,11 +510,14 @@ class TestQueryServiceClient:  # pylint: disable=too-few-public-methods
             async_=False,
         )
 
-        with pytest.raises(DJQueryServiceClientException) as exc_info:
-            query_service_client.submit_query(
-                query_create,
-                headers={"Cache-Control": "no-cache"},
-            )
+        with mocker.patch(
+            "datajunction_server.service_clients.RequestsSessionWithEndpoint.post",
+            return_value=mock_400_response,
+        ):
+            with pytest.raises(DJQueryServiceClientException) as exc_info:
+                query_service_client.submit_query(
+                    query_create,
+                )
         assert "Error response from query service" in str(exc_info.value)
         assert exc_info.value.errors == [
             DJError(
@@ -430,6 +572,7 @@ class TestQueryServiceClient:  # pylint: disable=too-few-public-methods
             json={
                 "name": "default",
                 "job": "SparkSqlMaterializationJob",
+                "lookback_window": "1 DAY",
                 "strategy": "full",
                 "node_name": "default.hard_hat",
                 "node_version": "v1",
@@ -441,6 +584,7 @@ class TestQueryServiceClient:  # pylint: disable=too-few-public-methods
                 "partitions": [],
                 "columns": [],
             },
+            headers=ANY,
         )
         assert response == {
             "urls": ["http://fake.url/job"],
@@ -467,11 +611,13 @@ class TestQueryServiceClient:  # pylint: disable=too-few-public-methods
         response = query_service_client.get_materialization_info(
             node_name="default.hard_hat",
             node_version="v3.1",
+            node_type=NodeType.DIMENSION,
             materialization_name="default",
         )
         mock_request.assert_called_with(
-            "/materialization/default.hard_hat/v3.1/default/",
+            "/materialization/default.hard_hat/v3.1/default/?node_type=dimension",
             timeout=3,
+            headers=ANY,
         )
         assert response == {
             "urls": ["http://fake.url/job"],
@@ -495,6 +641,7 @@ class TestQueryServiceClient:  # pylint: disable=too-few-public-methods
         response = query_service_client.get_materialization_info(
             node_name="default.hard_hat",
             node_version="v3.1",
+            node_type=NodeType.DIMENSION,
             materialization_name="default",
         )
         assert response == {
@@ -504,7 +651,7 @@ class TestQueryServiceClient:  # pylint: disable=too-few-public-methods
 
     def test_run_backfill(self, mocker: MockerFixture) -> None:
         """
-        Test get materialization info with errors
+        Test running backfill on temporal partitions and categorical partitions
         """
         mock_response = MagicMock()
         mock_response.status_code = 200
@@ -513,7 +660,7 @@ class TestQueryServiceClient:  # pylint: disable=too-few-public-methods
             "output_tables": [],
         }
 
-        mocker.patch(
+        mocked_call = mocker.patch(
             "datajunction_server.service_clients.RequestsSessionWithEndpoint.post",
             return_value=mock_response,
         )
@@ -521,13 +668,172 @@ class TestQueryServiceClient:  # pylint: disable=too-few-public-methods
         query_service_client = QueryServiceClient(uri=self.endpoint)
         response = query_service_client.run_backfill(
             node_name="default.hard_hat",
-            backfill=PartitionBackfill(
-                column_name="hire_date",
-                range=["20230101", "20230201"],
-            ),
+            node_version="v1",
+            node_type=NodeType.DIMENSION,
+            partitions=[
+                PartitionBackfill(
+                    column_name="hire_date",
+                    range=["20230101", "20230201"],
+                ),
+            ],
             materialization_name="default",
         )
         assert response == {
             "urls": ["http://fake.url/job"],
             "output_tables": [],
+        }
+        mocked_call.assert_called_with(
+            "/materialization/run/default.hard_hat/default/?node_version=v1&node_type=dimension",
+            json=[
+                {
+                    "column_name": "hire_date",
+                    "range": ["20230101", "20230201"],
+                    "values": None,
+                },
+            ],
+            timeout=20,
+            headers=ANY,
+        )
+
+        mocked_call.reset_mock()
+
+        query_service_client = QueryServiceClient(uri=self.endpoint)
+        response = query_service_client.run_backfill(
+            node_name="default.hard_hat",
+            node_version="v1",
+            node_type=NodeType.DIMENSION,
+            partitions=[
+                PartitionBackfill(
+                    column_name="hire_date",
+                    range=["20230101", "20230201"],
+                ),
+                PartitionBackfill(
+                    column_name="state",
+                    values=["CA", "DE"],
+                ),
+            ],
+            materialization_name="default",
+        )
+        assert response == {
+            "urls": ["http://fake.url/job"],
+            "output_tables": [],
+        }
+        mocked_call.assert_called_with(
+            "/materialization/run/default.hard_hat/default/?node_version=v1&node_type=dimension",
+            json=[
+                {
+                    "column_name": "hire_date",
+                    "range": ["20230101", "20230201"],
+                    "values": None,
+                },
+                {
+                    "column_name": "state",
+                    "range": None,
+                    "values": ["CA", "DE"],
+                },
+            ],
+            timeout=20,
+            headers=ANY,
+        )
+
+    def test_filtered_headers(self):
+        """
+        We should filter out certain headers.
+        """
+        assert QueryServiceClient.filtered_headers(
+            {
+                "User-Agent": "python-requests/2.29.0",
+                "Accept-Encoding": "gzip, deflate",
+                "Accept": "*/*",
+            },
+        ) == {
+            "User-Agent": "python-requests/2.29.0",
+            "Accept": "*/*",
+        }
+        assert QueryServiceClient.filtered_headers(
+            {
+                "User-Agent": "python-requests/2.29.0",
+                "accept-encoding": "gzip, deflate",
+                "Accept": "*/*",
+            },
+        ) == {
+            "User-Agent": "python-requests/2.29.0",
+            "Accept": "*/*",
+        }
+
+    def test_materialize_cube(self, mocker: MockerFixture) -> None:
+        """
+        Test materialize cube via query service client
+        """
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "urls": ["http://fake.url/job"],
+            "output_tables": ["common.a", "common.b"],
+        }
+
+        mock_request = mocker.patch(
+            "datajunction_server.service_clients.RequestsSessionWithEndpoint.post",
+            return_value=mock_response,
+        )
+
+        query_service_client = QueryServiceClient(uri=self.endpoint)
+        materialization_input = DruidCubeMaterializationInput(
+            name="default",
+            strategy=MaterializationStrategy.INCREMENTAL_TIME,
+            schedule="@daily",
+            job="DruidCubeMaterialization",
+            cube=NodeNameVersion(name="default.repairs_cube", version="v1.0"),
+            dimensions=["default.hard_hat.first_name", "default.hard_hat.last_name"],
+            metrics=[
+                CubeMetric(
+                    metric=NodeNameVersion(
+                        name="default.num_repair_orders",
+                        version="v1.0",
+                        display_name=None,
+                    ),
+                    required_measures=[
+                        MeasureKey(
+                            node=NodeNameVersion(
+                                name="default.repair_orders",
+                                version="v1.0",
+                            ),
+                            measure_name="count",
+                        ),
+                    ],
+                    derived_expression="SELECT SUM(count) FROM default.repair_orders",
+                    metric_expression="SUM(count)",
+                ),
+                CubeMetric(
+                    metric=NodeNameVersion(
+                        name="default.avg_repair_price",
+                        version="v1.0",
+                        display_name=None,
+                    ),
+                    required_measures=[
+                        MeasureKey(
+                            node=NodeNameVersion(
+                                name="default.repair_orders",
+                                version="v1.0",
+                            ),
+                            measure_name="sum_price_123abc",
+                        ),
+                    ],
+                    derived_expression="SELECT SUM(sum_price_123abc) FROM default.repair_orders",
+                    metric_expression="SUM(sum_price_123abc)",
+                ),
+            ],
+            measures_materializations=[],
+            combiners=[],
+        )
+        response = query_service_client.materialize_cube(materialization_input)
+        mock_request.assert_called_with(
+            "/cubes/materialize",
+            json=materialization_input.dict(),
+            timeout=20,
+            headers=ANY,
+        )
+        assert response == {
+            "urls": ["http://fake.url/job"],
+            "output_tables": ["common.a", "common.b"],
         }

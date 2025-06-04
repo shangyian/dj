@@ -130,7 +130,18 @@ List of all available DJ client methods:
         filters: Optional[List[str]],
         engine_name: Optional[str],
         engine_version: Optional[str])
+  - node_sql( node_name: str,
+        dimensions: Optional[List[str]],
+        filters: Optional[List[str]],
+        engine_name: Optional[str],
+        engine_version: Optional[str])
   - data( metrics: List[str],
+        dimensions: Optional[List[str]],
+        filters: Optional[List[str]],
+        engine_name: Optional[str],
+        engine_version: Optional[str],
+        async_: bool = True)
+  - node_data( node_name: str,
         dimensions: Optional[List[str]],
         filters: Optional[List[str]],
         engine_name: Optional[str],
@@ -339,6 +350,7 @@ List of all available DJ builder methods:
   - source(self, node_name: str)
   - create_source( ..., mode: Optional[NodeMode] = NodeMode.PUBLISHED)
   - register_table( catalog: str, schema: str, table: str)
+  - register_view( catalog: str, schema: str, view: str, query: str, replace: bool = False)
 
   ### nodes: transform
   - transform(self, node_name: str)

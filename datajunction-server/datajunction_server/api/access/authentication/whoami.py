@@ -1,6 +1,7 @@
 """
 Router for getting the current active user
 """
+
 from datetime import timedelta
 from http import HTTPStatus
 
@@ -11,14 +12,19 @@ from datajunction_server.database.user import User
 from datajunction_server.internal.access.authentication.http import SecureAPIRouter
 from datajunction_server.internal.access.authentication.tokens import create_token
 from datajunction_server.models.user import UserOutput
-from datajunction_server.utils import get_current_user, get_settings
+from datajunction_server.utils import (
+    Settings,
+    get_and_update_current_user,
+    get_settings,
+)
 
-settings = get_settings()
 router = SecureAPIRouter(tags=["Who am I?"])
 
 
-@router.get("/whoami/", response_model=UserOutput)
-async def get_user(current_user: User = Depends(get_current_user)) -> UserOutput:
+@router.get("/whoami/")
+async def whoami(
+    current_user: User = Depends(get_and_update_current_user),
+):
     """
     Returns the current authenticated user
     """
@@ -26,7 +32,10 @@ async def get_user(current_user: User = Depends(get_current_user)) -> UserOutput
 
 
 @router.get("/token/")
-async def get_short_lived_token(request: Request) -> JSONResponse:
+async def get_short_lived_token(
+    request: Request,
+    settings: Settings = Depends(get_settings),
+) -> JSONResponse:
     """
     Returns a token that expires in 24 hours
     """
@@ -36,7 +45,9 @@ async def get_short_lived_token(request: Request) -> JSONResponse:
         content={
             "token": create_token(
                 {"username": request.state.user.username},
-                expires_delta,
+                secret=settings.secret,
+                iss=settings.url,
+                expires_delta=expires_delta,
             ),
         },
     )

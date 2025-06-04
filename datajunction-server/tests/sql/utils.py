@@ -1,6 +1,7 @@
 """
 Helper functions.
 """
+
 import os
 
 from sqlalchemy.sql import Select
@@ -22,6 +23,13 @@ def compare_query_strings(str1: str, str2: str) -> bool:
     compare two query strings
     """
     return parse(str(str1)).compare(parse(str(str2)))
+
+
+def assert_query_strings_equal(str1: str, str2: str):
+    """
+    Assert that two query strings are equal
+    """
+    assert str(parse(str(str1))) == str(parse(str(str2)))
 
 
 def read_query(name: str) -> str:

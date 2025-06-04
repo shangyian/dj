@@ -9,9 +9,9 @@ import { displayMessageAfterSubmit } from '../../../utils/form';
 import { useParams } from 'react-router-dom';
 import { Action } from '../../components/forms/Action';
 import NodeNameField from '../../components/forms/NodeNameField';
-import NodeTagsInput from '../../components/forms/NodeTagsInput';
 import { MetricsSelect } from './MetricsSelect';
 import { DimensionsSelect } from './DimensionsSelect';
+import { TagsField } from '../AddEditNodePage/TagsField';
 
 export function CubeBuilderPage() {
   const djClient = useContext(DJClientContext).DataJunctionAPI;
@@ -29,6 +29,7 @@ export function CubeBuilderPage() {
     metrics: [],
     dimensions: [],
     filters: [],
+    tags: [],
   };
 
   const handleSubmit = (values, { setSubmitting, setStatus }) => {
@@ -105,10 +106,23 @@ export function CubeBuilderPage() {
     }
   };
 
-  const updateFieldsWithNodeData = (data, setFieldValue) => {
+  const updateFieldsWithNodeData = (data, setFieldValue, setSelectTags) => {
     setFieldValue('display_name', data.display_name || '', false);
     setFieldValue('description', data.description || '', false);
     setFieldValue('mode', data.mode || 'draft', false);
+    setFieldValue(
+      'tags',
+      data.tags.map(tag => tag.name),
+    );
+    // For react-select fields, we have to explicitly set the entire
+    // field rather than just the values
+    setSelectTags(
+      <TagsField
+        defaultValue={data.tags.map(t => {
+          return { value: t.name, label: t.display_name };
+        })}
+      />,
+    );
   };
 
   const staticFieldsInEdit = () => (
@@ -144,14 +158,15 @@ export function CubeBuilderPage() {
         >
           {function Render({ isSubmitting, status, setFieldValue, props }) {
             const [node, setNode] = useState([]);
+            const [selectTags, setSelectTags] = useState(null);
 
             // Get cube
             useEffect(() => {
               const fetchData = async () => {
                 if (name) {
                   const cube = await djClient.cube(name);
-                  updateFieldsWithNodeData(cube, setFieldValue);
                   setNode(cube);
+                  updateFieldsWithNodeData(cube, setFieldValue, setSelectTags);
                 }
               };
               fetchData().catch(console.error);
@@ -187,7 +202,7 @@ export function CubeBuilderPage() {
                       />
                     </div>
                     <div className="CubeCreationInput">
-                      <label htmlFor="react-select-3-input">Metrics *</label>
+                      <label>Metrics *</label>
                       <p>Select metrics to include in the cube.</p>
                       <span
                         data-testid="select-metrics"
@@ -203,7 +218,7 @@ export function CubeBuilderPage() {
                     <br />
                     <br />
                     <div className="CubeCreationInput">
-                      <label htmlFor="react-select-3-input">Dimensions *</label>
+                      <label>Dimensions *</label>
                       <p>
                         Select dimensions to include in the cube. As metrics are
                         selected above, the list of available dimensions will be
@@ -227,7 +242,7 @@ export function CubeBuilderPage() {
                         <option value="published">Published</option>
                       </Field>
                     </div>
-                    <NodeTagsInput action={action} node={node} />
+                    {action === Action.Edit ? selectTags : <TagsField />}
                     <button
                       type="submit"
                       disabled={isSubmitting}

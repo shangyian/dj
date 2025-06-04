@@ -1,4 +1,5 @@
 """Models for dimension links"""
+
 from typing import Dict, Optional
 
 from pydantic import BaseModel
@@ -39,14 +40,14 @@ class LinkDimensionIdentifier(BaseModel):
     role: Optional[str]
 
 
-class LinkDimensionInput(BaseModel):
+class JoinLinkInput(BaseModel):
     """
-    Input for linking a dimension to a node
+    Input for creating a join link between a dimension node and node
     """
 
     dimension_node: str
     join_type: Optional[JoinType] = JoinType.LEFT
-    join_on: str
+    join_on: Optional[str]
     join_cardinality: Optional[JoinCardinality] = JoinCardinality.MANY_TO_ONE
     role: Optional[str]
 
@@ -61,7 +62,7 @@ class LinkDimensionOutput(BaseModel):
     join_sql: str
     join_cardinality: Optional[JoinCardinality]
     role: Optional[str]
-    foreign_keys: Dict[str, str]
+    foreign_keys: Dict[str, str | None]
 
-    class Config:  # pylint: disable=missing-class-docstring,too-few-public-methods
+    class Config:
         orm_mode = True

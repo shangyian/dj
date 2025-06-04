@@ -13,15 +13,31 @@ from datajunction_server.database.engine import Engine
 from datajunction_server.internal.access.authentication.http import SecureAPIRouter
 from datajunction_server.internal.engines import get_engine
 from datajunction_server.models.engine import EngineInfo
+from datajunction_server.models.dialect import DialectRegistry, DialectInfo
 from datajunction_server.utils import get_session, get_settings
 
 settings = get_settings()
 router = SecureAPIRouter(tags=["engines"])
 
 
+@router.get("/dialects", response_model=list[DialectInfo])
+async def list_dialects():
+    """
+    Returns a list of registered SQL dialects and their associated transpilation plugin class names.
+    """
+    return [
+        DialectInfo(
+            name=dialect,
+            plugin_class=plugin.__name__,
+        )
+        for dialect, plugin in DialectRegistry._registry.items()
+    ]
+
+
 @router.get("/engines/", response_model=List[EngineInfo])
 async def list_engines(
-    *, session: AsyncSession = Depends(get_session)
+    *,
+    session: AsyncSession = Depends(get_session),
 ) -> List[EngineInfo]:
     """
     List all available engines
@@ -34,7 +50,10 @@ async def list_engines(
 
 @router.get("/engines/{name}/{version}/", response_model=EngineInfo)
 async def get_an_engine(
-    name: str, version: str, *, session: AsyncSession = Depends(get_session)
+    name: str,
+    version: str,
+    *,
+    session: AsyncSession = Depends(get_session),
 ) -> EngineInfo:
     """
     Return an engine by name and version

@@ -1,11 +1,14 @@
+# pragma: no cover
 """
 Functions for making queries directly against DJ
 """
+
 from typing import Dict, List, Set, Tuple
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from datajunction_server.construction.build import build_metric_nodes, build_node
+from datajunction_server.construction.build import build_metric_nodes
+from datajunction_server.construction.build_v2 import QueryBuilder
 from datajunction_server.construction.utils import try_get_dj_node
 from datajunction_server.database.node import Node
 from datajunction_server.models.node_type import NodeType
@@ -27,7 +30,7 @@ def selects_only_metrics(select: ast.Select) -> bool:
     )
 
 
-async def resolve_metric_queries(  # pylint: disable=R0914,R0912,R0915
+async def resolve_metric_queries(
     session: AsyncSession,
     tree: ast.Query,
     ctx: ast.CompileContext,
@@ -194,7 +197,7 @@ def find_all_other(
         node.apply(lambda n: find_all_other(n, touched_nodes, node_map))
 
 
-async def resolve_all(  # pylint: disable=R0914,W0640
+async def resolve_all(
     session: AsyncSession,
     ctx: ast.CompileContext,
     tree: ast.Query,
@@ -216,7 +219,8 @@ async def resolve_all(  # pylint: disable=R0914,W0640
             dj_nodes.append(dj_node)
             cte_name = ast.Name(f"node_query_{len(tree.ctes)}")
             current_dj_node = dj_node.current
-            built = (await build_node(session, current_dj_node)).bake_ctes()
+            query_builder = await QueryBuilder.create(session, current_dj_node)
+            built = (await query_builder.build()).bake_ctes()
             built.alias = cte_name
             built.set_as(True)
             built.parenthesized = True

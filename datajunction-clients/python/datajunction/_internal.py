@@ -2,9 +2,11 @@
 
 # pylint: disable=redefined-outer-name, import-outside-toplevel, too-many-lines
 import logging
+import os
 import platform
 import warnings
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, TypedDict
+from dataclasses import asdict, dataclass
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, TypedDict, Union
 from urllib.parse import urljoin
 
 try:
@@ -18,20 +20,21 @@ except ImportError:  # pragma: no cover
         ImportWarning,
     )
 import requests
-from pydantic import BaseModel, Field
 from requests.adapters import CaseInsensitiveDict, HTTPAdapter
 
 from datajunction import models
+from datajunction._base import SerializableMixin
 from datajunction.exceptions import (
     DJClientException,
-    DJNodeAlreadyExists,
     DJTagAlreadyExists,
     DJTagDoesNotExist,
 )
 
-if TYPE_CHECKING:
-    from datajunction.nodes import Node  # pragma: no cover
-    from datajunction.tags import Tag  # pragma: no cover
+if TYPE_CHECKING:  # pragma: no cover
+    from datajunction.admin import DJAdmin
+    from datajunction.builder import DJBuilder
+    from datajunction.nodes import Node
+    from datajunction.tags import Tag
 
 DEFAULT_NAMESPACE = "default"
 _logger = logging.getLogger(__name__)
@@ -106,19 +109,10 @@ class RequestsSessionWithEndpoint(requests.Session):  # pragma: no cover
             response.raise_for_status()
             return response
         except requests.exceptions.RequestException as exc:
-            error_message = None
-            if not exc.response:
-                error_message = str(exc)
-                print(error_message)
-            if (
-                exc.response
-                and exc.response.headers.get("Content-Type") == "application/json"
-            ):
-                error_message = exc.response.json().get("message")
-            if not error_message:
-                error_message = (
-                    f"Request failed with status code {exc.response.status_code}"
-                )
+            if exc.response.headers.get("Content-Type") == "application/json":
+                error_message = exc.response.json()
+            else:
+                error_message = f"Request failed {exc.response.status_code}: {str(exc)}"
             raise DJClientException(error_message) from exc
 
     def prepare_request(self, request, *args, **kwargs):
@@ -187,17 +181,20 @@ class DJClient:
 
     def basic_login(
         self,
-        username: str,
-        password: str,
+        username: Optional[str] = None,
+        password: Optional[str] = None,
     ):
         """
         Login with basic authentication.
         """
         response = self._session.post(
             "/basic/login/",
-            data={"username": username, "password": password},
+            data={
+                "username": username or os.getenv("DJ_USER"),
+                "password": password or os.getenv("DJ_PWD"),
+            },
         )
-        return response.json()
+        return response
 
     @staticmethod
     def _primary_key_from_columns(columns) -> List[str]:
@@ -264,14 +261,18 @@ class DJClient:
         )
         return response.json()
 
-    def _verify_node_exists(self, node_name: str, type_: str) -> Dict[str, Any]:
+    def _verify_node_exists(
+        self,
+        node_name: str,
+        type_: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """
         Retrieves a node and verifies that it exists and has the expected node type.
         """
         node = self._get_node(node_name)
         if "name" not in node:
             raise DJClientException(f"No node with name {node_name} exists!")
-        if "name" in node and node["type"] != type_:
+        if type_ and "name" in node and node["type"] != type_:
             raise DJClientException(
                 f"A node with name {node_name} exists, but it is not a {type_} node!",
             )
@@ -279,9 +280,9 @@ class DJClient:
 
     def _validate_node(self, node: "Node"):
         """
-        Check if a locally defined node is valid
+        Check if a locally defined node is valid.
         """
-        node_copy = node.dict().copy()
+        node_copy = node.to_dict()
         node_copy["mode"] = models.NodeMode.PUBLISHED
         response = self._session.post(
             "/nodes/validate/",
@@ -299,69 +300,61 @@ class DJClient:
         Helper function to create a node.
         Raises an error if node already exists and is active.
         """
-        existing_node = self._get_node(node_name=node.name)
-        if "name" in existing_node:
-            raise DJNodeAlreadyExists(node_name=node.name)
         node.mode = mode
         response = self._session.post(
             f"/nodes/{node.type}/",
             timeout=self._timeout,
-            json=node.dict(exclude_none=True, exclude={"type"}),
+            json=node.to_dict(exclude=["type"]),
         )
         return response
 
-    def _update_node(self, node_name: str, update_input: models.UpdateNode):
+    def _update_node(
+        self,
+        node_name: str,
+        update_input: models.UpdateNode,
+    ) -> requests.Response:
         """
         Call node update API with attributes to update.
         """
-        return self._session.patch(f"/nodes/{node_name}/", json=update_input.dict())
+        return self._session.patch(f"/nodes/{node_name}/", json=asdict(update_input))
 
     def _publish_node(self, node_name: str, update_input: models.UpdateNode):
         """
         Retrieves a node.
         """
-        response = self._session.patch(f"/nodes/{node_name}/", json=update_input.dict())
+        response = self._session.patch(
+            f"/nodes/{node_name}/",
+            json=asdict(update_input),
+        )
         return response.json()
 
     def _get_node(self, node_name: str):
         """
         Retrieves a node.
         """
-        try:
-            response = self._session.get(f"/nodes/{node_name}/")
-            return response.json()
-        except DJClientException as exc:  # pragma: no cover
-            return exc.__dict__
+        response = self._session.get(f"/nodes/{node_name}/")
+        return response.json()
 
     def _get_node_upstreams(self, node_name: str):
         """
         Retrieves a node's upstreams
         """
-        try:
-            response = self._session.get(f"/nodes/{node_name}/upstream")
-            return response.json()
-        except DJClientException as exc:  # pragma: no cover
-            return exc.__dict__
+        response = self._session.get(f"/nodes/{node_name}/upstream")
+        return response.json()
 
     def _get_node_downstreams(self, node_name: str):
         """
         Retrieves a node's downstreams
         """
-        try:
-            response = self._session.get(f"/nodes/{node_name}/downstream")
-            return response.json()
-        except DJClientException as exc:  # pragma: no cover
-            return exc.__dict__
+        response = self._session.get(f"/nodes/{node_name}/downstream")
+        return response.json()
 
     def _get_node_dimensions(self, node_name: str):
         """
         Retrieves a node's dimensions
         """
-        try:
-            response = self._session.get(f"/nodes/{node_name}/dimensions")
-            return response.json()
-        except DJClientException as exc:  # pragma: no cover
-            return exc.__dict__
+        response = self._session.get(f"/nodes/{node_name}/dimensions")
+        return response.json()
 
     def _get_cube(self, node_name: str):
         """
@@ -399,6 +392,29 @@ class DJClient:
             params["dimension_column"] = dimension_column
         response = self._session.post(
             f"/nodes/{node_name}/columns/{column_name}/",
+            timeout=self._timeout,
+            params=params,
+        )
+        return response.json()
+
+    def _add_reference_dimension_link(  # pylint: disable=too-many-arguments
+        self,
+        node_name: str,
+        node_column: str,
+        dimension_node: str,
+        dimension_column: str,
+        role: Optional[str] = None,
+    ):
+        """
+        Helper function to link a dimension to the node.
+        """
+        params = {
+            "dimension_node": dimension_node,
+            "dimension_column": dimension_column,
+            **({"role": role} if role else {}),
+        }
+        response = self._session.post(
+            f"/nodes/{node_name}/columns/{node_column}/link",
             timeout=self._timeout,
             params=params,
         )
@@ -468,6 +484,20 @@ class DJClient:
         )
         return response.json()
 
+    def _remove_reference_dimension_link(
+        self,
+        node_name: str,
+        node_column: str,
+    ):
+        """
+        Helper function to remove a reference dimension link from a node column.
+        """
+        response = self._session.delete(
+            f"/nodes/{node_name}/columns/{node_column}/link",
+            timeout=self._timeout,
+        )
+        return response.json()
+
     def _upsert_materialization(
         self,
         node_name: str,
@@ -478,7 +508,7 @@ class DJClient:
         """
         response = self._session.post(
             f"/nodes/{node_name}/materialization/",
-            json=config.dict(),
+            json=config.to_dict(),
         )
         return response.json()
 
@@ -508,7 +538,7 @@ class DJClient:
         """
         response = self._session.post(
             f"/data/{node_name}/availability/",
-            json=availability.dict(),
+            json=asdict(availability),
         )
         return response.json()
 
@@ -523,7 +553,37 @@ class DJClient:
         """
         response = self._session.post(
             f"/nodes/{node_name}/columns/{column_name}/attributes/",
-            json=[attribute.dict() for attribute in attributes],
+            json=[asdict(attribute) for attribute in attributes],
+        )
+        return response.json()
+
+    def _set_column_display_name(
+        self,
+        node_name,
+        column_name,
+        display_name: str,
+    ):
+        """
+        Sets display name for the column on the node
+        """
+        response = self._session.patch(
+            f"/nodes/{node_name}/columns/{column_name}/",
+            params={"display_name": display_name},
+        )
+        return response.json()
+
+    def _set_column_description(
+        self,
+        node_name,
+        column_name,
+        description: str,
+    ):
+        """
+        Sets description for the column on the node
+        """
+        response = self._session.patch(
+            f"/nodes/{node_name}/columns/{column_name}/description/",
+            params={"description": description},
         )
         return response.json()
 
@@ -557,14 +617,11 @@ class DJClient:
     #
     # Methods for Tags
     #
-    def _update_tag(self, tag_name: str, update_input: models.UpdateNode):
+    def _update_tag(self, tag_name: str, update_input: models.UpdateTag):
         """
         Call tag update API with attributes to update.
         """
-        return self._session.patch(
-            f"/tags/{tag_name}/",
-            json=update_input.dict(exclude_none=True),
-        )
+        return self._session.patch(f"/tags/{tag_name}/", json=asdict(update_input))
 
     def _update_node_tags(self, node_name: str, tags: Optional[List[str]]):
         """
@@ -599,7 +656,7 @@ class DJClient:
         response = self._session.post(
             "/tags/",
             timeout=self._timeout,
-            json=tag.dict(exclude_none=True),
+            json=tag.to_dict(),
         )
         return response
 
@@ -620,18 +677,11 @@ class DJClient:
         return [n["name"] for n in response.json()]
 
 
-class ClientEntity(BaseModel):
+@dataclass
+class ClientEntity(SerializableMixin):
     """
     Any entity that uses the DJ client.
     """
 
-    dj_client: DJClient = Field(exclude=True)
-
-    class Config:  # pylint: disable=too-few-public-methods
-        """
-        Allow arbitrary types to support DJClient but exclude
-        it from the output.
-        """
-
-        arbitrary_types_allowed = True
-        exclude = {"dj_client"}
+    dj_client: Union[DJClient, "DJBuilder", "DJAdmin"]
+    exclude = ["dj_client"]

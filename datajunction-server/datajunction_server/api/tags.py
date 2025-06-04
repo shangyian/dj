@@ -2,23 +2,29 @@
 Tag related APIs.
 """
 
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 from fastapi import Depends
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
 
+from datajunction_server.api.helpers import get_save_history
 from datajunction_server.database import Node
-from datajunction_server.database.history import ActivityType, EntityType, History
+from datajunction_server.database.history import History
 from datajunction_server.database.tag import Tag
 from datajunction_server.database.user import User
 from datajunction_server.errors import DJAlreadyExistsException, DJDoesNotExistException
 from datajunction_server.internal.access.authentication.http import SecureAPIRouter
+from datajunction_server.internal.history import ActivityType, EntityType
 from datajunction_server.models.node import NodeMinimumDetail
 from datajunction_server.models.node_type import NodeType
 from datajunction_server.models.tag import CreateTag, TagOutput, UpdateTag
-from datajunction_server.utils import get_current_user, get_session, get_settings
+from datajunction_server.utils import (
+    get_and_update_current_user,
+    get_session,
+    get_settings,
+)
 
 settings = get_settings()
 router = SecureAPIRouter(tags=["tags"])
@@ -31,7 +37,7 @@ async def get_tags_by_name(
     """
     Retrieves a list of tags by name
     """
-    statement = select(Tag).where(Tag.name.in_(names))  # type: ignore  # pylint: disable=no-member
+    statement = select(Tag).where(Tag.name.in_(names))  # type: ignore
     tags = (await session.execute(statement)).scalars().all()
     difference = set(names) - {tag.name for tag in tags}
     if difference:
@@ -66,7 +72,9 @@ async def get_tag_by_name(
 
 @router.get("/tags/", response_model=List[TagOutput])
 async def list_tags(
-    tag_type: Optional[str] = None, *, session: AsyncSession = Depends(get_session)
+    tag_type: Optional[str] = None,
+    *,
+    session: AsyncSession = Depends(get_session),
 ) -> List[TagOutput]:
     """
     List all available tags.
@@ -80,7 +88,9 @@ async def list_tags(
 
 @router.get("/tags/{name}/", response_model=TagOutput)
 async def get_a_tag(
-    name: str, *, session: AsyncSession = Depends(get_session)
+    name: str,
+    *,
+    session: AsyncSession = Depends(get_session),
 ) -> TagOutput:
     """
     Return a tag by name.
@@ -93,7 +103,8 @@ async def get_a_tag(
 async def create_a_tag(
     data: CreateTag,
     session: AsyncSession = Depends(get_session),
-    current_user: Optional[User] = Depends(get_current_user),
+    current_user: User = Depends(get_and_update_current_user),
+    save_history: Callable = Depends(get_save_history),
 ) -> TagOutput:
     """
     Create a tag.
@@ -110,15 +121,17 @@ async def create_a_tag(
         description=data.description,
         display_name=data.display_name,
         tag_metadata=data.tag_metadata,
+        created_by_id=current_user.id,
     )
     session.add(tag)
-    session.add(
-        History(
+    await save_history(
+        event=History(
             entity_type=EntityType.TAG,
             entity_name=tag.name,
             activity_type=ActivityType.CREATE,
-            user=current_user.username if current_user else None,
+            user=current_user.username,
         ),
+        session=session,
     )
     await session.commit()
     await session.refresh(tag)
@@ -130,7 +143,8 @@ async def update_a_tag(
     name: str,
     data: UpdateTag,
     session: AsyncSession = Depends(get_session),
-    current_user: Optional[User] = Depends(get_current_user),
+    current_user: User = Depends(get_and_update_current_user),
+    save_history: Callable = Depends(get_save_history),
 ) -> TagOutput:
     """
     Update a tag.
@@ -149,14 +163,15 @@ async def update_a_tag(
     if data.display_name:
         tag.display_name = data.display_name
     session.add(tag)
-    session.add(
-        History(
+    await save_history(
+        event=History(
             entity_type=EntityType.TAG,
             entity_name=tag.name,
             activity_type=ActivityType.UPDATE,
             details=data.dict(),
-            user=current_user.username if current_user else None,
+            user=current_user.username,
         ),
+        session=session,
     )
     await session.commit()
     await session.refresh(tag)

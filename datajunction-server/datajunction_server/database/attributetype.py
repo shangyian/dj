@@ -1,4 +1,5 @@
 """Attribute type database schema."""
+
 from typing import TYPE_CHECKING, List, Optional
 
 import sqlalchemy as sa
@@ -13,7 +14,7 @@ if TYPE_CHECKING:
     from datajunction_server.database.column import Column
 
 
-class AttributeType(Base):  # pylint: disable=too-few-public-methods
+class AttributeType(Base):
     """
     Available attribute types for column metadata.
     """
@@ -80,9 +81,7 @@ class AttributeType(Base):  # pylint: disable=too-few-public-methods
         return attribute_type
 
 
-class ColumnAttribute(
-    Base,
-):  # pylint: disable=too-few-public-methods,unsubscriptable-object
+class ColumnAttribute(Base):
     """
     Column attributes.
     """

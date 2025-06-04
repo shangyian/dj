@@ -9,6 +9,9 @@ omit =
     */datajunction_server/sql/parsing/ast.py
     */datajunction_server/internal/access/authentication/google.py
     */datajunction_server/api/access/authentication/google.py
+    */datajunction_server/api/djsql.py
+    */datajunction_server/construction/dj_query.py
+    */datajunction_server/alembic/*
 
 [paths]
 source =
@@ -16,6 +19,7 @@ source =
     */site-packages/
 
 [report]
+show_missing = True
 # Regexes for lines to exclude from consideration
 exclude_lines =
     # Have to re-enable the standard pragma

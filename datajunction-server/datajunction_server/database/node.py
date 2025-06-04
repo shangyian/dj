@@ -1,4 +1,7 @@
 """Node database schema."""
+
+import pickle
+import zlib
 from datetime import datetime, timezone
 from functools import partial
 from http import HTTPStatus
@@ -6,12 +9,17 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
 import sqlalchemy as sa
 from pydantic import Extra
+from sqlalchemy import JSON
+from sqlalchemy import Column as SqlalchemyColumn
 from sqlalchemy import (
-    JSON,
     DateTime,
     Enum,
     ForeignKey,
+    Index,
+    Integer,
+    LargeBinary,
     String,
+    TypeDecorator,
     UniqueConstraint,
     select,
 )
@@ -19,21 +27,28 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy.orm import Mapped, joinedload, mapped_column, relationship, selectinload
 from sqlalchemy.sql.base import ExecutableOption
-from sqlalchemy.sql.operators import is_
+from sqlalchemy.sql.operators import is_, or_
 
 from datajunction_server.database.attributetype import ColumnAttribute
 from datajunction_server.database.availabilitystate import AvailabilityState
 from datajunction_server.database.base import Base
 from datajunction_server.database.catalog import Catalog
 from datajunction_server.database.column import Column
+from datajunction_server.database.history import History
 from datajunction_server.database.materialization import Materialization
 from datajunction_server.database.metricmetadata import MetricMetadata
 from datajunction_server.database.tag import Tag
-from datajunction_server.errors import DJInvalidInputException, DJNodeNotFound
+from datajunction_server.database.user import User
+from datajunction_server.errors import (
+    DJInvalidInputException,
+    DJInvalidMetricQueryException,
+    DJNodeNotFound,
+)
 from datajunction_server.models.base import labelize
 from datajunction_server.models.node import (
     DEFAULT_DRAFT_VERSION,
     BuildCriteria,
+    NodeCursor,
     NodeMode,
     NodeStatus,
 )
@@ -41,13 +56,13 @@ from datajunction_server.models.node_type import NodeType
 from datajunction_server.models.partition import PartitionType
 from datajunction_server.naming import amenable_name
 from datajunction_server.typing import UTCDatetime
-from datajunction_server.utils import SEPARATOR
+from datajunction_server.utils import SEPARATOR, execute_with_retry
 
 if TYPE_CHECKING:
     from datajunction_server.database.dimensionlink import DimensionLink
 
 
-class NodeRelationship(Base):  # pylint: disable=too-few-public-methods
+class NodeRelationship(Base):
     """
     Join table for self-referential many-to-many relationships between nodes.
     """
@@ -69,7 +84,7 @@ class NodeRelationship(Base):  # pylint: disable=too-few-public-methods
     )
 
 
-class CubeRelationship(Base):  # pylint: disable=too-few-public-methods
+class CubeRelationship(Base):
     """
     Join table for many-to-many relationships between cube nodes and metric/dimension nodes.
     """
@@ -87,7 +102,7 @@ class CubeRelationship(Base):  # pylint: disable=too-few-public-methods
     )
 
 
-class BoundDimensionsRelationship(Base):  # pylint: disable=too-few-public-methods
+class BoundDimensionsRelationship(Base):
     """
     Join table for many-to-many relationships between metric nodes
     and parent nodes for dimensions that are required.
@@ -112,7 +127,7 @@ class BoundDimensionsRelationship(Base):  # pylint: disable=too-few-public-metho
     )
 
 
-class MissingParent(Base):  # pylint: disable=too-few-public-methods
+class MissingParent(Base):
     """
     A missing parent node
     """
@@ -130,7 +145,7 @@ class MissingParent(Base):  # pylint: disable=too-few-public-methods
     )
 
 
-class NodeMissingParents(Base):  # pylint: disable=too-few-public-methods
+class NodeMissingParents(Base):
     """
     Join table for missing parents
     """
@@ -153,7 +168,7 @@ class NodeMissingParents(Base):  # pylint: disable=too-few-public-methods
     )
 
 
-class Node(Base):  # pylint: disable=too-few-public-methods
+class Node(Base):
     """
     Node that acts as an umbrella for all node revisions
     """
@@ -161,6 +176,13 @@ class Node(Base):  # pylint: disable=too-few-public-methods
     __tablename__ = "node"
     __table_args__ = (
         UniqueConstraint("name", "namespace", name="unique_node_namespace_name"),
+        Index("cursor_index", "created_at", "id", postgresql_using="btree"),
+        Index(
+            "namespace_index",
+            "namespace",
+            postgresql_using="btree",
+            postgresql_ops={"identifier": "varchar_pattern_ops"},
+        ),
     )
 
     id: Mapped[int] = mapped_column(
@@ -170,6 +192,18 @@ class Node(Base):  # pylint: disable=too-few-public-methods
     name: Mapped[str] = mapped_column(String, unique=True)
     type: Mapped[NodeType] = mapped_column(Enum(NodeType))
     display_name: Mapped[Optional[str]]
+    created_by_id: int = SqlalchemyColumn(
+        Integer,
+        ForeignKey("users.id"),
+        nullable=False,
+    )
+
+    created_by: Mapped[User] = relationship(
+        "User",
+        back_populates="created_nodes",
+        foreign_keys=[created_by_id],
+        lazy="selectin",
+    )
     namespace: Mapped[str] = mapped_column(String, default="default")
     current_version: Mapped[str] = mapped_column(
         String,
@@ -200,9 +234,6 @@ class Node(Base):  # pylint: disable=too-few-public-methods
         ),
         viewonly=True,
         uselist=False,
-        # lazy="selectin",
-        # selectin for one-to-many
-        # joined for many-to-many or many-to-one
     )
 
     children: Mapped[List["NodeRevision"]] = relationship(
@@ -218,13 +249,27 @@ class Node(Base):  # pylint: disable=too-few-public-methods
         secondary="tagnoderelationship",
         primaryjoin="TagNodeRelationship.node_id==Node.id",
         secondaryjoin="TagNodeRelationship.tag_id==Tag.id",
-        # lazy="selectin",
     )
 
     missing_table: Mapped[bool] = mapped_column(sa.Boolean, default=False)
 
+    history: Mapped[List[History]] = relationship(
+        primaryjoin="History.entity_name==Node.name",
+        order_by="History.created_at",
+        foreign_keys="History.entity_name",
+    )
+
     def __hash__(self) -> int:
         return hash(self.id)
+
+    @hybrid_property
+    def edited_by(self) -> List[str]:
+        """
+        Editors of the node
+        """
+        return list(  # pragma: no cover
+            {entry.user for entry in self.history if entry.user},
+        )
 
     @classmethod
     async def get_by_name(
@@ -245,6 +290,7 @@ class Node(Base):  # pylint: disable=too-few-public-methods
                 *NodeRevision.default_load_options(),
             ),
             selectinload(Node.tags),
+            selectinload(Node.created_by),
         ]
         statement = statement.options(*options)
         if not include_inactive:
@@ -330,17 +376,19 @@ class Node(Base):  # pylint: disable=too-few-public-methods
         """
         Get a node by id
         """
-        statement = select(Node).where(Node.id == node_id).options(*options)
-        result = await session.execute(statement)
-        node = result.unique().scalar_one_or_none()
-        return node
+        statement = (
+            select(Node).where(Node.id == node_id).options(*options)
+        )  # pragma: no cover
+        result = await session.execute(statement)  # pragma: no cover
+        node = result.unique().scalar_one_or_none()  # pragma: no cover
+        return node  # pragma: no cover
 
     @classmethod
     async def find(
         cls,
         session: AsyncSession,
-        prefix: str,
-        node_type: NodeType,
+        prefix: Optional[str] = None,
+        node_type: Optional[NodeType] = None,
         *options: ExecutableOption,
     ) -> List["Node"]:
         """
@@ -349,23 +397,164 @@ class Node(Base):  # pylint: disable=too-few-public-methods
         statement = select(Node).where(is_(Node.deactivated_at, None))
         if prefix:
             statement = statement.where(
-                Node.name.like(f"{prefix}%"),  # type: ignore  # pylint: disable=no-member
+                Node.name.like(f"{prefix}%"),  # type: ignore
             )
         if node_type:
             statement = statement.where(Node.type == node_type)
         result = await session.execute(statement.options(*options))
         return result.unique().scalars().all()
 
+    @classmethod
+    async def find_by(
+        cls,
+        session: AsyncSession,
+        names: Optional[List[str]] = None,
+        fragment: Optional[str] = None,
+        node_types: Optional[List[NodeType]] = None,
+        tags: Optional[List[str]] = None,
+        edited_by: Optional[str] = None,
+        namespace: Optional[str] = None,
+        limit: Optional[int] = 100,
+        before: Optional[str] = None,
+        after: Optional[str] = None,
+        options: list[ExecutableOption] = None,
+    ) -> List["Node"]:
+        """
+        Finds a list of nodes by prefix
+        """
+        nodes_with_tags = []
+        if tags:
+            statement = (
+                select(Tag).where(Tag.name.in_(tags)).options(joinedload(Tag.nodes))
+            )
+            nodes_with_tags = [
+                node.id
+                for tag in (await session.execute(statement)).unique().scalars().all()
+                for node in tag.nodes
+            ]
+            if not nodes_with_tags:  # pragma: no cover
+                return []
+
+        statement = select(Node).where(is_(Node.deactivated_at, None))
+        if namespace:
+            statement = statement.where(
+                (Node.namespace.like(f"{namespace}.%")) | (Node.namespace == namespace),
+            )
+        if nodes_with_tags:
+            statement = statement.where(
+                Node.id.in_(nodes_with_tags),
+            )  # pragma: no cover
+        if names:
+            statement = statement.where(
+                Node.name.in_(names),  # type: ignore
+            )
+        if fragment:
+            statement = statement.join(NodeRevision, Node.current).where(
+                or_(
+                    Node.name.like(f"%{fragment}%"),  # type: ignore
+                    NodeRevision.display_name.ilike(f"%{fragment}%"),  # type: ignore
+                ),
+            )
+
+        if node_types:
+            statement = statement.where(Node.type.in_(node_types))
+        if edited_by:
+            edited_node_subquery = (
+                select(History.entity_name)
+                .where((History.user == edited_by))
+                .distinct()
+                .subquery()
+            )
+
+            statement = statement.join(
+                edited_node_subquery,
+                onclause=(edited_node_subquery.c.entity_name == Node.name),
+            ).distinct()
+
+        if after:
+            cursor = NodeCursor.decode(after)
+            statement = statement.where(
+                (Node.created_at, Node.id) <= (cursor.created_at, cursor.id),
+            ).order_by(Node.created_at.desc(), Node.id.desc())
+        elif before:
+            cursor = NodeCursor.decode(before)
+            statement = statement.where(
+                (Node.created_at, Node.id) >= (cursor.created_at, cursor.id),
+            )
+            statement = statement.order_by(Node.created_at.asc(), Node.id.asc())
+        else:
+            statement = statement.order_by(Node.created_at.desc(), Node.id.desc())
+
+        limit = limit if limit and limit > 0 else 100
+        statement = statement.limit(limit)
+        result = await execute_with_retry(session, statement.options(*(options or [])))
+        nodes = result.unique().scalars().all()
+
+        # Reverse for backward pagination
+        if before:
+            nodes.reverse()
+        return nodes
+
+
+class CompressedPickleType(TypeDecorator):
+    """
+    A SQLAlchemy type for storing zlib-compressed pickled objects.
+    """
+
+    impl = LargeBinary
+    python_type = object
+
+    def __init__(self, *args, protocol=pickle.HIGHEST_PROTOCOL, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.protocol = protocol
+
+    def process_bind_param(self, value, dialect):
+        """
+        Serialize and compress the Python object before storing it in the database.
+        """
+        if value is None:
+            return None
+        return zlib.compress(  # pragma: no cover
+            pickle.dumps(value, protocol=self.protocol),
+        )
+
+    def process_result_value(self, value, dialect):
+        """
+        Decompress and deserialize the stored value into a Python object.
+        """
+        if value is None:
+            return None
+        try:  # pragma: no cover
+            return pickle.loads(zlib.decompress(value))  # pragma: no cover
+        except TypeError:  # pragma: no cover
+            return None
+
+    def process_literal_param(self, value, dialect):
+        """Convert the value to a literal for SQL statements."""
+        if value is not None:  # pragma: no cover
+            # Convert the value to a compressed and pickled representation
+            compressed_value = zlib.compress(pickle.dumps(value))
+            return compressed_value.hex()  # Convert binary to a safe literal format
+        return None  # pragma: no cover
+
 
 class NodeRevision(
     Base,
-):  # pylint: disable=too-few-public-methods,too-many-instance-attributes
+):
     """
     A node revision.
     """
 
     __tablename__ = "noderevision"
-    __table_args__ = (UniqueConstraint("version", "node_id"),)
+    __table_args__ = (
+        UniqueConstraint("version", "node_id"),
+        Index(
+            "ix_noderevision_display_name",
+            "display_name",
+            postgresql_using="gin",
+            postgresql_ops={"display_name": "gin_trgm_ops"},
+        ),
+    )
 
     id: Mapped[int] = mapped_column(
         sa.BigInteger().with_variant(sa.Integer, "sqlite"),
@@ -380,10 +569,21 @@ class NodeRevision(
     )
     type: Mapped[NodeType] = mapped_column(Enum(NodeType))
     description: Mapped[str] = mapped_column(String, default="")
+    created_by_id: int = SqlalchemyColumn(
+        Integer,
+        ForeignKey("users.id"),
+        nullable=False,
+    )
+    created_by: Mapped[User] = relationship(
+        "User",
+        back_populates="created_node_revisions",
+        foreign_keys=[created_by_id],
+        lazy="selectin",
+    )
     query: Mapped[Optional[str]] = mapped_column(String)
     mode: Mapped[NodeMode] = mapped_column(
         Enum(NodeMode),
-        default=NodeMode.PUBLISHED,  # pylint: disable=no-member
+        default=NodeMode.PUBLISHED,
     )
 
     version: Mapped[Optional[str]] = mapped_column(
@@ -473,6 +673,7 @@ class NodeRevision(
     dimension_links: Mapped[List["DimensionLink"]] = relationship(
         back_populates="node_revision",
         cascade="all, delete",
+        order_by="DimensionLink.id",
     )
 
     # The availability of materialized data needs to be stored on the NodeRevision
@@ -498,6 +699,16 @@ class NodeRevision(
         default=[],
     )
 
+    query_ast: Mapped[CompressedPickleType | None] = mapped_column(
+        CompressedPickleType,
+        default=None,
+    )
+
+    custom_metadata: Mapped[Optional[Dict]] = mapped_column(
+        JSON,
+        default={},
+    )
+
     def __hash__(self) -> int:
         return hash(self.id)
 
@@ -506,7 +717,7 @@ class NodeRevision(
         Returns the primary key columns of this node.
         """
         primary_key_columns = []
-        for col in self.columns:  # pylint: disable=not-an-iterable
+        for col in self.columns:
             if col.has_primary_key_attribute():
                 primary_key_columns.append(col)
         return primary_key_columns
@@ -516,7 +727,6 @@ class NodeRevision(
         """
         Default options when loading a node
         """
-        # pylint: disable=import-outside-toplevel
         from datajunction_server.database.dimensionlink import DimensionLink
 
         return (
@@ -536,8 +746,10 @@ class NodeRevision(
                 joinedload(DimensionLink.dimension).options(
                     selectinload(Node.current),
                 ),
+                joinedload(DimensionLink.node_revision),
             ),
             selectinload(NodeRevision.required_dimensions),
+            selectinload(NodeRevision.availability),
         )
 
     @staticmethod
@@ -546,12 +758,8 @@ class NodeRevision(
         Return a metric query with the metric aliases reassigned to
         have the same name as the node, if they aren't already matching.
         """
-        from datajunction_server.sql.parsing import (  # pylint: disable=import-outside-toplevel
-            ast,
-        )
-        from datajunction_server.sql.parsing.backends.antlr4 import (  # pylint: disable=import-outside-toplevel
-            parse,
-        )
+        from datajunction_server.sql.parsing import ast
+        from datajunction_server.sql.parsing.backends.antlr4 import parse
 
         tree = parse(query)
         projection_0 = tree.select.projection[0]
@@ -567,9 +775,7 @@ class NodeRevision(
         The Node SQL query should have a single expression in its
         projections and it should be an aggregation function.
         """
-        from datajunction_server.sql.parsing.backends.antlr4 import (  # pylint: disable=import-outside-toplevel
-            parse,
-        )
+        from datajunction_server.sql.parsing.backends.antlr4 import parse
 
         # must have a single expression
         tree = parse(self.query)
@@ -582,26 +788,36 @@ class NodeRevision(
         projection_0 = tree.select.projection[0]
 
         # must have an aggregation
-        if (
-            not hasattr(projection_0, "is_aggregation")
-            or not projection_0.is_aggregation()  # type: ignore
-        ):
-            raise DJInvalidInputException(
-                http_status_code=HTTPStatus.BAD_REQUEST,
-                message=f"Metric {self.name} has an invalid query, "
-                "should have an aggregate expression",
+        if not projection_0.is_aggregation():
+            raise DJInvalidMetricQueryException(
+                f"Metric {self.name} has an invalid query, should have an aggregate expression",
+            )
+
+        if tree.select.where:
+            raise DJInvalidMetricQueryException(
+                "Metric cannot have a WHERE clause. Please use IF(<clause>, ...) instead",
+            )
+
+        clauses = [
+            "GROUP BY" if tree.select.group_by else None,
+            "HAVING" if tree.select.having else None,
+            "LATERAL VIEW" if tree.select.lateral_views else None,
+            "UNION or INTERSECT" if tree.select.set_op else None,
+            "LIMIT" if tree.select.limit else None,
+            "ORDER BY" if tree.select.organization.order else None,
+            "SORT BY" if tree.select.organization.sort else None,
+        ]
+        invalid_clauses = [clause for clause in clauses if clause is not None]
+        if invalid_clauses:
+            raise DJInvalidMetricQueryException(
+                "Metric has an invalid query. The following are not allowed: "
+                + ", ".join(invalid_clauses),
             )
 
     def extra_validation(self) -> None:
         """
         Extra validation for node data.
         """
-        if self.type in (NodeType.SOURCE,):
-            if self.query:
-                raise DJInvalidInputException(
-                    f"Node {self.name} of type {self.type} should not have a query",
-                )
-
         if self.type in {NodeType.TRANSFORM, NodeType.METRIC, NodeType.DIMENSION}:
             if not self.query:
                 raise DJInvalidInputException(
@@ -628,13 +844,13 @@ class NodeRevision(
         Copy dimension links and attributes from another node revision if the column names match
         """
         old_columns_mapping = {col.name: col for col in old_revision.columns}
-        for col in self.columns:  # pylint: disable=not-an-iterable
+        for col in self.columns:
             if col.name in old_columns_mapping:
                 col.dimension_id = old_columns_mapping[col.name].dimension_id
                 col.attributes = old_columns_mapping[col.name].attributes or []
         return self
 
-    class Config:  # pylint: disable=missing-class-docstring,too-few-public-methods
+    class Config:
         extra = Extra.allow
 
     def has_available_materialization(self, build_criteria: BuildCriteria) -> bool:
@@ -643,28 +859,32 @@ class NodeRevision(
         """
         return (
             self.availability is not None  # pragma: no cover
-            and self.availability.is_available(  # pylint: disable=no-member
+            and self.availability.is_available(
                 criteria=build_criteria,
             )
         )
+
+    def ordering(self) -> Dict[str, int]:
+        """
+        Column ordering
+        """
+        return {
+            col.name.replace("_DOT_", SEPARATOR): (col.order or idx)
+            for idx, col in enumerate(self.columns)
+        }
 
     def cube_elements_with_nodes(self) -> List[Tuple[Column, Optional["NodeRevision"]]]:
         """
         Cube elements along with their nodes
         """
-        return [
-            (element, element.node_revision())
-            for element in self.cube_elements  # pylint: disable=not-an-iterable
-        ]
+        return [(element, element.node_revision()) for element in self.cube_elements]
 
     def cube_metrics(self) -> List[Node]:
         """
         Cube node's metrics
         """
         if self.type != NodeType.CUBE:
-            raise DJInvalidInputException(  # pragma: no cover
-                message="Cannot retrieve metrics for a non-cube node!",
-            )
+            return []  # pragma: no cover
         ordering = {
             col.name.replace("_DOT_", SEPARATOR): (col.order or idx)
             for idx, col in enumerate(self.columns)
@@ -685,9 +905,7 @@ class NodeRevision(
         Cube node's dimension attributes
         """
         if self.type != NodeType.CUBE:
-            raise DJInvalidInputException(  # pragma: no cover
-                "Cannot retrieve dimensions for a non-cube node!",
-            )
+            return []  # pragma: no cover
         dimension_to_roles_mapping = {
             col.name: col.dimension_column for col in self.columns
         }
@@ -727,7 +945,7 @@ class NodeRevision(
         """
         return [
             col
-            for col in self.columns  # pylint: disable=not-an-iterable
+            for col in self.columns
             if col.partition and col.partition.type_ == PartitionType.TEMPORAL
         ]
 
@@ -737,9 +955,20 @@ class NodeRevision(
         """
         return [
             col
-            for col in self.columns  # pylint: disable=not-an-iterable
+            for col in self.columns
             if col.partition and col.partition.type_ == PartitionType.CATEGORICAL
         ]
+
+    def dimensions_to_columns_map(self):
+        """
+        A mapping between each of the dimension attributes linked to this node to the columns
+        that they're linked to.
+        """
+        return {  # pragma: no cover
+            left.identifier(): right
+            for link in self.dimension_links
+            for left, right in link.foreign_key_mapping().items()
+        }
 
     def __deepcopy__(self, memo):
         """
@@ -750,18 +979,18 @@ class NodeRevision(
         return None
 
 
-class NodeColumns(Base):  # pylint: disable=too-few-public-methods
+class NodeColumns(Base):
     """
     Join table for node columns.
     """
 
     __tablename__ = "nodecolumns"
 
-    node_id: Mapped[int] = mapped_column(  # pylint: disable=unsubscriptable-object
+    node_id: Mapped[int] = mapped_column(
         ForeignKey("noderevision.id", name="fk_nodecolumns_node_id_noderevision"),
         primary_key=True,
     )
-    column_id: Mapped[int] = mapped_column(  # pylint: disable=unsubscriptable-object
+    column_id: Mapped[int] = mapped_column(
         ForeignKey("column.id", name="fk_nodecolumns_column_id_column"),
         primary_key=True,
     )

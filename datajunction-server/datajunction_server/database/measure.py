@@ -1,4 +1,5 @@
 """Measure database schema."""
+
 from typing import List, Optional
 
 from sqlalchemy import BigInteger, Enum, Integer, String
@@ -10,7 +11,7 @@ from datajunction_server.models.base import labelize
 from datajunction_server.models.measure import AggregationRule
 
 
-class Measure(Base):  # type: ignore  # pylint: disable=too-few-public-methods
+class Measure(Base):  # type: ignore
     """
     Measure class.
 

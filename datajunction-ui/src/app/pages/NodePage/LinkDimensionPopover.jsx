@@ -1,14 +1,15 @@
 import { useContext, useEffect, useRef, useState } from 'react';
 import * as React from 'react';
 import DJClientContext from '../../providers/djclient';
-import { Form, Formik } from 'formik';
+import { Field, Form, Formik } from 'formik';
 import { FormikSelect } from '../AddEditNodePage/FormikSelect';
 import EditIcon from '../../icons/EditIcon';
 import { displayMessageAfterSubmit } from '../../../utils/form';
+import LoadingIcon from '../../icons/LoadingIcon';
 
 export default function LinkDimensionPopover({
   column,
-  referencedDimensionNode,
+  dimensionNodes,
   node,
   options,
   onSubmit,
@@ -29,19 +30,31 @@ export default function LinkDimensionPopover({
     };
   }, [setPopoverAnchor]);
 
-  const columnDimension = referencedDimensionNode;
-
   const handleSubmit = async (
-    { node, column, dimension },
+    { node, column, updatedDimensionNodes },
     { setSubmitting, setStatus },
   ) => {
-    setSubmitting(false);
-    if (referencedDimensionNode && dimension === 'Remove') {
-      await unlinkDimension(node, column, referencedDimensionNode, setStatus);
-    } else {
-      await linkDimension(node, column, dimension, setStatus);
+    const oldSet = new Set(dimensionNodes);
+    const newSet = new Set(updatedDimensionNodes);
+    try {
+      const linkPromises = Array.from(newSet)
+        .filter(item => !oldSet.has(item))
+        .map(dimension => {
+          return linkDimension(node, column, dimension, setStatus);
+        });
+      const unlinkPromises = Array.from(oldSet)
+        .filter(item => !newSet.has(item))
+        .map(dimension => {
+          return unlinkDimension(node, column, dimension, setStatus);
+        });
+      await Promise.all([...linkPromises, ...unlinkPromises]);
+    } catch (error) {
+      console.error('Error in editing linked dimensions:', error);
+      setStatus({ error: error.message });
+    } finally {
+      setSubmitting(false);
+      onSubmit();
     }
-    onSubmit();
   };
 
   const linkDimension = async (node, column, dimension, setStatus) => {
@@ -93,8 +106,7 @@ export default function LinkDimensionPopover({
           initialValues={{
             column: column.name,
             node: node.name,
-            dimension: '',
-            currentDimension: referencedDimensionNode,
+            updatedDimensionNodes: '',
           }}
           onSubmit={handleSubmit}
         >
@@ -104,20 +116,21 @@ export default function LinkDimensionPopover({
                 {displayMessageAfterSubmit(status)}
                 <span data-testid="link-dimension">
                   <FormikSelect
-                    selectOptions={[
-                      { value: 'Remove', label: '[Remove Dimension]' },
-                    ].concat(options)}
-                    formikFieldName="dimension"
+                    selectOptions={options}
+                    formikFieldName="updatedDimensionNodes"
                     placeholder="Select dimension to link"
                     className=""
                     defaultValue={
-                      referencedDimensionNode
-                        ? {
-                            value: referencedDimensionNode,
-                            label: referencedDimensionNode,
-                          }
-                        : ''
+                      dimensionNodes.length > 0
+                        ? dimensionNodes.map(dimNode => {
+                            return {
+                              value: dimNode,
+                              label: dimNode,
+                            };
+                          })
+                        : []
                     }
+                    isMulti={true}
                   />
                 </span>
                 <input
@@ -137,8 +150,9 @@ export default function LinkDimensionPopover({
                   type="submit"
                   aria-label="SaveLinkDimension"
                   aria-hidden="false"
+                  disabled={isSubmitting}
                 >
-                  Save
+                  {isSubmitting ? <LoadingIcon /> : 'Save'}
                 </button>
               </Form>
             );

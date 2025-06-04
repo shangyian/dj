@@ -6,7 +6,7 @@ import 'reactflow/dist/style.css';
 import DJClientContext from '../../providers/djclient';
 import LayoutFlow from '../../components/djgraph/LayoutFlow';
 
-const NodeLineage = djNode => {
+const NodeGraphTab = djNode => {
   const djClient = useContext(DJClientContext).DataJunctionAPI;
 
   const createNode = node => {
@@ -110,8 +110,10 @@ const NodeLineage = djNode => {
   };
 
   const dagFetch = async (getLayoutedElements, setNodes, setEdges) => {
-    let related_nodes = await djClient.node_dag(djNode.djNode.name);
-    var djNodes = [djNode.djNode];
+    let related_nodes = djNode.djNode
+      ? await djClient.node_dag(djNode.djNode.name)
+      : [];
+    var djNodes = djNode.djNode ? [djNode.djNode] : [];
     for (const iterable of [related_nodes]) {
       for (const item of iterable) {
         if (item.type !== 'cube') {
@@ -134,4 +136,4 @@ const NodeLineage = djNode => {
   };
   return LayoutFlow(djNode, dagFetch);
 };
-export default NodeLineage;
+export default NodeGraphTab;

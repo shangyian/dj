@@ -1,6 +1,7 @@
 """
 Tests for the attributes API.
 """
+
 from unittest.mock import ANY
 
 import pytest
@@ -9,12 +10,12 @@ from httpx import AsyncClient
 
 @pytest.mark.asyncio
 async def test_adding_new_attribute(
-    client: AsyncClient,
+    module__client: AsyncClient,
 ) -> None:
     """
     Test adding an attribute.
     """
-    response = await client.post(
+    response = await module__client.post(
         "/attributes/",
         json={
             "namespace": "custom",
@@ -34,7 +35,7 @@ async def test_adding_new_attribute(
         "allowed_node_types": ["source"],
     }
 
-    response = await client.post(
+    response = await module__client.post(
         "/attributes/",
         json={
             "namespace": "custom",
@@ -51,7 +52,7 @@ async def test_adding_new_attribute(
         "warnings": [],
     }
 
-    response = await client.post(
+    response = await module__client.post(
         "/attributes/",
         json={
             "namespace": "system",
@@ -60,7 +61,7 @@ async def test_adding_new_attribute(
             "allowed_node_types": ["source"],
         },
     )
-    assert response.status_code == 500
+    assert response.status_code == 422
     data = response.json()
     assert data == {
         "message": "Cannot use `system` as the attribute type namespace as it is reserved.",
@@ -70,19 +71,20 @@ async def test_adding_new_attribute(
 
 
 @pytest.mark.asyncio
-async def test_list_attributes(
-    client: AsyncClient,
+async def test_list_system_attributes(
+    module__client: AsyncClient,
 ) -> None:
     """
     Test listing attributes. These should contain the default attributes.
     """
-    response = await client.get("/attributes/")
+    response = await module__client.get("/attributes/")
     assert response.status_code == 200
     data = response.json()
     data = {
         type_["name"]: {k: type_[k] for k in (type_.keys() - {"id"})} for type_ in data
     }
-    assert data == {
+    data_for_system = {k: v for k, v in data.items() if v["namespace"] == "system"}
+    assert data_for_system == {
         "primary_key": {
             "namespace": "system",
             "uniqueness_scope": [],
@@ -96,5 +98,15 @@ async def test_list_attributes(
             "allowed_node_types": ["source", "transform"],
             "name": "dimension",
             "description": "Points to a dimension attribute column",
+        },
+        "hidden": {
+            "namespace": "system",
+            "uniqueness_scope": [],
+            "allowed_node_types": ["dimension"],
+            "name": "hidden",
+            "description": (
+                "Points to a dimension column that's not useful "
+                "for end users and should be hidden"
+            ),
         },
     }

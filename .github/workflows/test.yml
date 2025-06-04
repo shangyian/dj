@@ -1,4 +1,4 @@
-name: "PR update : Run tests and linters"
+name: "PR Update : Run tests and linters"
 
 on:
   pull_request:
@@ -13,6 +13,8 @@ on:
       - datajunction-clients/javascript/package.json
       - datajunction-ui/package.json
       # java: TODO
+  push:
+    branches: [ main ]
 
 concurrency:
   group: ${{ github.ref }}
@@ -36,7 +38,7 @@ jobs:
 
     steps:
       - uses: actions/checkout@v2
-      - uses: dorny/paths-filter@v2
+      - uses: dorny/paths-filter@v3
         id: filter
         with:
           filters: |
@@ -44,25 +46,34 @@ jobs:
               - 'datajunction-clients/python/**'
               # run Python unit tests also when server is updated (because server changes can break the client)
               - 'datajunction-server/**'
+              - '!**/__about__.py'
             server:
               - 'datajunction-server/**'
+              - '!**/__about__.py'
             djqs:
               - 'datajunction-query/**'
+              - '!**/__about__.py'
             djrs:
               - 'datajunction-reflection/**'
+              - '!**/__about__.py'
 
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v2
         with:
           python-version: ${{ matrix.python-version }}
 
-      - uses: pdm-project/setup-pdm@v3
+      - uses: pdm-project/setup-pdm@v4
         name: Setup PDM
         with:
           python-version: ${{ matrix.python-version }}
           architecture: x64
           prerelease: true
           enable-pep582: true
+
+      - uses: pre-commit/action@v3.0.0
+        name: Force check of all pdm.lock files
+        with:
+          extra_args: pdm-lock-check --all-files
 
       - name: Run Tests
         if: |
@@ -75,19 +86,14 @@ jobs:
           export TEST_DIR=${{ matrix.library == 'server' && './datajunction-server' || matrix.library == 'client' && './datajunction-clients/python' || matrix.library == 'djqs' && './datajunction-query' || matrix.library == 'djrs' && './datajunction-reflection'}}
 
           # Install dependencies
-          pdm sync -d; cd $TEST_DIR; pdm install -d -G pandas; pdm install -d -G transpilation
+          pdm sync -d; cd $TEST_DIR; pdm install -d -G pandas -G transpilation -G test;
 
           # Run linters
           pdm run pre-commit run --all-files
 
           # Run tests
           export MODULE=${{ matrix.library == 'server' && 'datajunction_server' || matrix.library == 'client' && 'datajunction' || matrix.library == 'djqs' && 'djqs' || matrix.library == 'djrs' && 'datajunction_reflection'}}
-          pdm run pytest ${{ matrix.library == 'server' && '-n auto' || '' }} --cov-fail-under=100 --cov=$MODULE --cov-report term-missing -vv tests/ --doctest-modules $MODULE --without-integration --without-slow-integration
-
-      - uses: pre-commit/action@v3.0.0
-        name: Force check of all pdm.lock files
-        with:
-          extra_args: pdm-lock-check --all-files
+          pdm run pytest ${{ (matrix.library == 'server' || matrix.library == 'client') && '-n auto' || '' }} --cov-fail-under=100 --cov=$MODULE --cov-report term-missing -vv tests/ --doctest-modules $MODULE --without-integration --without-slow-integration --ignore=datajunction_server/alembic/env.py
 
   build-javascript:
     runs-on: ubuntu-latest
@@ -127,6 +133,12 @@ jobs:
           node-version: ${{ matrix.node-version }}
       - name: Install Dependencies
         run: yarn install
+      - name: Run Lint
+        run: yarn lint --fix
+      - name: Run Prettier
+        run: yarn prettier . --write
+      - name: Check Linters Failed
+        run: git diff --exit-code
       - name: Run Unit Tests
         run: yarn test --runInBand --ci --coverage
       - name: Build Project
@@ -138,16 +150,13 @@ jobs:
       run:
         working-directory: ./datajunction-clients/java
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - name: Set up JDK 17
-        uses: actions/setup-java@v3
+        uses: actions/setup-java@v4
         with:
           java-version: '17'
           distribution: 'temurin'
-      - name: Official Gradle Wrapper Validation Action
-        uses: gradle/wrapper-validation-action@v1
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
       - name: Build with Gradle
-        uses: gradle/gradle-build-action@v2
-        with:
-          arguments: build -x test
-          build-root-directory: ./datajunction-clients/java
+        run: ./gradlew build -x test

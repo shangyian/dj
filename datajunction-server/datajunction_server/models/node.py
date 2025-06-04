@@ -1,11 +1,11 @@
-# pylint: disable=too-many-instance-attributes,too-many-lines,too-many-ancestors
 """
 Model for nodes.
 """
+
 import enum
 import sys
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union, cast
 
 from pydantic import BaseModel, Extra, root_validator, validator
 from pydantic.fields import Field
@@ -15,6 +15,7 @@ from sqlalchemy.sql.schema import Column as SqlaColumn
 from sqlalchemy.types import Enum
 from typing_extensions import TypedDict
 
+from datajunction_server.api.graphql.scalars import Cursor
 from datajunction_server.enum import StrEnum
 from datajunction_server.errors import DJError
 from datajunction_server.models.base import labelize
@@ -26,7 +27,8 @@ from datajunction_server.models.engine import Dialect
 from datajunction_server.models.materialization import MaterializationConfigOutput
 from datajunction_server.models.node_type import NodeNameOutput, NodeType
 from datajunction_server.models.partition import PartitionOutput
-from datajunction_server.models.tag import TagOutput
+from datajunction_server.models.tag import TagMinimum, TagOutput
+from datajunction_server.models.user import UserNameOnly
 from datajunction_server.sql.parsing.types import ColumnType
 from datajunction_server.typing import UTCDatetime
 from datajunction_server.utils import Version
@@ -45,7 +47,7 @@ class BuildCriteria:
 
     timestamp: Optional[UTCDatetime] = None
     dialect: Dialect = Dialect.SPARK
-    for_materialization: bool = False
+    target_node_name: Optional[str] = None
 
 
 class NodeMode(StrEnum):
@@ -74,6 +76,24 @@ class NodeStatus(StrEnum):
 
     VALID = "valid"
     INVALID = "invalid"
+
+
+class NodeValidationError(BaseModel):
+    """
+    Validation error
+    """
+
+    type: str
+    message: str
+
+
+class NodeStatusDetails(BaseModel):
+    """
+    Node status details. Contains a list of node errors or an empty list of the node status is valid
+    """
+
+    status: NodeStatus
+    errors: List[NodeValidationError]
 
 
 class NodeYAML(TypedDict, total=False):
@@ -106,7 +126,7 @@ class NodeRevisionBase(BaseModel):
     name: str
     display_name: Optional[str]
     type: NodeType
-    description: str = ""
+    description: Optional[str] = ""
     query: Optional[str] = None
     mode: NodeMode = NodeMode.PUBLISHED
 
@@ -246,6 +266,7 @@ class AvailabilityStateBase(TemporalPartitionRange):
     table: str
     valid_through_ts: int
     url: Optional[str]
+    links: Optional[Dict[str, Any]] = Field(default={})
 
     # An ordered list of categorical partitions like ["country", "group_id"]
     # or ["region_id", "age_group"]
@@ -261,11 +282,11 @@ class AvailabilityStateBase(TemporalPartitionRange):
     # Partition-level availabilities
     partitions: Optional[List[PartitionAvailability]] = Field(default=[])
 
-    class Config:  # pylint: disable=missing-class-docstring, too-few-public-methods
+    class Config:
         orm_mode = True
 
     @validator("partitions")
-    def validate_partitions(cls, partitions):  # pylint: disable=no-self-argument
+    def validate_partitions(cls, partitions):
         """
         Validator for partitions
         """
@@ -359,7 +380,7 @@ class Unit(BaseModel):
         return self.name
 
     @validator("label", always=True)
-    def get_label(  # pylint: disable=no-self-argument
+    def get_label(
         cls,
         label: str,
         values: Dict[str, Any],
@@ -369,14 +390,14 @@ class Unit(BaseModel):
             return labelize(values["name"])
         return label
 
-    class Config:  # pylint: disable=missing-class-docstring, too-few-public-methods
+    class Config:
         orm_mode = True
 
 
 class MetricUnit(enum.Enum):
     """
     Available units of measure for metrics
-    TODO: Eventually this can be recorded in a database,   # pylint: disable=fixme
+    TODO: Eventually this can be recorded in a database,
     since measurement units can be customized depending on the metric
     (i.e., clicks/hour). For the time being, this enum provides some basic units.
     """
@@ -440,10 +461,13 @@ class MetricMetadataOutput(BaseModel):
     Metric metadata output
     """
 
-    direction: Optional[MetricDirection]
-    unit: Optional[Unit]
+    direction: MetricDirection | None
+    unit: Unit | None
+    significant_digits: int | None
+    min_decimal_exponent: int | None
+    max_decimal_exponent: int | None
 
-    class Config:  # pylint: disable=missing-class-docstring, too-few-public-methods
+    class Config:
         orm_mode = True
 
 
@@ -452,8 +476,11 @@ class MetricMetadataInput(BaseModel):
     Metric metadata output
     """
 
-    direction: Optional[MetricDirection]
-    unit: Optional[str]
+    direction: MetricDirection | None
+    unit: str | None
+    significant_digits: int | None
+    min_decimal_exponent: int | None
+    max_decimal_exponent: int | None
 
 
 class ImmutableNodeFields(BaseModel):
@@ -474,6 +501,7 @@ class MutableNodeFields(BaseModel):
     description: str
     mode: NodeMode
     primary_key: Optional[List[str]]
+    custom_metadata: Optional[Dict]
 
 
 class MutableNodeQueryField(BaseModel):
@@ -516,8 +544,10 @@ class NodeMinimumDetail(BaseModel):
     status: NodeStatus
     mode: NodeMode
     updated_at: UTCDatetime
+    tags: Optional[List[TagMinimum]]
+    edited_by: Optional[List[str]]
 
-    class Config:  # pylint: disable=missing-class-docstring, too-few-public-methods
+    class Config:
         orm_mode = True
 
 
@@ -529,7 +559,7 @@ class AttributeTypeName(BaseModel):
     namespace: str
     name: str
 
-    class Config:  # pylint: disable=missing-class-docstring, too-few-public-methods
+    class Config:
         orm_mode = True
 
 
@@ -540,7 +570,7 @@ class AttributeOutput(BaseModel):
 
     attribute_type: AttributeTypeName
 
-    class Config:  # pylint: disable=missing-class-docstring, too-few-public-methods
+    class Config:
         orm_mode = True
 
 
@@ -550,11 +580,12 @@ class DimensionAttributeOutput(BaseModel):
     """
 
     name: str
-    node_name: Optional[str]
-    node_display_name: Optional[str]
-    is_primary_key: bool
-    type: str
-    path: List[str]
+    node_name: str | None
+    node_display_name: str | None
+    properties: list[str] | None
+    type: str | None
+    path: list[str]
+    filter_only: bool = False
 
 
 class ColumnOutput(BaseModel):
@@ -565,12 +596,12 @@ class ColumnOutput(BaseModel):
     name: str
     display_name: Optional[str]
     type: str
+    description: Optional[str]
     attributes: Optional[List[AttributeOutput]]
     dimension: Optional[NodeNameOutput]
     partition: Optional[PartitionOutput]
-    # order: Optional[int]
 
-    class Config:  # pylint: disable=missing-class-docstring, too-few-public-methods
+    class Config:
         """
         Should perform validation on assignment
         """
@@ -579,7 +610,7 @@ class ColumnOutput(BaseModel):
         validate_assignment = True
 
     _extract_type = validator("type", pre=True, allow_reuse=True)(
-        lambda raw: str(raw),  # pylint: disable=unnecessary-lambda
+        lambda raw: str(raw),
     )
 
 
@@ -593,7 +624,7 @@ class SourceColumnOutput(BaseModel):
     attributes: Optional[List[AttributeOutput]]
     dimension: Optional[str]
 
-    class Config:  # pylint: disable=missing-class-docstring, too-few-public-methods
+    class Config:
         """
         Should perform validation on assignment
         """
@@ -601,7 +632,7 @@ class SourceColumnOutput(BaseModel):
         validate_assignment = True
 
     @root_validator
-    def type_string(cls, values):  # pylint: disable=no-self-argument
+    def type_string(cls, values):
         """
         Extracts the type as a string
         """
@@ -665,6 +696,8 @@ class CreateSourceNode(ImmutableNodeFields, MutableNodeFields, SourceNodeFields)
     A create object for source nodes
     """
 
+    query: Optional[str] = None
+
 
 class CreateCubeNode(ImmutableNodeFields, MutableNodeFields, CubeNodeFields):
     """
@@ -686,14 +719,14 @@ class UpdateNode(
     __annotations__ = {
         k: Optional[v]
         for k, v in {
-            **SourceNodeFields.__annotations__,  # pylint: disable=E1101
-            **MutableNodeFields.__annotations__,  # pylint: disable=E1101
-            **MutableNodeQueryField.__annotations__,  # pylint: disable=E1101
-            **CubeNodeFields.__annotations__,  # pylint: disable=E1101
+            **SourceNodeFields.__annotations__,
+            **MutableNodeFields.__annotations__,
+            **MutableNodeQueryField.__annotations__,
+            **CubeNodeFields.__annotations__,
         }.items()
     }
 
-    class Config:  # pylint: disable=missing-class-docstring, too-few-public-methods
+    class Config:
         """
         Do not allow fields other than the ones defined here.
         """
@@ -713,7 +746,7 @@ class GenericNodeOutputModel(BaseModel):
     """
 
     @root_validator(pre=True)
-    def flatten_current(  # pylint: disable=no-self-argument
+    def flatten_current(
         cls,
         values: GetterDict,
     ) -> Union[GetterDict, Dict[str, Any]]:
@@ -732,6 +765,7 @@ class GenericNodeOutputModel(BaseModel):
             "catalog": values.get("catalog"),
             "missing_table": values.get("missing_table"),
             "tags": values.get("tags"),
+            "created_by": values.get("created_by").__dict__,
         }
         for k, v in current_dict.items():
             final_dict[k] = v
@@ -776,8 +810,9 @@ class NodeRevisionOutput(BaseModel):
     parents: List[NodeNameOutput]
     metric_metadata: Optional[MetricMetadataOutput] = None
     dimension_links: Optional[List[LinkDimensionOutput]]
+    custom_metadata: Optional[Dict] = None
 
-    class Config:  # pylint: disable=missing-class-docstring,too-few-public-methods
+    class Config:
         orm_mode = True
 
 
@@ -808,11 +843,13 @@ class NodeOutput(GenericNodeOutputModel):
     metric_metadata: Optional[MetricMetadataOutput] = None
     dimension_links: Optional[List[LinkDimensionOutput]]
     created_at: UTCDatetime
+    created_by: UserNameOnly
     tags: List[TagOutput] = []
     current_version: str
     missing_table: Optional[bool] = False
+    custom_metadata: Optional[Dict] = None
 
-    class Config:  # pylint: disable=missing-class-docstring,too-few-public-methods
+    class Config:
         orm_mode = True
 
     @classmethod
@@ -820,7 +857,7 @@ class NodeOutput(GenericNodeOutputModel):
         """
         ORM options to successfully load this object
         """
-        from datajunction_server.database.node import (  # pylint: disable=import-outside-toplevel
+        from datajunction_server.database.node import (
             Node,
             NodeRevision,
         )
@@ -828,6 +865,7 @@ class NodeOutput(GenericNodeOutputModel):
         return [
             selectinload(Node.current).options(*NodeRevision.default_load_options()),
             joinedload(Node.tags),
+            selectinload(Node.created_by),
         ]
 
 
@@ -853,7 +891,7 @@ class DAGNodeRevisionOutput(BaseModel):
     parents: List[NodeNameOutput]
     dimension_links: List[LinkDimensionOutput]
 
-    class Config:  # pylint: disable=missing-class-docstring,too-few-public-methods
+    class Config:
         allow_population_by_field_name = True
         orm_mode = True
 
@@ -884,7 +922,7 @@ class DAGNodeOutput(GenericNodeOutputModel):
     tags: List[TagOutput] = []
     current_version: str
 
-    class Config:  # pylint: disable=missing-class-docstring, too-few-public-methods
+    class Config:
         orm_mode = True
 
 
@@ -923,3 +961,24 @@ class NamespaceOutput(BaseModel):
 
     namespace: str
     num_nodes: int
+
+
+class NodeIndegreeOutput(BaseModel):
+    """
+    Node indegree output
+    """
+
+    name: str
+    indegree: int
+
+
+@dataclass
+class NodeCursor(Cursor):
+    """Cursor that represents a node in a paginated list."""
+
+    created_at: UTCDatetime
+    id: int
+
+    @classmethod
+    def decode(cls, serialized: str) -> "NodeCursor":
+        return cast(NodeCursor, super().decode(serialized))

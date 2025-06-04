@@ -1,6 +1,7 @@
 """
 Configuration for the datajunction server.
 """
+
 import urllib.parse
 from datetime import timedelta
 from pathlib import Path
@@ -13,12 +14,10 @@ from celery import Celery
 from pydantic import BaseSettings
 
 if TYPE_CHECKING:
-    from datajunction_server.models.access import AccessControl
+    pass
 
 
-class Settings(
-    BaseSettings,
-):  # pylint: disable=too-few-public-methods #pragma: no cover
+class Settings(BaseSettings):  # pragma: no cover
     """
     DataJunction configuration.
     """
@@ -67,11 +66,11 @@ class Settings(
     # DJ UI host, used for OAuth redirection
     frontend_host: Optional[str] = "http://localhost:3000"
 
-    # Library to use when transpiling SQL to other dialects
-    sql_transpilation_library: Optional[str] = None
+    # Enabled transpilation plugin names
+    transpilation_plugins: List[str] = ["default", "sqlglot"]
 
-    # DJ secret, used to encrypt passwords and JSON web tokens
-    secret: Optional[str] = None
+    # 128 bit DJ secret, used to encrypt passwords and JSON web tokens
+    secret: str = "a-fake-secretkey"
 
     # GitHub OAuth application client ID
     github_oauth_client_id: Optional[str] = None
@@ -91,6 +90,8 @@ class Settings(
     # Interval in seconds with which to expire caching of any indexes
     index_cache_expire = 60
 
+    default_catalog_id: int = 0
+
     # SQLAlchemy engine config
     db_pool_size = 20
     db_max_overflow = 20
@@ -102,6 +103,9 @@ class Settings(
     db_keepalives_idle = 30
     db_keepalives_interval = 10
     db_keepalives_count = 5
+
+    # Maximum amount of nodes to return for requests to list all nodes
+    node_list_max = 10000
 
     @property
     def celery(self) -> Celery:

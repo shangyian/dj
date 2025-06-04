@@ -1,6 +1,7 @@
 """
 Google OAuth Router
 """
+
 import logging
 import secrets
 from datetime import timedelta
@@ -19,7 +20,7 @@ from starlette.responses import RedirectResponse
 
 from datajunction_server.constants import AUTH_COOKIE, LOGGED_IN_FLAG_COOKIE
 from datajunction_server.database.user import User
-from datajunction_server.errors import DJException
+from datajunction_server.errors import DJAuthenticationException
 from datajunction_server.internal.access.authentication.basic import get_password_hash
 from datajunction_server.internal.access.authentication.google import (
     flow,
@@ -59,9 +60,8 @@ async def get_access_token(
     cookie. If the user does not already exist, a new user is created.
     """
     if error:
-        raise DJException(
-            http_status_code=HTTPStatus.UNAUTHORIZED,
-            message="Ran into an error during Google auth: {error}",
+        raise DJAuthenticationException(
+            f"Ran into an error during Google auth: {error}",
         )
     hostname = urlparse(settings.url).hostname
     url = str(request.url)
@@ -70,7 +70,7 @@ async def get_access_token(
     request_session = requests.session()
     token_request = google.auth.transport.requests.Request(session=request_session)
     user_data = id_token.verify_oauth2_token(
-        id_token=credentials._id_token,  # pylint: disable=protected-access
+        id_token=credentials._id_token,
         request=token_request,
         audience=setting.google_oauth_client_id,
     )
@@ -99,7 +99,12 @@ async def get_access_token(
     response = RedirectResponse(url=urljoin(settings.frontend_host, state))  # type: ignore
     response.set_cookie(
         AUTH_COOKIE,
-        create_token({"username": user.email}, expires_delta=timedelta(days=365)),
+        create_token(
+            {"username": user.email},
+            secret=settings.secret,
+            iss=settings.url,
+            expires_delta=timedelta(days=365),
+        ),
         httponly=True,
         samesite="none",
         secure=True,

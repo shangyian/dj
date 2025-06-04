@@ -10,11 +10,12 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from datajunction_server.database.attributetype import AttributeType
-from datajunction_server.errors import DJAlreadyExistsException, DJException
+from datajunction_server.errors import DJAlreadyExistsException, DJInvalidInputException
 from datajunction_server.internal.access.authentication.http import SecureAPIRouter
 from datajunction_server.models.attribute import (
     RESERVED_ATTRIBUTE_NAMESPACE,
     AttributeTypeBase,
+    ColumnAttributes,
     MutableAttributeTypeFields,
 )
 from datajunction_server.models.node_type import NodeType
@@ -27,7 +28,8 @@ router = SecureAPIRouter(tags=["attributes"])
 
 @router.get("/attributes/", response_model=List[AttributeTypeBase])
 async def list_attributes(
-    *, session: AsyncSession = Depends(get_session)
+    *,
+    session: AsyncSession = Depends(get_session),
 ) -> List[AttributeTypeBase]:
     """
     List all available attribute types.
@@ -43,13 +45,15 @@ async def list_attributes(
     name="Add an Attribute Type",
 )
 async def add_attribute_type(
-    data: MutableAttributeTypeFields, *, session: AsyncSession = Depends(get_session)
+    data: MutableAttributeTypeFields,
+    *,
+    session: AsyncSession = Depends(get_session),
 ) -> AttributeTypeBase:
     """
     Add a new attribute type
     """
     if data.namespace == RESERVED_ATTRIBUTE_NAMESPACE:
-        raise DJException(
+        raise DJInvalidInputException(
             message="Cannot use `system` as the attribute type namespace as it is reserved.",
         )
     attribute_type = await AttributeType.get_by_name(session, data.name)
@@ -69,7 +73,7 @@ async def default_attribute_types(session: AsyncSession = Depends(get_session)):
     defaults = [
         AttributeType(
             namespace=RESERVED_ATTRIBUTE_NAMESPACE,
-            name="primary_key",
+            name=ColumnAttributes.PRIMARY_KEY.value,
             description="Points to a column which is part of the primary key of the node",
             uniqueness_scope=[],
             allowed_node_types=[
@@ -80,17 +84,26 @@ async def default_attribute_types(session: AsyncSession = Depends(get_session)):
         ),
         AttributeType(
             namespace=RESERVED_ATTRIBUTE_NAMESPACE,
-            name="dimension",
+            name=ColumnAttributes.DIMENSION.value,
             description="Points to a dimension attribute column",
             uniqueness_scope=[],
             allowed_node_types=[NodeType.SOURCE, NodeType.TRANSFORM],
+        ),
+        AttributeType(
+            namespace=RESERVED_ATTRIBUTE_NAMESPACE,
+            name=ColumnAttributes.HIDDEN.value,
+            description=(
+                "Points to a dimension column that's not useful "
+                "for end users and should be hidden"
+            ),
+            uniqueness_scope=[],
+            allowed_node_types=[NodeType.DIMENSION],
         ),
     ]
     default_attribute_type_names = {type_.name: type_ for type_ in defaults}
 
     # Update existing default attribute types
     statement = select(AttributeType).filter(
-        # pylint: disable=no-member
         AttributeType.name.in_(  # type: ignore
             set(default_attribute_type_names.keys()),
         ),

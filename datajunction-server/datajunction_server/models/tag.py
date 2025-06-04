@@ -1,6 +1,7 @@
 """
 Models for tags.
 """
+
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
 from pydantic import Extra
@@ -19,7 +20,7 @@ class MutableTagFields(BaseModel):
     display_name: Optional[str]
     tag_metadata: Optional[Dict[str, Any]] = {}
 
-    class Config:  # pylint: disable=too-few-public-methods
+    class Config:
         """
         Allow types for tag metadata.
         """
@@ -42,12 +43,23 @@ class CreateTag(ImmutableTagFields, MutableTagFields):
     """
 
 
+class TagMinimum(BaseModel):
+    """
+    Output tag model.
+    """
+
+    name: str
+
+    class Config:
+        orm_mode = True
+
+
 class TagOutput(ImmutableTagFields, MutableTagFields):
     """
     Output tag model.
     """
 
-    class Config:  # pylint: disable=missing-class-docstring, too-few-public-methods
+    class Config:
         orm_mode = True
 
 
@@ -59,11 +71,11 @@ class UpdateTag(MutableTagFields):
     __annotations__ = {
         k: Optional[v]
         for k, v in {
-            **MutableTagFields.__annotations__,  # pylint: disable=E1101
+            **MutableTagFields.__annotations__,
         }.items()
     }
 
-    class Config:  # pylint: disable=too-few-public-methods
+    class Config:
         """
         Do not allow fields other than the ones defined here.
         """

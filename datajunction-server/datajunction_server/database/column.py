@@ -1,4 +1,5 @@
 """Column database schema."""
+
 from typing import TYPE_CHECKING, List, Optional, Tuple
 
 from sqlalchemy import BigInteger, ForeignKey, Integer, String
@@ -6,6 +7,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from datajunction_server.database.attributetype import ColumnAttribute
 from datajunction_server.database.base import Base
+from datajunction_server.models.attribute import ColumnAttributes
 from datajunction_server.models.base import labelize
 from datajunction_server.models.column import ColumnTypeDecorator
 from datajunction_server.sql.parsing.types import ColumnType
@@ -37,6 +39,7 @@ class Column(Base):  # type: ignore
         insert_default=lambda context: labelize(context.current_parameters.get("name")),
     )
     type: Mapped[Optional[ColumnType]] = mapped_column(ColumnTypeDecorator)
+    description: Mapped[Optional[str]] = mapped_column()
 
     dimension_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("node.id", ondelete="SET NULL", name="fk_column_dimension_id_node"),
@@ -105,15 +108,28 @@ class Column(Base):  # type: ignore
         """
         Whether the primary key attribute is set on this column.
         """
-        return self.has_attribute("primary_key")
+        return self.has_attribute(ColumnAttributes.PRIMARY_KEY.value)
 
     def has_attribute(self, attribute_name: str) -> bool:
         """
         Whether the given attribute is set on this column.
         """
         return any(
-            attr.attribute_type.name == attribute_name
-            for attr in self.attributes  # pylint: disable=not-an-iterable
+            attr.attribute_type.name == attribute_name for attr in self.attributes
+        )
+
+    def attribute_names(self) -> list[str]:
+        """
+        A list of column attribute names
+        """
+        return [attr.attribute_type.name for attr in self.attributes]
+
+    def has_attributes_besides(self, attribute_name: str) -> bool:
+        """
+        Whether the column has any attribute besides the one specified.
+        """
+        return any(
+            attr.attribute_type.name != attribute_name for attr in self.attributes
         )
 
     def __hash__(self) -> int:
@@ -141,6 +157,7 @@ class Column(Base):  # type: ignore
             name=self.name,
             display_name=self.display_name,
             type=self.type,
+            description=self.description,
             dimension_id=self.dimension_id,
             dimension_column=self.dimension_column,
             attributes=[

@@ -1,12 +1,24 @@
 """Materialization database schema."""
+
 from typing import TYPE_CHECKING, List, Optional, Union
 
 import sqlalchemy as sa
-from sqlalchemy import JSON, DateTime, Enum, ForeignKey, String, UniqueConstraint
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy import (
+    JSON,
+    DateTime,
+    Enum,
+    ForeignKey,
+    String,
+    UniqueConstraint,
+    and_,
+    select,
+)
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import Mapped, joinedload, mapped_column, relationship
 
 from datajunction_server.database.backfill import Backfill
 from datajunction_server.database.base import Base
+from datajunction_server.database.column import Column
 from datajunction_server.models.materialization import (
     DruidMeasuresCubeConfig,
     GenericMaterializationConfig,
@@ -18,7 +30,7 @@ if TYPE_CHECKING:
     from datajunction_server.database.node import NodeRevision
 
 
-class Materialization(Base):  # pylint: disable=too-few-public-methods
+class Materialization(Base):
     """
     Materialization configured for a node.
     """
@@ -59,11 +71,11 @@ class Materialization(Base):  # pylint: disable=too-few-public-methods
     schedule: Mapped[str]
 
     # Arbitrary config relevant to the materialization job
-    config: Mapped[
-        Union[GenericMaterializationConfig, DruidMeasuresCubeConfig]
-    ] = mapped_column(
-        JSON,
-        default={},
+    config: Mapped[Union[GenericMaterializationConfig, DruidMeasuresCubeConfig]] = (
+        mapped_column(
+            JSON,
+            default={},
+        )
     )
 
     # The name of the plugin that handles materialization, if any
@@ -84,3 +96,32 @@ class Materialization(Base):  # pylint: disable=too-few-public-methods
         cascade="all, delete",
         lazy="selectin",
     )
+
+    @classmethod
+    async def get_by_names(
+        cls,
+        session: AsyncSession,
+        node_revision_id: int,
+        materialization_names: List[str],
+    ) -> List["Materialization"]:
+        """
+        Get materializations by name and node revision id.
+        """
+        from datajunction_server.database.node import NodeRevision
+
+        statement = (
+            select(cls)
+            .where(
+                and_(
+                    cls.name.in_(materialization_names),
+                    cls.node_revision_id == node_revision_id,
+                ),
+            )
+            .options(
+                joinedload(cls.node_revision).options(
+                    joinedload(NodeRevision.columns).joinedload(Column.partition),
+                ),
+            )
+        )
+        result = await session.execute(statement)
+        return result.unique().scalars().all()

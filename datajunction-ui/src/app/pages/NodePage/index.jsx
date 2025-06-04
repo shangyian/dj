@@ -5,17 +5,19 @@ import Tab from '../../components/Tab';
 import NamespaceHeader from '../../components/NamespaceHeader';
 import NodeInfoTab from './NodeInfoTab';
 import NodeColumnTab from './NodeColumnTab';
-import NodeLineage from './NodeGraphTab';
+import NodeGraphTab from './NodeGraphTab';
 import NodeHistory from './NodeHistory';
+import NotebookDownload from './NotebookDownload';
 import DJClientContext from '../../providers/djclient';
-import NodeSQLTab from './NodeSQLTab';
+import NodeValidateTab from './NodeValidateTab';
 import NodeMaterializationTab from './NodeMaterializationTab';
 import ClientCodePopover from './ClientCodePopover';
+import WatchButton from './WatchNodeButton';
 import NodesWithDimension from './NodesWithDimension';
 import NodeColumnLineage from './NodeLineageTab';
 import EditIcon from '../../icons/EditIcon';
 import AlertIcon from '../../icons/AlertIcon';
-import NodeDimensionsTab from './NodeDimensionsTab';
+import NodeDependenciesTab from './NodeDependenciesTab';
 import { useNavigate } from 'react-router-dom';
 
 export function NodePage() {
@@ -52,13 +54,13 @@ export function NodePage() {
       const data = await djClient.node(name);
       data.createNodeClientCode = await djClient.clientCode(name);
       if (data.type === 'metric') {
-        const metric = await djClient.metric(name);
-        data.dimensions = metric.dimensions;
-        data.metric_metadata = metric.metric_metadata;
-        data.required_dimensions = metric.required_dimensions;
-        data.upstream_node = metric.upstream_node;
-        data.expression = metric.expression;
-        data.incompatible_druid_functions = metric.incompatible_druid_functions;
+        const metric = await djClient.getMetric(name);
+        data.metric_metadata = metric.current.metricMetadata;
+        data.required_dimensions = metric.current.requiredDimensions;
+        data.upstream_node = metric.current.parents[0].name;
+        data.expression = metric.current.metricMetadata.expression;
+        data.incompatible_druid_functions =
+          metric.current.metricMetadata.incompatibleDruidFunctions;
       }
       if (data.type === 'cube') {
         const cube = await djClient.cube(name);
@@ -92,9 +94,9 @@ export function NodePage() {
         display: true,
       },
       {
-        id: 'sql',
-        name: 'SQL',
-        display: node?.type !== 'dimension' && node?.type !== 'source',
+        id: 'validate',
+        name: '► Validate',
+        display: node?.type !== 'source',
       },
       {
         id: 'materializations',
@@ -112,8 +114,8 @@ export function NodePage() {
         display: node?.type === 'metric',
       },
       {
-        id: 'dimensions',
-        name: 'Dimensions',
+        id: 'dependencies',
+        name: 'Dependencies',
         display: node?.type !== 'cube',
       },
     ];
@@ -129,14 +131,13 @@ export function NodePage() {
       tabToDisplay = <NodeColumnTab node={node} djClient={djClient} />;
       break;
     case 'graph':
-      tabToDisplay = <NodeLineage djNode={node} djClient={djClient} />;
+      tabToDisplay = <NodeGraphTab djNode={node} djClient={djClient} />;
       break;
     case 'history':
       tabToDisplay = <NodeHistory node={node} djClient={djClient} />;
       break;
-    case 'sql':
-      tabToDisplay =
-        node?.type === 'metric' ? <NodeSQLTab djNode={node} /> : <br />;
+    case 'validate':
+      tabToDisplay = <NodeValidateTab node={node} djClient={djClient} />;
       break;
     case 'materializations':
       tabToDisplay = <NodeMaterializationTab node={node} djClient={djClient} />;
@@ -147,47 +148,69 @@ export function NodePage() {
     case 'lineage':
       tabToDisplay = <NodeColumnLineage djNode={node} djClient={djClient} />;
       break;
-    case 'dimensions':
-      tabToDisplay = <NodeDimensionsTab node={node} djClient={djClient} />;
+    case 'dependencies':
+      tabToDisplay = <NodeDependenciesTab node={node} djClient={djClient} />;
       break;
-    default: /* istanbul ignore next */
+    default:
+      /* istanbul ignore next */
       tabToDisplay = <NodeInfoTab node={node} />;
   }
+
+  const NodeButtons = () => {
+    return (
+      <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+        <button
+          className="button-3"
+          onClick={() => navigate(`/nodes/${node?.name}/edit`)}
+        >
+          <EditIcon /> Edit
+        </button>
+
+        <WatchButton node={node} />
+
+        <ClientCodePopover code={node?.createNodeClientCode} />
+        {node?.type === 'cube' && <NotebookDownload node={node} />}
+      </div>
+    );
+  };
+
   // @ts-ignore
   return (
     <div className="node__header">
       <NamespaceHeader namespace={name.split('.').slice(0, -1).join('.')} />
       <div className="card">
         {node?.message === undefined ? (
-          <div className="card-header">
-            <h3
-              className="card-title align-items-start flex-column"
-              style={{ display: 'inline-block' }}
+          <div className="card-header" style={{}}>
+            <div
+              style={{
+                display: 'flex',
+                flexDirection: 'row',
+                justifyContent: 'space-between',
+              }}
             >
-              <span
-                className="card-label fw-bold text-gray-800"
-                role="dialog"
-                aria-hidden="false"
-                aria-label="DisplayName"
+              <h3
+                className="card-title align-items-start flex-column"
+                style={{ display: 'inline-block' }}
               >
-                {node?.display_name}{' '}
                 <span
-                  className={'node_type__' + node?.type + ' badge node_type'}
+                  className="card-label fw-bold text-gray-800"
                   role="dialog"
                   aria-hidden="false"
-                  aria-label="NodeType"
+                  aria-label="DisplayName"
                 >
-                  {node?.type}
+                  {node?.display_name}{' '}
+                  <span
+                    className={'node_type__' + node?.type + ' badge node_type'}
+                    role="dialog"
+                    aria-hidden="false"
+                    aria-label="NodeType"
+                  >
+                    {node?.type}
+                  </span>
                 </span>
-              </span>
-            </h3>
-            <a
-              href={`/nodes/${node?.name}/edit`}
-              style={{ marginLeft: '0.5rem' }}
-            >
-              <EditIcon />
-            </a>
-            <ClientCodePopover code={node?.createNodeClientCode} />
+              </h3>
+              <NodeButtons />
+            </div>
             <div>
               <a
                 href={'/nodes/' + node?.name}

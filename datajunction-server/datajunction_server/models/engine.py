@@ -1,21 +1,11 @@
 """
 Models for columns.
 """
+
 from typing import Optional
 
 from pydantic.main import BaseModel
-
-from datajunction_server.enum import StrEnum
-
-
-class Dialect(StrEnum):
-    """
-    SQL dialect
-    """
-
-    SPARK = "spark"
-    TRINO = "trino"
-    DRUID = "druid"
+from datajunction_server.models.dialect import Dialect
 
 
 class EngineInfo(BaseModel):
@@ -28,7 +18,7 @@ class EngineInfo(BaseModel):
     uri: Optional[str]
     dialect: Optional[Dialect]
 
-    class Config:  # pylint: disable=missing-class-docstring, too-few-public-methods
+    class Config:
         orm_mode = True
 
 

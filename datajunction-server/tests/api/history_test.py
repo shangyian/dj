@@ -1,12 +1,14 @@
 """
 Tests for the history endpoint
 """
+
 from unittest import mock
 
 import pytest
 from httpx import AsyncClient
 
-from datajunction_server.database.history import ActivityType, EntityType, History
+from datajunction_server.database.history import History
+from datajunction_server.internal.history import ActivityType, EntityType
 
 
 def test_history_hash():
@@ -29,11 +31,13 @@ def test_history_hash():
 
 
 @pytest.mark.asyncio
-async def test_get_history_entity(client_with_roads: AsyncClient):
+async def test_get_history_entity(module__client_with_roads: AsyncClient):
     """
     Test getting history for an entity
     """
-    response = await client_with_roads.get("/history/node/default.repair_orders/")
+    response = await module__client_with_roads.get(
+        "/history/node/default.repair_orders/",
+    )
     assert response.status_code in (200, 201)
     history = response.json()
     assert len(history) == 1
@@ -55,15 +59,15 @@ async def test_get_history_entity(client_with_roads: AsyncClient):
 
 
 @pytest.mark.asyncio
-async def test_get_history_node(client_with_roads: AsyncClient):
+async def test_get_history_node(module__client_with_roads: AsyncClient):
     """
     Test getting history for a node
     """
 
-    response = await client_with_roads.get("/history?node=default.repair_order")
+    response = await module__client_with_roads.get("/history?node=default.repair_order")
     assert response.status_code in (200, 201)
     history = response.json()
-    assert len(history) == 5
+    assert len(history) == 6
     assert history == [
         {
             "activity_type": "create",
@@ -74,6 +78,24 @@ async def test_get_history_node(client_with_roads: AsyncClient):
                 "join_cardinality": "many_to_one",
                 "join_sql": "default.repair_order.municipality_id = "
                 "default.municipality_dim.municipality_id",
+                "role": None,
+            },
+            "entity_name": "default.repair_order",
+            "entity_type": "link",
+            "id": mock.ANY,
+            "post": {},
+            "pre": {},
+            "user": "dj",
+        },
+        {
+            "activity_type": "create",
+            "node": "default.repair_order",
+            "created_at": mock.ANY,
+            "details": {
+                "dimension": "default.hard_hat_to_delete",
+                "join_cardinality": "many_to_one",
+                "join_sql": "default.repair_order.hard_hat_id = "
+                "default.hard_hat_to_delete.hard_hat_id",
                 "role": None,
             },
             "entity_name": "default.repair_order",
@@ -176,5 +198,97 @@ async def test_get_history_namespace(client_with_service_setup: AsyncClient):
             "post": {},
             "pre": {},
             "user": "dj",
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_get_history_only_subscribed(module__client_with_roads: AsyncClient):
+    """
+    Test getting history only for events the user has a notification preference for
+    """
+    response = await module__client_with_roads.post(
+        "/notifications/subscribe",
+        json={
+            "entity_type": EntityType.LINK,
+            "entity_name": "default.repair_order",
+            "activity_types": [ActivityType.CREATE],
+            "alert_types": ["slack", "email"],
+        },
+    )
+    assert response.status_code == 201
+
+    response = await module__client_with_roads.get("/history?only_subscribed=true")
+    assert response.status_code == 200
+    history = response.json()
+    assert len(history) == 4
+    assert history == [
+        {
+            "id": mock.ANY,
+            "entity_type": "link",
+            "entity_name": "default.repair_order",
+            "node": "default.repair_order",
+            "activity_type": "create",
+            "user": "dj",
+            "pre": {},
+            "post": {},
+            "details": {
+                "dimension": "default.municipality_dim",
+                "join_sql": "default.repair_order.municipality_id = default.municipality_dim.municipality_id",
+                "join_cardinality": "many_to_one",
+                "role": None,
+            },
+            "created_at": mock.ANY,
+        },
+        {
+            "id": mock.ANY,
+            "entity_type": "link",
+            "entity_name": "default.repair_order",
+            "node": "default.repair_order",
+            "activity_type": "create",
+            "user": "dj",
+            "pre": {},
+            "post": {},
+            "details": {
+                "dimension": "default.hard_hat_to_delete",
+                "join_sql": "default.repair_order.hard_hat_id = default.hard_hat_to_delete.hard_hat_id",
+                "join_cardinality": "many_to_one",
+                "role": None,
+            },
+            "created_at": mock.ANY,
+        },
+        {
+            "id": mock.ANY,
+            "entity_type": "link",
+            "entity_name": "default.repair_order",
+            "node": "default.repair_order",
+            "activity_type": "create",
+            "user": "dj",
+            "pre": {},
+            "post": {},
+            "details": {
+                "dimension": "default.hard_hat",
+                "join_sql": "default.repair_order.hard_hat_id = default.hard_hat.hard_hat_id",
+                "join_cardinality": "many_to_one",
+                "role": None,
+            },
+            "created_at": mock.ANY,
+        },
+        {
+            "id": mock.ANY,
+            "entity_type": "link",
+            "entity_name": "default.repair_order",
+            "node": "default.repair_order",
+            "activity_type": "create",
+            "user": "dj",
+            "pre": {},
+            "post": {},
+            "details": {
+                "dimension": "default.dispatcher",
+                "join_sql": "default.repair_order.dispatcher_id = default.dispatcher.dispatcher_id",
+                "join_cardinality": "many_to_one",
+                "role": None,
+            },
+            "created_at": mock.ANY,
         },
     ]

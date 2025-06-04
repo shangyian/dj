@@ -1,15 +1,16 @@
 """
 Basic OAuth and JWT helper functions
 """
+
 import logging
-from http import HTTPStatus
 
 from passlib.context import CryptContext
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.base import ExecutableOption
 
 from datajunction_server.database.user import User
-from datajunction_server.errors import DJError, DJException, ErrorCode
+from datajunction_server.errors import DJAuthenticationException, DJError, ErrorCode
 
 _logger = logging.getLogger(__name__)
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -29,16 +30,25 @@ def get_password_hash(password) -> str:
     return pwd_context.hash(password)
 
 
-async def get_user(username: str, session: AsyncSession) -> User:
+async def get_user(
+    username: str,
+    session: AsyncSession,
+    *options: ExecutableOption,
+) -> User:
     """
     Get a DJ user
     """
     user = (
-        await session.execute(select(User).where(User.username == username))
-    ).scalar_one_or_none()
+        (
+            await session.execute(
+                select(User).options(*options).where(User.username == username),
+            )
+        )
+        .unique()
+        .scalar_one_or_none()
+    )
     if not user:
-        raise DJException(
-            http_status_code=HTTPStatus.UNAUTHORIZED,
+        raise DJAuthenticationException(
             errors=[
                 DJError(
                     message=f"User {username} not found",
@@ -59,8 +69,7 @@ async def validate_user_password(
     """
     user = await get_user(username=username, session=session)
     if not validate_password_hash(password, user.password):
-        raise DJException(
-            http_status_code=HTTPStatus.UNAUTHORIZED,
+        raise DJAuthenticationException(
             errors=[
                 DJError(
                     message=f"Invalid password for user {username}",

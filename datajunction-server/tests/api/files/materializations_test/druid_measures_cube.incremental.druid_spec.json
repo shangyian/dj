@@ -1,11 +1,11 @@
 {
     "dataSchema":{
-        "dataSource":"default_DOT_repairs_cube",
+        "dataSource":"default_DOT_repairs_cube__incremental",
         "granularitySpec":{
             "intervals":[
 
             ],
-            "segmentGranularity":"day",
+            "segmentGranularity":"DAY",
             "type":"uniform"
         },
         "metricsSpec":[

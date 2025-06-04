@@ -1,5 +1,3 @@
-# pylint: disable=too-many-lines, abstract-method, unused-argument, missing-function-docstring,
-# pylint: disable=arguments-differ, too-many-return-statements, function-redefined
 # mypy: ignore-errors
 
 """
@@ -76,7 +74,7 @@ class DispatchMeta(type):
     Dispatch abstract class for function registry
     """
 
-    def __getattribute__(cls, func_name):  # pylint: disable=redefined-outer-name
+    def __getattribute__(cls, func_name):
         if func_name in type.__getattribute__(cls, "registry").get(cls, {}):
 
             def dynamic_dispatch(*args: "Expression"):
@@ -94,7 +92,7 @@ class Dispatch(metaclass=DispatchMeta):
     registry: ClassVar[Dict[str, Dict[Tuple[Tuple[int, Type]], Callable]]] = {}
 
     @classmethod
-    def register(cls, func):  # pylint: disable=redefined-outer-name
+    def register(cls, func):
         func_name = func.__name__
         params = inspect.signature(func).parameters
         spread_types = [[]]
@@ -129,9 +127,7 @@ class Dispatch(metaclass=DispatchMeta):
         return func
 
     @classmethod
-    def dispatch(  # pylint: disable=redefined-outer-name
-        cls, func_name, *args: "Expression"
-    ):
+    def dispatch(cls, func_name, *args: "Expression"):
         type_registry = cls.registry[cls].get(func_name)  # type: ignore
         if not type_registry:
             raise ValueError(
@@ -156,11 +152,11 @@ class Dispatch(metaclass=DispatchMeta):
         raise TypeError(
             f"`{cls.__name__}.{func_name}` got an invalid "
             "combination of types: "
-            f'{", ".join(str(t[1].__name__) for t in types)}',
+            f"{', '.join(str(t[1].__name__) for t in types)}",
         )
 
 
-class Function(Dispatch):  # pylint: disable=too-few-public-methods
+class Function(Dispatch):
     """
     A DJ function.
     """
@@ -182,7 +178,7 @@ class Function(Dispatch):  # pylint: disable=too-few-public-methods
         """
 
 
-class TableFunction(Dispatch):  # pylint: disable=too-few-public-methods
+class TableFunction(Dispatch):
     """
     A DJ table-valued function.
     """
@@ -274,32 +270,52 @@ class Aggregate(Function):
         Compiles the lambda function used by the `aggregate` Spark function so that
         the lambda's expression can be evaluated to determine the result's type.
         """
-        from datajunction_server.sql.parsing import (  # pylint: disable=import-outside-toplevel
-            ast,
-        )
+        from datajunction_server.sql.parsing import ast
 
-        expr, start, merge = args
+        # aggregate's lambda function can take three or four arguments, depending on whether
+        # an optional finish function is provided
+        if len(args) == 4:
+            expr, start, merge, finish = args
+        else:
+            expr, start, merge = args
+            finish = None
+
         available_identifiers = {
             identifier.name: idx for idx, identifier in enumerate(merge.identifiers)
         }
-        columns = list(
+        merge_columns = list(
             merge.expr.filter(
                 lambda x: isinstance(x, ast.Column)
                 and x.alias_or_name.name in available_identifiers,
             ),
         )
-        for col in columns:
+        finish_columns = (
+            list(
+                finish.expr.filter(
+                    lambda x: isinstance(x, ast.Column)
+                    and x.alias_or_name.name in available_identifiers,
+                ),
+            )
+            if finish
+            else []
+        )
+        for col in merge_columns:
             if available_identifiers.get(col.alias_or_name.name) == 0:
                 col.add_type(start.type)
             if available_identifiers.get(col.alias_or_name.name) == 1:
                 col.add_type(expr.type.element.type)
+        for col in finish_columns:
+            if (
+                available_identifiers.get(col.alias_or_name.name) == 0
+            ):  # pragma: no cover
+                col.add_type(start.type)
 
 
 @Aggregate.register  # type: ignore
 def infer_type(
     expr: ct.ListType,
-    start: ct.PrimitiveType,
-    merge: ct.PrimitiveType,
+    start: ct.ColumnType,
+    merge: ct.ColumnType,
 ) -> ct.ColumnType:
     return merge.expr.type
 
@@ -326,7 +342,7 @@ class ApproxCountDistinct(Function):
     """
 
     is_aggregation = True
-    dialects = [Dialect.DRUID]
+    dialects = [Dialect.SPARK, Dialect.DRUID]
 
 
 @ApproxCountDistinct.register
@@ -1028,6 +1044,13 @@ def infer_type(
     return arrays[0].type
 
 
+@Concat.register  # type: ignore
+def infer_type(
+    *maps: ct.MapType,
+) -> ct.MapType:
+    return maps[0].type
+
+
 class ConcatWs(Function):
     """
     concat_ws(separator, [str | array(str)]+) - Returns the concatenation of the
@@ -1198,6 +1221,8 @@ class CountIf(Function):
     """
     count_if(expr) - Returns the number of true values in expr.
     """
+
+    is_aggregation = True
 
 
 @CountIf.register  # type: ignore
@@ -1395,13 +1420,23 @@ def infer_type(arg: Union[ct.StringType, ct.TimestampType]) -> ct.ColumnType:
 
 class DateAdd(Function):
     """
-    Adds a specified number of days to a date.
+    date_add(date|timestamp|str, int) - Adds a specified number of days to a date.
     """
+
+    dialects = [Dialect.SPARK]
 
 
 @DateAdd.register  # type: ignore
 def infer_type(
     start_date: ct.DateType,
+    days: ct.IntegerBase,
+) -> ct.DateType:
+    return ct.DateType()
+
+
+@DateAdd.register  # type: ignore
+def infer_type(
+    start_date: ct.TimestampType,
     days: ct.IntegerBase,
 ) -> ct.DateType:
     return ct.DateType()
@@ -1655,7 +1690,7 @@ def infer_type(
     return ct.DoubleType()
 
 
-class E(Function):  # pylint: disable=invalid-name
+class E(Function):
     """
     e() - Returns the mathematical constant e.
     """
@@ -1758,9 +1793,7 @@ class Exists(Function):
         Compiles the lambda function used by the `filter` Spark function so that
         the lambda's expression can be evaluated to determine the result's type.
         """
-        from datajunction_server.sql.parsing import (  # pylint: disable=import-outside-toplevel
-            ast,
-        )
+        from datajunction_server.sql.parsing import ast
 
         expr, func = args
         if len(func.identifiers) != 1:
@@ -1881,9 +1914,7 @@ class Filter(Function):
         Compiles the lambda function used by the `filter` Spark function so that
         the lambda's expression can be evaluated to determine the result's type.
         """
-        from datajunction_server.sql.parsing import (  # pylint: disable=import-outside-toplevel
-            ast,
-        )
+        from datajunction_server.sql.parsing import ast
 
         expr, func = args
         if len(func.identifiers) > 2:
@@ -2024,7 +2055,7 @@ def infer_type(
     _target_scale: ct.IntegerType,
 ) -> ct.DecimalType:
     target_scale = _target_scale.value
-    if isinstance(args.type, ct.DecimalType):  # pylint: disable=R1705
+    if isinstance(args.type, ct.DecimalType):
         precision = max(args.type.precision - args.type.scale + 1, -target_scale + 1)
         scale = min(args.type.scale, max(0, target_scale))
         return ct.DecimalType(precision, scale)
@@ -2065,9 +2096,7 @@ class Forall(Function):
         Compiles the lambda function used by the `filter` Spark function so that
         the lambda's expression can be evaluated to determine the result's type.
         """
-        from datajunction_server.sql.parsing import (  # pylint: disable=import-outside-toplevel
-            ast,
-        )
+        from datajunction_server.sql.parsing import ast
 
         expr, func = args
         if len(func.identifiers) != 1:
@@ -2128,14 +2157,13 @@ def infer_type(
     schema: ct.StringType,
     arg3: Optional[ct.MapType] = None,
 ) -> ct.ColumnType:
-    # TODO: Handle options?  # pylint: disable=fixme
-    # pylint: disable=import-outside-toplevel
+    # TODO: Handle options?
     from datajunction_server.sql.parsing.backends.antlr4 import (
-        parse_rule,  # pragma: no cover
-    )
+        parse_rule,
+    )  # pragma: no cover
 
     return ct.StructType(
-        *parse_rule(schema.value, "complexColTypeList")
+        *parse_rule(schema.value, "complexColTypeList"),
     )  # pragma: no cover
 
 
@@ -2146,20 +2174,18 @@ class FromJson(Function):  # pragma: no cover
 
 
 @FromJson.register  # type: ignore
-def infer_type(  # pragma: no cover
+def infer_type(
     json: ct.StringType,
     schema: ct.StringType,
     options: Optional[Function] = None,
 ) -> ct.StructType:
-    # TODO: Handle options?  # pylint: disable=fixme
-    # pylint: disable=import-outside-toplevel
-    from datajunction_server.sql.parsing.backends.antlr4 import (
-        parse_rule,  # pragma: no cover
-    )
+    from datajunction_server.sql.parsing.backends.antlr4 import parse_rule
 
-    return ct.StructType(
-        *parse_rule(schema.value, "complexColTypeList")
-    )  # pragma: no cover
+    schema_type = re.sub(r"^'(.*)'$", r"\1", schema.value)
+    try:
+        return parse_rule(schema_type, "dataType")
+    except DJParseException:
+        return ct.StructType(*parse_rule(schema_type, "complexColTypeList"))
 
 
 class FromUnixtime(Function):
@@ -2297,9 +2323,7 @@ class HistogramNumeric(Function):
 @HistogramNumeric.register  # type: ignore
 def infer_type(arg1: ct.ColumnType, arg2: ct.IntegerType) -> ct.ColumnType:
     # assuming that there's a StructType for the bin and frequency
-    from datajunction_server.sql.parsing import (  # pylint: disable=import-outside-toplevel
-        ast,
-    )
+    from datajunction_server.sql.parsing import ast
 
     return ct.ListType(
         element_type=ct.StructType(
@@ -2917,7 +2941,7 @@ class MakeTimestamp(Function):
 
 
 @MakeTimestamp.register  # type: ignore
-def infer_type(  # pylint: disable=too-many-arguments
+def infer_type(
     year: ct.IntegerType,
     month: ct.IntegerType,
     day: ct.IntegerType,
@@ -2936,7 +2960,7 @@ class MakeTimestampLtz(Function):
 
 
 @MakeTimestampLtz.register  # type: ignore
-def infer_type(  # pylint: disable=too-many-arguments
+def infer_type(
     year: ct.IntegerType,
     month: ct.IntegerType,
     day: ct.IntegerType,
@@ -2956,7 +2980,7 @@ class MakeTimestampNtz(Function):
 
 
 @MakeTimestampNtz.register  # type: ignore
-def infer_type(  # pylint: disable=too-many-arguments
+def infer_type(
     year: ct.IntegerType,
     month: ct.IntegerType,
     day: ct.IntegerType,
@@ -3044,9 +3068,7 @@ class MapFilter(Function):
         Compiles the lambda function used by the `map_filter` Spark function so that
         the lambda's expression can be evaluated to determine the result's type.
         """
-        from datajunction_server.sql.parsing import (  # pylint: disable=import-outside-toplevel
-            ast,
-        )
+        from datajunction_server.sql.parsing import ast
 
         expr, func = args
         if len(func.identifiers) != 2:
@@ -3120,19 +3142,46 @@ def infer_type(map_: ct.MapType) -> ct.ColumnType:
     return ct.ListType(element_type=map_.type.value.type)
 
 
-# TODO  # pylint: disable=fixme
-# class MapZipWith(Function):
-#     """
-#     map_zip_with(map1, map2, function) - Returns a merged map of two given maps by
-#     applying function to the pair of values with the same key.
-#     """
-#
-#
-# @MapZipWith.register  # type: ignore
-# def infer_type(
-#     map1: ct.MapType, map2: ct.MapType, function: ct.ColumnType
-# ) -> ct.ColumnType:
-#     return ct.MapType()
+class MapZipWith(Function):
+    """
+    map_zip_with(map1, map2, function) - Returns a merged map of two given maps by
+    applying function to the pair of values with the same key.
+    """
+
+    @staticmethod
+    def compile_lambda(*args):
+        """
+        Compiles the lambda function used by the `map_zip_with` Spark function so that
+        the lambda's expression can be evaluated to determine the result's type.
+        """
+        from datajunction_server.sql.parsing import ast
+
+        map1, map2, func = args
+        available_identifiers = {
+            identifier.name: idx for idx, identifier in enumerate(func.identifiers)
+        }
+        columns = list(
+            func.expr.filter(
+                lambda x: isinstance(x, ast.Column)
+                and x.alias_or_name.name in available_identifiers,
+            ),
+        )
+        for col in columns:
+            if available_identifiers.get(col.alias_or_name.name) == 0:
+                col.add_type(map1.type.key.type)  # pragma: no cover
+            if available_identifiers.get(col.alias_or_name.name) == 1:
+                col.add_type(map1.type)
+            if available_identifiers.get(col.alias_or_name.name) == 2:
+                col.add_type(map2.type)
+
+
+@MapZipWith.register  # type: ignore
+def infer_type(
+    map1: ct.MapType,
+    map2: ct.MapType,
+    function: ct.ColumnType,
+) -> ct.ColumnType:
+    return map1.type
 
 
 class Mask(Function):
@@ -3166,22 +3215,38 @@ class Max(Function):
 
 @Max.register  # type: ignore
 def infer_type(
-    arg: ct.NumberType,
-) -> ct.NumberType:
-    return arg.type
+    arg: ct.StringType,
+) -> ct.StringType:
+    return arg.type  # pragma: no cover
 
 
 @Max.register  # type: ignore
 def infer_type(
-    arg: ct.StringType,
-) -> ct.StringType:
-    return arg.type
+    arg: ct.NumberType,
+) -> ct.NumberType:
+    return arg.type  # pragma: no cover
+
+
+@Max.register  # type: ignore
+def infer_type(
+    arg: ct.DateType,
+) -> ct.DateType:
+    return arg.type  # pragma: no cover
+
+
+@Max.register  # type: ignore
+def infer_type(
+    arg: ct.TimestampType,
+) -> ct.TimestampType:
+    return arg.type  # pragma: no cover
 
 
 class MaxBy(Function):
     """
     max_by(val, key) - Returns the value of val corresponding to the maximum value of key.
     """
+
+    is_aggregation = True
 
 
 @MaxBy.register  # type: ignore
@@ -3222,7 +3287,7 @@ def infer_type(arg: ct.NumberType) -> ct.ColumnType:
     return ct.DoubleType()
 
 
-# TODO: fix parsing of:  # pylint: disable=fixme
+# TODO: fix parsing of:
 #   SELECT median(col) FROM VALUES (INTERVAL '0' MONTH),
 #   (INTERVAL '10' MONTH) AS tab(col)
 #   in order to test this
@@ -3242,9 +3307,16 @@ class Min(Function):
 
 @Min.register  # type: ignore
 def infer_type(
+    arg: ct.StringType,
+) -> ct.StringType:
+    return arg.type  # pragma: no cover
+
+
+@Min.register  # type: ignore
+def infer_type(
     arg: ct.NumberType,
 ) -> ct.NumberType:
-    return arg.type
+    return arg.type  # pragma: no cover
 
 
 @Min.register  # type: ignore
@@ -3265,6 +3337,8 @@ class MinBy(Function):
     """
     min_by(val, key) - Returns the value of val corresponding to the minimum value of key.
     """
+
+    is_aggregation = True
 
 
 @MinBy.register  # type: ignore
@@ -3686,6 +3760,24 @@ def infer_type(_: ct.ColumnType) -> ct.IntegerType:
     return ct.IntegerType()
 
 
+class RegexpExtract(Function):
+    """
+    regexp_extract(str, regexp[, idx]) - Extract the first string in the str that
+    match the regexp expression and corresponding to the regex group index.
+    """
+
+    dialects = [Dialect.SPARK, Dialect.DRUID]
+
+
+@RegexpExtract.register
+def infer_type(  # type: ignore
+    str_: ct.StringType,
+    regexp: ct.StringType,
+    idx: Optional[ct.IntegerType] = 1,
+) -> ct.StringType:
+    return ct.StringType()
+
+
 class RegexpLike(Function):
     """
     regexp_like(str, regexp) - Returns true if str matches regexp, or false otherwise
@@ -3700,6 +3792,25 @@ def infer_type(  # type: ignore
     arg2: ct.StringType,
 ) -> ct.BooleanType:
     return ct.BooleanType()
+
+
+class RegexpReplace(Function):
+    """
+    regexp_replace(str, regexp, rep[, position]) - Replaces all substrings of str that
+    match regexp with rep.
+    """
+
+    dialects = [Dialect.SPARK, Dialect.DRUID]
+
+
+@RegexpReplace.register
+def infer_type(  # type: ignore
+    str_: ct.StringType,
+    regexp: ct.StringType,
+    rep: ct.StringType,
+    position: Optional[ct.IntegerType] = 1,
+) -> ct.StringType:
+    return ct.StringType()
 
 
 class Replace(Function):
@@ -3781,11 +3892,11 @@ class Sequence(Function):
 
 @Sequence.register
 def infer_type(  # type: ignore
-    start: ct.IntegerType,
-    end: ct.IntegerType,
-    step: Optional[ct.IntegerType] = None,
+    start: ct.IntegerBase,
+    end: ct.IntegerBase,
+    step: Optional[ct.IntegerBase] = None,
 ) -> ct.ListType:
-    return ct.ListType(element_type=ct.IntegerType())
+    return ct.ListType(element_type=start.type)
 
 
 @Sequence.register
@@ -4033,7 +4144,14 @@ def infer_type(
     return ct.DoubleType()
 
 
-class ToDate(Function):  # pragma: no cover # pylint: disable=abstract-method
+@Sum.register  # type: ignore
+def infer_type(
+    arg: Union[ct.DateType, ct.TimestampType],
+) -> ct.DoubleType:
+    return ct.DoubleType()
+
+
+class ToDate(Function):  # pragma: no cover
     """
     Converts a date string to a date value.
     """
@@ -4047,7 +4165,7 @@ def infer_type(
     return ct.DateType()
 
 
-class ToTimestamp(Function):  # pragma: no cover # pylint: disable=abstract-method
+class ToTimestamp(Function):  # pragma: no cover
     """
     Parses the timestamp_str expression with the fmt expression to a timestamp.
     """
@@ -4073,9 +4191,7 @@ class Transform(Function):
         Compiles the lambda function used by the `transform` Spark function so that
         the lambda's expression can be evaluated to determine the result's type.
         """
-        from datajunction_server.sql.parsing import (  # pylint: disable=import-outside-toplevel
-            ast,
-        )
+        from datajunction_server.sql.parsing import ast
 
         expr, func = args
         available_identifiers = {
@@ -4105,6 +4221,88 @@ def infer_type(
     return ct.ListType(element_type=func.expr.type)
 
 
+class TransformKeys(Function):
+    """
+    transform_keys(expr, func) - Transforms keys in a map using the function
+    """
+
+    @staticmethod
+    def compile_lambda(*args):
+        """
+        Compiles the lambda function used by the `transform_keys` Spark function so that
+        the lambda's expression can be evaluated to determine the result's type.
+        """
+        from datajunction_server.sql.parsing import ast
+
+        expr, func = args
+        available_identifiers = {
+            identifier.name: idx for idx, identifier in enumerate(func.identifiers)
+        }
+        columns = list(
+            func.expr.filter(
+                lambda x: isinstance(x, ast.Column)
+                and x.alias_or_name.name in available_identifiers,
+            ),
+        )
+        for col in columns:
+            # The map key arg
+            if available_identifiers.get(col.alias_or_name.name) == 0:
+                col.add_type(expr.type.key.type)
+
+            # The map value arg
+            if available_identifiers.get(col.alias_or_name.name) == 1:
+                col.add_type(expr.type.value.type)
+
+
+@TransformKeys.register  # type: ignore
+def infer_type(
+    expr: ct.MapType,
+    func: ct.ColumnType,
+) -> ct.MapType:
+    return ct.MapType(key_type=func.expr.type, value_type=expr.type.value.type)
+
+
+class TransformValues(Function):
+    """
+    transform_values(expr, func) - Transforms values in a map using the function
+    """
+
+    @staticmethod
+    def compile_lambda(*args):
+        """
+        Compiles the lambda function used by the `transform_values` Spark function so that
+        the lambda's expression can be evaluated to determine the result's type.
+        """
+        from datajunction_server.sql.parsing import ast
+
+        expr, func = args
+        available_identifiers = {
+            identifier.name: idx for idx, identifier in enumerate(func.identifiers)
+        }
+        columns = list(
+            func.expr.filter(
+                lambda x: isinstance(x, ast.Column)
+                and x.alias_or_name.name in available_identifiers,
+            ),
+        )
+        for col in columns:
+            # The map key arg
+            if available_identifiers.get(col.alias_or_name.name) == 0:
+                col.add_type(expr.type.key.type)
+
+            # The map value arg
+            if available_identifiers.get(col.alias_or_name.name) == 1:
+                col.add_type(expr.type.value.type)
+
+
+@TransformValues.register  # type: ignore
+def infer_type(
+    expr: ct.MapType,
+    func: ct.ColumnType,
+) -> ct.MapType:
+    return ct.MapType(key_type=expr.type.key.type, value_type=func.expr.type)
+
+
 class Trim(Function):
     """
     Removes leading and trailing whitespace from a string value.
@@ -4118,6 +4316,62 @@ def infer_type(arg: ct.StringType) -> ct.StringType:
     return ct.StringType()
 
 
+class Timestamp(Function):
+    """
+    timestamp(expr) - Casts the value expr to the target data type timestamp.
+    """
+
+    # Druid has this function but it means something else: unix_millis()
+    dialects = [Dialect.SPARK]
+
+
+@Timestamp.register
+def infer_type(expr: ct.StringType) -> ct.TimestampType:
+    return ct.TimestampType()
+
+
+class TimestampMicros(Function):
+    """
+    timestamp_micros(microseconds) - Creates timestamp from the number of microseconds
+    since UTC epoch.
+    """
+
+    dialects = [Dialect.SPARK]
+
+
+@TimestampMicros.register
+def infer_type(microseconds: ct.BigIntType) -> ct.TimestampType:
+    return ct.TimestampType()
+
+
+class TimestampMillis(Function):
+    """
+    timestamp_millis(milliseconds) - Creates timestamp from the number of milliseconds
+    since UTC epoch.
+    """
+
+    dialects = [Dialect.SPARK]
+
+
+@TimestampMillis.register
+def infer_type(milliseconds: ct.BigIntType) -> ct.TimestampType:
+    return ct.TimestampType()
+
+
+class TimestampSeconds(Function):
+    """
+    timestamp_seconds(seconds) - Creates timestamp from the number of seconds
+    (can be fractional) since UTC epoch.
+    """
+
+    dialects = [Dialect.SPARK]
+
+
+@TimestampSeconds.register
+def infer_type(seconds: ct.NumberType) -> ct.TimestampType:
+    return ct.TimestampType()
+
+
 class Unhex(Function):
     """
     unhex(str) - Interprets each pair of characters in the input string as a
@@ -4129,6 +4383,82 @@ class Unhex(Function):
 @Unhex.register  # type: ignore
 def infer_type(arg: ct.StringType) -> ct.ColumnType:
     return ct.BinaryType()
+
+
+class UnixDate(Function):
+    """
+    unix_date(date) - Returns the number of days since 1970-01-01.
+    """
+
+    dialects = [Dialect.SPARK]
+
+
+@UnixDate.register  # type: ignore
+def infer_type(arg: ct.DateType) -> ct.IntegerType:
+    return ct.IntegerType()
+
+
+class UnixMicros(Function):
+    """
+    unix_micros(timestamp) - Returns the number of microseconds since 1970-01-01 00:00:00 UTC.
+    """
+
+    dialects = [Dialect.SPARK]
+
+
+@UnixMicros.register  # type: ignore
+def infer_type(arg: ct.TimestampType) -> ct.BigIntType:
+    return ct.BigIntType()
+
+
+class UnixMillis(Function):
+    """
+    unix_millis(timestamp) - Returns the number of milliseconds since 1970-01-01 00:00:00 UTC.
+    Truncates higher levels of precision.
+    """
+
+    dialects = [Dialect.SPARK]
+
+
+@UnixMillis.register  # type: ignore
+def infer_type(arg: ct.TimestampType) -> ct.BigIntType:
+    return ct.BigIntType()
+
+
+class UnixSeconds(Function):
+    """
+    unix_seconds(timestamp) - Returns the number of seconds since 1970-01-01 00:00:00 UTC.
+    Truncates higher levels of precision.
+    """
+
+    dialects = [Dialect.SPARK]
+
+
+@UnixSeconds.register  # type: ignore
+def infer_type(arg: ct.TimestampType) -> ct.BigIntType:
+    return ct.BigIntType()
+
+
+class UnixTimestamp(Function):
+    """
+    unix_timestamp([time_exp[, fmt]]) - Returns the UNIX timestamp of current or specified time.
+
+    Arguments:
+        time_exp - A date/timestamp or string. If not provided, this defaults to current time.
+        fmt - Date/time format pattern to follow. Ignored if time_exp is not a string.
+            Default value is "yyyy-MM-dd HH:mm:ss". See Datetime Patterns for valid date and time
+            format patterns.
+    """
+
+    dialects = [Dialect.SPARK, Dialect.DRUID]
+
+
+@UnixTimestamp.register  # type: ignore
+def infer_type(
+    time_exp: Optional[ct.StringType] = None,
+    fmt: Optional[ct.StringType] = None,
+) -> ct.BigIntType:
+    return ct.BigIntType()
 
 
 class Upper(Function):
@@ -4247,7 +4577,7 @@ class Unnest(TableFunction):
     It will generate a new row for each element in the specified column.
     """
 
-    dialects = [Dialect.SPARK, Dialect.DRUID]
+    dialects = [Dialect.TRINO, Dialect.DRUID]
 
 
 @Unnest.register

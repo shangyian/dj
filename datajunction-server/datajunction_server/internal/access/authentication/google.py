@@ -1,6 +1,7 @@
 """
 Google OAuth helper functions
 """
+
 import logging
 import secrets
 from http import HTTPStatus
@@ -13,7 +14,7 @@ from google.auth.external_account_authorized_user import Credentials
 from sqlalchemy import select
 
 from datajunction_server.database.user import User
-from datajunction_server.errors import DJException
+from datajunction_server.errors import DJAuthenticationException
 from datajunction_server.internal.access.authentication.basic import get_password_hash
 from datajunction_server.models.user import OAuthProvider
 from datajunction_server.utils import get_session, get_settings
@@ -21,7 +22,7 @@ from datajunction_server.utils import get_session, get_settings
 _logger = logging.getLogger(__name__)
 
 settings = get_settings()
-flow = (  # pylint: disable=invalid-name
+flow = (
     google_auth_oauthlib.flow.Flow.from_client_secrets_file(
         settings.google_oauth_client_secret_file,
         scopes=[
@@ -72,17 +73,17 @@ def get_google_user(token: str) -> User:
         timeout=10,
     )
     if response.status_code in (200, 201):
-        raise DJException(
+        raise DJAuthenticationException(
             http_status_code=HTTPStatus.FORBIDDEN,
             message=f"Error retrieving Google user: {response.text}",
         )
     user_data = response.json()
     if "message" in user_data and user_data["message"] == "Bad credentials":
-        raise DJException(
+        raise DJAuthenticationException(
             http_status_code=HTTPStatus.FORBIDDEN,
             message=f"Error retrieving Google user: {response.text}",
         )
-    session = next(get_session())  # type: ignore  # pylint: disable=no-value-for-parameter
+    session = next(get_session())  # type: ignore
     existing_user = session.execute(
         select(User).where(User.email == user_data["login"]),
     ).scalar()

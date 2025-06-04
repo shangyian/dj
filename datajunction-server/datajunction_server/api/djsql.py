@@ -2,9 +2,9 @@
 Data related APIs.
 """
 
-from typing import Annotated, Optional
+from typing import Optional
 
-from fastapi import Depends, Header, Request
+from fastapi import Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette.sse import EventSourceResponse
 
@@ -16,7 +16,7 @@ from datajunction_server.models import access
 from datajunction_server.models.query import QueryCreate, QueryWithResults
 from datajunction_server.service_clients import QueryServiceClient
 from datajunction_server.utils import (
-    get_current_user,
+    get_and_update_current_user,
     get_query_service_client,
     get_session,
     get_settings,
@@ -27,23 +27,24 @@ router = SecureAPIRouter(tags=["DJSQL"])
 
 
 @router.get("/djsql/data", response_model=QueryWithResults)
-async def get_data_for_djsql(  # pylint: disable=R0914, R0913
+async def get_data_for_djsql(
     query: str,
     async_: bool = False,
     *,
-    cache_control: Annotated[str, Header()] = "",
     session: AsyncSession = Depends(get_session),
+    request: Request,
     query_service_client: QueryServiceClient = Depends(get_query_service_client),
     engine_name: Optional[str] = None,
     engine_version: Optional[str] = None,
-    current_user: Optional[User] = Depends(get_current_user),
-    validate_access: access.ValidateAccessFn = Depends(  # pylint: disable=W0621
+    current_user: User = Depends(get_and_update_current_user),
+    validate_access: access.ValidateAccessFn = Depends(
         validate_access,
-    )
+    ),
 ) -> QueryWithResults:
     """
     Return data for a DJ SQL query
     """
+    request_headers = dict(request.headers)
     access_control = access.AccessControlStore(
         validate_access=validate_access,
         user=current_user,
@@ -67,7 +68,7 @@ async def get_data_for_djsql(  # pylint: disable=R0914, R0913
 
     result = query_service_client.submit_query(
         query_create,
-        headers={"Cache-Control": cache_control},
+        request_headers=request_headers,
     )
 
     # Inject column info if there are results
@@ -76,28 +77,28 @@ async def get_data_for_djsql(  # pylint: disable=R0914, R0913
     return result
 
 
-# pylint: disable=R0914, R0913
 @router.get("/djsql/stream/", response_model=QueryWithResults)
-async def get_data_stream_for_djsql(  # pragma: no cover
+async def get_data_stream_for_djsql(
     query: str,
     *,
-    cache_control: Annotated[str, Header()] = "",
     session: AsyncSession = Depends(get_session),
     request: Request,
     query_service_client: QueryServiceClient = Depends(get_query_service_client),
     engine_name: Optional[str] = None,
     engine_version: Optional[str] = None,
-    current_user: Optional[User] = Depends(get_current_user),
-    validate_access: access.ValidateAccessFn = Depends(  # pylint: disable=W0621
+    current_user: User = Depends(get_and_update_current_user),
+    validate_access: access.ValidateAccessFn = Depends(
         validate_access,
-    )
+    ),
 ) -> QueryWithResults:  # pragma: no cover
     """
     Return data for a DJ SQL query using server side events
     """
-    access_control = access.AccessControl(
+    request_headers = dict(request.headers)
+    access_control = access.AccessControlStore(
         validate_access=validate_access,
         user=current_user,
+        base_verb=access.ResourceRequestVerb.EXECUTE,
     )
     translated_sql, engine, catalog = await build_sql_for_dj_query(
         session,
@@ -118,11 +119,12 @@ async def get_data_stream_for_djsql(  # pragma: no cover
     # Submits the query, equivalent to calling POST /data/ directly
     initial_query_info = query_service_client.submit_query(
         query_create,
-        headers={"Cache-Control": cache_control},
+        request_headers=request_headers,
     )
     return EventSourceResponse(
-        await query_event_stream(
+        query_event_stream(
             query=initial_query_info,
+            request_headers=request_headers,
             query_service_client=query_service_client,
             columns=translated_sql.columns,  # type: ignore
             request=request,

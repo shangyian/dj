@@ -51,6 +51,7 @@ button.nav-link {
   font: inherit;
   cursor: pointer;
   outline: inherit;
+  width: max-content;
 }
 code {
   font-family: Consolas, source-code-pro, Menlo, Monaco, Consolas, 'Courier New',
@@ -287,6 +288,10 @@ tr {
   grid-template-columns: auto auto auto;
   grid-gap: 8px;
   padding: 8px;
+}
+.table-responsive {
+  width: auto;
+  grid-template-columns: 200px auto;
 }
 .table-vertical {
   display: contents;
@@ -593,6 +598,12 @@ tbody th {
   color: #777777;
 }
 
+.strategy {
+  background-color: rgb(255, 239, 215) !important;
+  color: #6c3b21;
+  font-size: 1rem;
+}
+
 .status__valid {
   color: #00b368;
 }
@@ -723,6 +734,11 @@ pre {
   margin: 0;
   list-style: none;
 }
+.menu-link {
+  display: inline-grid;
+  margin: 0;
+  float: right;
+}
 .menu-item .menu-link {
   cursor: pointer;
   align-items: center;
@@ -766,6 +782,7 @@ pre {
 
 .card-header h2 {
   font-family: 'Jost';
+  display: inline-block;
 }
 
 .text-gray-400 {
@@ -922,7 +939,7 @@ pre {
 }
 
 .centerPopover {
-  position: absolute !important;
+  position: fixed !important;
   top: 1%;
   left: 25%;
 
@@ -1018,17 +1035,45 @@ pre {
 }
 
 .add_button {
-  background-color: #f0f8ff !important;
-  color: #24518f;
-  text-transform: uppercase;
+  background-color: #2f7986 !important;
+  color: #fff;
+  text-transform: none;
   vertical-align: middle;
-  padding: 0.2rem 0.5rem 0.1rem 0.5rem;
-  border: 1px solid #819bc0;
-  font-size: 1.2rem;
+  padding-right: 1rem;
+  padding-left: 1rem;
+  padding-top: 0.5rem;
+  padding-bottom: 0.5rem;
+  margin-bottom: 0.5rem !important;
+  font-size: 1rem;
   border-radius: 0.5rem;
   word-wrap: break-word;
   white-space: break-spaces;
-  margin-left: 1rem;
+}
+
+.pagination {
+  background-color: #fff !important;
+  color: #74b7c3;
+  border: 1px solid #74b7c3;
+  text-transform: none;
+  vertical-align: middle;
+  padding-right: 1rem;
+  padding-left: 1rem;
+  padding-top: 0.5rem;
+  padding-bottom: 0.5rem;
+  margin-left: 0.5rem !important;
+  margin-bottom: 0.5rem !important;
+  font-size: 1rem;
+  border-radius: 0.2rem;
+  word-wrap: break-word;
+  white-space: break-spaces;
+  text-decoration: none;
+}
+.pagination:hover {
+  background-color: #b6dae0 !important;
+  color: #436e76;
+  text-transform: none;
+  text-decoration: none;
+  cursor: pointer;
 }
 
 .edit_button {
@@ -1055,6 +1100,15 @@ pre {
 
 .tag_value:hover {
   background-color: #5c3b8f50;
+}
+.download_notebook {
+  color: #5c3b8f;
+  background-color: #ffefd0;
+  margin: 0.25rem;
+  font-size: 100%;
+}
+.download_notebook:hover {
+  background-color: #fedda1 !important;
 }
 
 .modal-backdrop.in {
@@ -1088,10 +1142,6 @@ pre {
   -webkit-transition: opacity 0.15s linear;
   -o-transition: opacity 0.15s linear;
   transition: opacity 0.15s linear;
-}
-
-.partitionLink:hover {
-  text-decoration: none;
 }
 
 .dimensionsList {
@@ -1201,4 +1251,297 @@ pre {
   color: #055d20;
   text-transform: uppercase;
   padding-left: 10px;
+}
+
+.validation_error {
+  border: #b34b0025 1px solid;
+  border-left: #b34b00 5px solid;
+  padding-left: 20px;
+  padding-top: 5px;
+  padding-bottom: 5px;
+  font-size: small;
+  width: 600px;
+  word-wrap: break-word;
+  margin-top: 3px;
+  background-color: #ffffff;
+  margin-bottom: 3px;
+  margin-left: -20px;
+}
+
+.partitionLink {
+  /*border: 1px solid #ccc4d5;*/
+  padding: 12px;
+  margin: 5px;
+  border-radius: 0.375rem;
+  background-color: #ccc4d525;
+}
+.partitionLink:hover {
+  background-color: rgba(157, 147, 168, 0.15);
+}
+.partitionLink a:hover {
+  text-decoration: none;
+}
+
+.backfills {
+  margin-left: -4rem;
+  --spacing: 1.5rem;
+  --radius: 10px;
+}
+
+.backfills li {
+  display: block;
+  position: relative;
+  padding-left: calc(2 * var(--spacing) - var(--radius) - 2px);
+}
+
+.backfills ul {
+  margin-left: calc(var(--radius) - var(--spacing));
+  padding-left: 2rem;
+}
+
+.backfills ul li {
+  border-left: 2px solid #ddd;
+}
+
+.backfills ul li:last-child {
+  border-color: transparent;
+}
+
+.backfills ul li::before {
+  content: '';
+  display: block;
+  position: absolute;
+  top: calc(var(--spacing) / -2);
+  left: -2px;
+  width: calc(var(--spacing) + 2px);
+  height: calc(var(--spacing) + 1px);
+  border: solid #ddd;
+  border-width: 0 0 2px 2px;
+}
+
+.backfills summary {
+  display: block;
+  cursor: pointer;
+  margin-bottom: 10px;
+}
+
+.backfills summary::marker,
+.backfills summary::-webkit-details-marker {
+  display: none;
+}
+
+.backfills summary:focus {
+  outline: none;
+}
+
+.backfills summary:focus-visible {
+  outline: 1px dotted #000;
+}
+
+.backfills summary::before {
+  z-index: 1;
+  /*background : #696 url('expand-collapse.svg') 0 0;*/
+}
+
+.backfills details[open] > summary::before {
+  background-position: calc(-2 * var(--radius)) 0;
+}
+
+.backfills_header {
+  font-size: 16px;
+  margin-left: 18px;
+  border-left: 2px solid #ddd;
+  padding-left: 40px;
+  margin-bottom: 10px;
+}
+
+.tr {
+  display: inline-flex;
+}
+.tr li {
+  padding-right: 10px;
+}
+.td {
+  display: table-cell;
+  padding: 8px;
+}
+
+.operator {
+  background-color: #efefef;
+  border-radius: 2px;
+  border-style: none;
+  padding: 0.4rem;
+  font-family: Lato, 'sans-serif';
+  font-size: 110%;
+  border-right: 16px solid transparent;
+  margin-left: 0.4rem;
+}
+
+.backfills summary::marker,
+.backfills summary::-webkit-details-marker {
+  display: none;
+}
+
+.backfills summary:focus {
+  outline: none;
+}
+
+.backfills summary:focus-visible {
+  outline: 1px dotted #000;
+}
+
+.backfills summary::before {
+  z-index: 1;
+  /*background : #696 url('expand-collapse.svg') 0 0;*/
+}
+
+.backfills details[open] > summary::before {
+  background-position: calc(-2 * var(--radius)) 0;
+}
+
+.backfills_header {
+  font-size: 16px;
+  margin-left: 18px;
+  border-left: 2px solid #ddd;
+  padding-left: 40px;
+  margin-bottom: 10px;
+}
+
+.tr {
+  display: inline-flex;
+}
+.tr li {
+  padding-right: 10px;
+}
+.td {
+  display: table-cell;
+  padding: 8px;
+}
+
+table {
+  width: 100%;
+  height: min-content;
+}
+
+.queryrunner-filters {
+  background-color: #fff;
+  padding-right: 20px;
+}
+
+.tooltip {
+  position: relative;
+  display: inline-block;
+  border-bottom: 1px dotted black;
+}
+
+.tooltip .tooltiptext {
+  visibility: hidden;
+  width: 120px;
+  background-color: #555;
+  color: #fff;
+  text-align: center;
+  border-radius: 6px;
+  padding: 15px;
+  position: absolute;
+  z-index: 1;
+
+  top: -5px;
+  left: 125%;
+  /*bottom: 125%;*/
+  /*left: 50%;*/
+  margin-left: -60px;
+  opacity: 0;
+  transition: opacity 0.3s;
+}
+
+.tooltip .tooltiptext::after {
+  content: '';
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  margin-left: -5px;
+  border-width: 5px;
+  border-style: solid;
+  border-color: #555 transparent transparent transparent;
+}
+
+.tooltip:hover .tooltiptext {
+  visibility: visible;
+  opacity: 1;
+}
+
+.queryrunner {
+  display: grid;
+  grid-template-columns: 300px 1fr;
+  grid-template-rows: 250px 1fr;
+  gap: 20px;
+  grid-template-areas:
+    'left righttop'
+    'left rightbottom';
+  margin-top: 1rem;
+}
+.left {
+  grid-area: left;
+}
+.righttop {
+  grid-area: righttop;
+}
+.rightbottom {
+  grid-area: rightbottom;
+}
+
+.queryrunner-query pre {
+  border-radius: 0;
+  margin-top: 0;
+  margin-bottom: 0;
+  padding: 1rem !important;
+}
+
+.tab-item {
+  align-items: center;
+  background: #0000;
+  border: 0;
+  cursor: pointer;
+  margin: 0 32px 0 0;
+  outline: none;
+  padding: 12px 0;
+  text-transform: uppercase;
+  user-select: none;
+  width: fit-content !important;
+}
+.query-info {
+  list-style-type: none;
+  padding-bottom: 10px;
+}
+.query-info label {
+  margin-left: -10px;
+}
+.active {
+  border-bottom: 2px solid #007acc;
+}
+.dropdown-menu {
+  display: none;
+  position: absolute;
+  top: 100%;
+  left: 0;
+  z-index: 1000;
+  float: left;
+  min-width: 15rem;
+  padding: 0.5rem;
+  margin: 0;
+  font-size: 1rem;
+  color: #212529;
+  text-align: left;
+  list-style: none;
+  background-color: #fff;
+  background-clip: padding-box;
+  border: 1px solid rgba(0, 0, 0, 0.15);
+  border-radius: 0.25rem;
+  box-shadow: 0 0.5rem 1rem rgba(0, 0, 0, 0.175);
+}
+.dropdown {
+  position: relative;
+}
+.dropdown:hover .dropdown-menu {
+  display: block;
 }

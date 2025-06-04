@@ -1,8 +1,9 @@
 """
 Available materialization jobs.
 """
+
 import abc
-from typing import Optional
+from typing import Dict, List, Optional
 
 from datajunction_server.database.materialization import Materialization
 from datajunction_server.models.engine import Dialect
@@ -13,6 +14,7 @@ from datajunction_server.models.materialization import (
     MaterializationStrategy,
 )
 from datajunction_server.models.partition import PartitionBackfill
+from datajunction_server.naming import amenable_name
 from datajunction_server.service_clients import QueryServiceClient
 from datajunction_server.sql.parsing import ast
 from datajunction_server.sql.parsing.backends.antlr4 import parse
@@ -21,29 +23,32 @@ from datajunction_server.utils import get_settings
 settings = get_settings()
 
 
-class MaterializationJob(abc.ABC):  # pylint: disable=too-few-public-methods
+class MaterializationJob(abc.ABC):
     """
     Base class for a materialization job
     """
 
     dialect: Optional[Dialect] = None
 
-    def __init__(self):
-        ...
+    def __init__(self): ...
 
     def run_backfill(
         self,
         materialization: Materialization,
-        backfill: PartitionBackfill,
+        partitions: List[PartitionBackfill],
         query_service_client: QueryServiceClient,
+        request_headers: Optional[Dict[str, str]] = None,
     ) -> MaterializationInfo:
         """
         Kicks off a backfill based on the spec using the query service
         """
         return query_service_client.run_backfill(
             materialization.node_revision.name,
+            materialization.node_revision.version,
+            materialization.node_revision.type,
             materialization.name,  # type: ignore
-            backfill,
+            partitions,
+            request_headers=request_headers,
         )
 
     @abc.abstractmethod
@@ -58,7 +63,7 @@ class MaterializationJob(abc.ABC):  # pylint: disable=too-few-public-methods
         """
 
 
-class SparkSqlMaterializationJob(  # pylint: disable=too-few-public-methods # pragma: no cover
+class SparkSqlMaterializationJob(  # pragma: no cover
     MaterializationJob,
 ):
     """
@@ -71,6 +76,7 @@ class SparkSqlMaterializationJob(  # pylint: disable=too-few-public-methods # pr
         self,
         materialization: Materialization,
         query_service_client: QueryServiceClient,
+        request_headers: Optional[Dict[str, str]] = None,
     ) -> MaterializationInfo:
         """
         Placeholder for the actual implementation.
@@ -93,6 +99,29 @@ class SparkSqlMaterializationJob(  # pylint: disable=too-few-public-methods # pr
                 for col in query_ast.select.projection
                 if col.alias_or_name.name.endswith(temporal_partitions[0].name)  # type: ignore
             ]
+            temporal_op = (
+                ast.BinaryOp(
+                    left=ast.Column(
+                        name=ast.Name(
+                            temporal_partition_col[0].alias_or_name.name,  # type: ignore
+                        ),
+                    ),
+                    right=temporal_partitions[0].partition.temporal_expression(),
+                    op=ast.BinaryOpKind.Eq,
+                )
+                if not generic_config.lookback_window
+                else ast.Between(
+                    expr=ast.Column(
+                        name=ast.Name(
+                            temporal_partition_col[0].alias_or_name.name,  # type: ignore
+                        ),
+                    ),
+                    low=temporal_partitions[0].partition.temporal_expression(
+                        interval=generic_config.lookback_window,
+                    ),
+                    high=temporal_partitions[0].partition.temporal_expression(),
+                )
+            )
             final_query = ast.Query(
                 select=ast.Select(
                     projection=[
@@ -100,30 +129,35 @@ class SparkSqlMaterializationJob(  # pylint: disable=too-few-public-methods # pr
                         for col in query_ast.select.projection
                     ],
                     from_=query_ast.select.from_,
-                    where=ast.BinaryOp(
-                        left=ast.Column(
-                            name=ast.Name(
-                                temporal_partition_col[0].alias_or_name.name,  # type: ignore
-                            ),
-                        ),
-                        right=temporal_partitions[0].partition.temporal_expression(),
-                        op=ast.BinaryOpKind.Eq,
-                    )
-                    if not generic_config.lookback_window
-                    else ast.Between(
-                        expr=ast.Column(
-                            name=ast.Name(
-                                temporal_partition_col[0].alias_or_name.name,  # type: ignore
-                            ),
-                        ),
-                        low=temporal_partitions[0].partition.temporal_expression(
-                            interval=generic_config.lookback_window,
-                        ),
-                        high=temporal_partitions[0].partition.temporal_expression(),
-                    ),
+                    where=temporal_op,
                 ),
                 ctes=query_ast.ctes,
             )
+
+            categorical_partitions = (
+                materialization.node_revision.categorical_partition_columns()
+            )
+            if categorical_partitions:
+                categorical_partition_col = [
+                    col
+                    for col in final_query.select.projection
+                    if col.alias_or_name.name  # type: ignore
+                    == amenable_name(categorical_partitions[0].name)  # type: ignore
+                ]
+                categorical_op = ast.BinaryOp(
+                    left=ast.Column(
+                        name=ast.Name(
+                            categorical_partition_col[0].alias_or_name.name,  # type: ignore
+                        ),
+                    ),
+                    right=categorical_partitions[0].partition.categorical_expression(),
+                    op=ast.BinaryOpKind.Eq,
+                )
+                final_query.select.where = ast.BinaryOp(
+                    left=temporal_op,
+                    right=categorical_op,
+                    op=ast.BinaryOpKind.And,
+                )
 
         result = query_service_client.materialize(
             GenericMaterializationInput(
@@ -148,5 +182,6 @@ class SparkSqlMaterializationJob(  # pylint: disable=too-few-public-methods # pr
                     )
                 ),
             ),
+            request_headers=request_headers,
         )
         return result

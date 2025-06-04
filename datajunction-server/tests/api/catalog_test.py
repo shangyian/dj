@@ -1,36 +1,37 @@
 """
 Tests for the catalog API.
 """
+
 import pytest
 from httpx import AsyncClient
 
 
 @pytest.mark.asyncio
 async def test_catalog_adding_a_new_catalog(
-    client: AsyncClient,
+    module__client: AsyncClient,
 ) -> None:
     """
     Test adding a catalog
     """
-    response = await client.post(
+    response = await module__client.post(
         "/catalogs/",
         json={
-            "name": "dev",
+            "name": "dev-1",
         },
     )
     data = response.json()
     assert response.status_code == 201
-    assert data == {"name": "dev", "engines": []}
+    assert data == {"name": "dev-1", "engines": []}
 
 
 @pytest.mark.asyncio
 async def test_catalog_list(
-    client: AsyncClient,
+    module__client: AsyncClient,
 ) -> None:
     """
     Test listing catalogs
     """
-    response = await client.post(
+    response = await module__client.post(
         "/engines/",
         json={
             "name": "spark",
@@ -40,10 +41,10 @@ async def test_catalog_list(
     )
     assert response.status_code == 201
 
-    response = await client.post(
+    response = await module__client.post(
         "/catalogs/",
         json={
-            "name": "dev",
+            "name": "cat-dev",
             "engines": [
                 {
                     "name": "spark",
@@ -55,29 +56,31 @@ async def test_catalog_list(
     )
     assert response.status_code == 201
 
-    response = await client.post(
+    response = await module__client.post(
         "/catalogs/",
         json={
-            "name": "test",
+            "name": "cat-test",
         },
     )
     assert response.status_code == 201
 
-    response = await client.post(
+    response = await module__client.post(
         "/catalogs/",
         json={
-            "name": "prod",
+            "name": "cat-prod",
         },
     )
     assert response.status_code == 201
 
-    response = await client.get("/catalogs/")
+    response = await module__client.get("/catalogs/")
     assert response.status_code == 200
-    assert sorted(response.json(), key=lambda v: v["name"]) == sorted(
+    filtered_response = [
+        cat for cat in response.json() if cat["name"].startswith("cat-")
+    ]
+    assert sorted(filtered_response, key=lambda v: v["name"]) == sorted(
         [
-            {"name": "unknown", "engines": []},
             {
-                "name": "dev",
+                "name": "cat-dev",
                 "engines": [
                     {
                         "name": "spark",
@@ -87,8 +90,8 @@ async def test_catalog_list(
                     },
                 ],
             },
-            {"name": "test", "engines": []},
-            {"name": "prod", "engines": []},
+            {"name": "cat-test", "engines": []},
+            {"name": "cat-prod", "engines": []},
         ],
         key=lambda v: v["name"],  # type: ignore
     )
@@ -96,28 +99,28 @@ async def test_catalog_list(
 
 @pytest.mark.asyncio
 async def test_catalog_get_catalog(
-    client: AsyncClient,
+    module__client: AsyncClient,
 ) -> None:
     """
     Test getting a catalog
     """
-    response = await client.post(
+    response = await module__client.post(
         "/engines/",
         json={
-            "name": "spark",
+            "name": "one-spark",
             "version": "3.3.1",
             "dialect": "spark",
         },
     )
     assert response.status_code == 201
 
-    response = await client.post(
+    response = await module__client.post(
         "/catalogs/",
         json={
-            "name": "dev",
+            "name": "one-dev",
             "engines": [
                 {
-                    "name": "spark",
+                    "name": "one-spark",
                     "version": "3.3.1",
                     "dialect": "spark",
                 },
@@ -126,30 +129,30 @@ async def test_catalog_get_catalog(
     )
     assert response.status_code == 201
 
-    response = await client.get(
-        "/catalogs/dev",
+    response = await module__client.get(
+        "/catalogs/one-dev",
     )
     assert response.status_code == 200
     data = response.json()
     assert data == {
-        "name": "dev",
+        "name": "one-dev",
         "engines": [
-            {"name": "spark", "uri": None, "version": "3.3.1", "dialect": "spark"},
+            {"name": "one-spark", "uri": None, "version": "3.3.1", "dialect": "spark"},
         ],
     }
 
 
 @pytest.mark.asyncio
 async def test_catalog_adding_a_new_catalog_with_engines(
-    client: AsyncClient,
+    module__client: AsyncClient,
 ) -> None:
     """
     Test adding a catalog with engines
     """
-    response = await client.post(
+    response = await module__client.post(
         "/engines/",
         json={
-            "name": "spark",
+            "name": "two-spark",
             "uri": None,
             "version": "3.3.1",
             "dialect": "spark",
@@ -158,13 +161,13 @@ async def test_catalog_adding_a_new_catalog_with_engines(
     data = response.json()
     assert response.status_code == 201
 
-    response = await client.post(
+    response = await module__client.post(
         "/catalogs/",
         json={
-            "name": "dev",
+            "name": "two-dev",
             "engines": [
                 {
-                    "name": "spark",
+                    "name": "two-spark",
                     "version": "3.3.1",
                     "dialect": "spark",
                 },
@@ -174,10 +177,10 @@ async def test_catalog_adding_a_new_catalog_with_engines(
     data = response.json()
     assert response.status_code == 201
     assert data == {
-        "name": "dev",
+        "name": "two-dev",
         "engines": [
             {
-                "name": "spark",
+                "name": "two-spark",
                 "uri": None,
                 "version": "3.3.1",
                 "dialect": "spark",
@@ -188,15 +191,15 @@ async def test_catalog_adding_a_new_catalog_with_engines(
 
 @pytest.mark.asyncio
 async def test_catalog_adding_a_new_catalog_then_attaching_engines(
-    client: AsyncClient,
+    module__client: AsyncClient,
 ) -> None:
     """
     Test adding a catalog then attaching a catalog
     """
-    response = await client.post(
+    response = await module__client.post(
         "/engines/",
         json={
-            "name": "spark",
+            "name": "spark-3",
             "uri": None,
             "version": "3.3.1",
             "dialect": "spark",
@@ -205,32 +208,32 @@ async def test_catalog_adding_a_new_catalog_then_attaching_engines(
     data = response.json()
     assert response.status_code == 201
 
-    response = await client.post(
+    response = await module__client.post(
         "/catalogs/",
         json={
-            "name": "dev",
+            "name": "dev-3",
         },
     )
     assert response.status_code == 201
 
-    await client.post(
-        "/catalogs/dev/engines/",
+    await module__client.post(
+        "/catalogs/dev-3/engines/",
         json=[
             {
-                "name": "spark",
+                "name": "spark-3",
                 "version": "3.3.1",
                 "dialect": "spark",
             },
         ],
     )
 
-    response = await client.get("/catalogs/dev/")
+    response = await module__client.get("/catalogs/dev-3/")
     data = response.json()
     assert data == {
-        "name": "dev",
+        "name": "dev-3",
         "engines": [
             {
-                "name": "spark",
+                "name": "spark-3",
                 "uri": None,
                 "version": "3.3.1",
                 "dialect": "spark",
@@ -241,15 +244,15 @@ async def test_catalog_adding_a_new_catalog_then_attaching_engines(
 
 @pytest.mark.asyncio
 async def test_catalog_adding_without_duplicating(
-    client: AsyncClient,
+    module__client: AsyncClient,
 ) -> None:
     """
     Test adding a catalog and having existing catalogs not re-added
     """
-    response = await client.post(
+    response = await module__client.post(
         "/engines/",
         json={
-            "name": "spark",
+            "name": "spark-4",
             "uri": None,
             "version": "2.4.4",
             "dialect": "spark",
@@ -258,10 +261,10 @@ async def test_catalog_adding_without_duplicating(
     data = response.json()
     assert response.status_code == 201
 
-    response = await client.post(
+    response = await module__client.post(
         "/engines/",
         json={
-            "name": "spark",
+            "name": "spark-4",
             "version": "3.3.0",
             "dialect": "spark",
         },
@@ -269,10 +272,10 @@ async def test_catalog_adding_without_duplicating(
     data = response.json()
     assert response.status_code == 201
 
-    response = await client.post(
+    response = await module__client.post(
         "/engines/",
         json={
-            "name": "spark",
+            "name": "spark-4",
             "version": "3.3.1",
             "dialect": "spark",
         },
@@ -280,30 +283,30 @@ async def test_catalog_adding_without_duplicating(
     data = response.json()
     assert response.status_code == 201
 
-    response = await client.post(
+    response = await module__client.post(
         "/catalogs/",
         json={
-            "name": "dev",
+            "name": "dev-4",
             "dialect": "spark",
         },
     )
     assert response.status_code == 201
 
-    response = await client.post(
-        "/catalogs/dev/engines/",
+    response = await module__client.post(
+        "/catalogs/dev-4/engines/",
         json=[
             {
-                "name": "spark",
+                "name": "spark-4",
                 "version": "2.4.4",
                 "dialect": "spark",
             },
             {
-                "name": "spark",
+                "name": "spark-4",
                 "version": "3.3.0",
                 "dialect": "spark",
             },
             {
-                "name": "spark",
+                "name": "spark-4",
                 "version": "3.3.1",
                 "dialect": "spark",
             },
@@ -311,21 +314,21 @@ async def test_catalog_adding_without_duplicating(
     )
     assert response.status_code == 201
 
-    response = await client.post(
-        "/catalogs/dev/engines/",
+    response = await module__client.post(
+        "/catalogs/dev-4/engines/",
         json=[
             {
-                "name": "spark",
+                "name": "spark-4",
                 "version": "2.4.4",
                 "dialect": "spark",
             },
             {
-                "name": "spark",
+                "name": "spark-4",
                 "version": "3.3.0",
                 "dialect": "spark",
             },
             {
-                "name": "spark",
+                "name": "spark-4",
                 "version": "3.3.1",
                 "dialect": "spark",
             },
@@ -334,22 +337,22 @@ async def test_catalog_adding_without_duplicating(
     assert response.status_code == 201
     data = response.json()
     assert data == {
-        "name": "dev",
+        "name": "dev-4",
         "engines": [
             {
-                "name": "spark",
+                "name": "spark-4",
                 "uri": None,
                 "version": "2.4.4",
                 "dialect": "spark",
             },
             {
-                "name": "spark",
+                "name": "spark-4",
                 "uri": None,
                 "version": "3.3.0",
                 "dialect": "spark",
             },
             {
-                "name": "spark",
+                "name": "spark-4",
                 "uri": None,
                 "version": "3.3.1",
                 "dialect": "spark",
@@ -360,12 +363,12 @@ async def test_catalog_adding_without_duplicating(
 
 @pytest.mark.asyncio
 async def test_catalog_raise_on_adding_a_new_catalog_with_nonexistent_engines(
-    client: AsyncClient,
+    module__client: AsyncClient,
 ) -> None:
     """
     Test raising an error when adding a catalog with engines that do not exist
     """
-    response = await client.post(
+    response = await module__client.post(
         "/catalogs/",
         json={
             "name": "dev",
@@ -385,12 +388,12 @@ async def test_catalog_raise_on_adding_a_new_catalog_with_nonexistent_engines(
 
 @pytest.mark.asyncio
 async def test_catalog_raise_on_catalog_already_exists(
-    client: AsyncClient,
+    module__client: AsyncClient,
 ) -> None:
     """
     Test raise on catalog already exists
     """
-    response = await client.post(
+    response = await module__client.post(
         "/catalogs/",
         json={
             "name": "dev",
@@ -398,7 +401,7 @@ async def test_catalog_raise_on_catalog_already_exists(
     )
     assert response.status_code == 201
 
-    response = await client.post(
+    response = await module__client.post(
         "/catalogs/",
         json={
             "name": "dev",

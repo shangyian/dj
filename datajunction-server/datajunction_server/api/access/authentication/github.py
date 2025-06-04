@@ -1,19 +1,25 @@
 """
 GitHub OAuth Authentication Router
 """
+
 import logging
 from datetime import timedelta
 from http import HTTPStatus
 
 import requests
-from fastapi import APIRouter, Response
+from fastapi import APIRouter, Depends, Response
 from fastapi.responses import JSONResponse, RedirectResponse
 
 from datajunction_server.constants import AUTH_COOKIE, LOGGED_IN_FLAG_COOKIE
-from datajunction_server.errors import DJError, DJException, ErrorCode
+from datajunction_server.errors import (
+    DJAuthenticationException,
+    DJConfigurationException,
+    DJError,
+    ErrorCode,
+)
 from datajunction_server.internal.access.authentication import github
 from datajunction_server.internal.access.authentication.tokens import create_token
-from datajunction_server.utils import get_settings
+from datajunction_server.utils import Settings, get_settings
 
 _logger = logging.getLogger(__name__)
 router = APIRouter(tags=["GitHub OAuth2"])
@@ -26,7 +32,7 @@ def login() -> RedirectResponse:  # pragma: no cover
     """
     settings = get_settings()
     if not settings.github_oauth_client_id:
-        raise DJException(
+        raise DJConfigurationException(
             http_status_code=HTTPStatus.NOT_IMPLEMENTED,
             errors=[
                 DJError(
@@ -45,6 +51,7 @@ def login() -> RedirectResponse:  # pragma: no cover
 def get_access_token(
     code: str,
     response: Response,
+    settings: Settings = Depends(get_settings),
 ) -> JSONResponse:  # pragma: no cover
     """
     Get an access token using OAuth code
@@ -63,8 +70,7 @@ def get_access_token(
         timeout=10,  # seconds
     ).json()
     if "error" in access_data:
-        raise DJException(
-            http_status_code=HTTPStatus.UNAUTHORIZED,
+        raise DJAuthenticationException(
             errors=[
                 DJError(
                     code=ErrorCode.OAUTH_ERROR,
@@ -78,8 +84,7 @@ def get_access_token(
     if "access_token" not in access_data:
         message = "No user access token retrieved from GitHub OAuth API"
         _logger.error(message)
-        raise DJException(
-            http_status_code=HTTPStatus.UNAUTHORIZED,
+        raise DJAuthenticationException(
             errors=[DJError(message=message, code=ErrorCode.OAUTH_ERROR)],
         )
     user = github.get_github_user(access_data["access_token"])
@@ -87,7 +92,7 @@ def get_access_token(
         url=settings.frontend_host,
     )
     if not user:
-        raise DJException(
+        raise DJAuthenticationException(
             http_status_code=HTTPStatus.UNAUTHORIZED,
             errors=DJError(
                 code=ErrorCode.OAUTH_ERROR,
@@ -98,7 +103,12 @@ def get_access_token(
         )
     response.set_cookie(
         AUTH_COOKIE,
-        create_token({"username": user.username}, expires_delta=timedelta(days=365)),
+        create_token(
+            {"username": user.username},
+            secret=settings.secret,
+            iss=settings.url,
+            expires_delta=timedelta(days=365),
+        ),
         httponly=True,
     )
     response.set_cookie(

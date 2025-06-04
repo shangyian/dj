@@ -32,7 +32,7 @@ class CubeElementMetadata(BaseModel):
     partition: Optional[PartitionOutput]
 
     @root_validator(pre=True)
-    def type_string(cls, values):  # pylint: disable=no-self-argument
+    def type_string(cls, values):
         """
         Extracts the type as a string
         """
@@ -46,7 +46,7 @@ class CubeElementMetadata(BaseModel):
             )
         return values
 
-    class Config:  # pylint: disable=missing-class-docstring,too-few-public-methods
+    class Config:
         orm_mode = True
 
 
@@ -70,11 +70,12 @@ class CubeRevisionMetadata(BaseModel):
     cube_node_dimensions: List[str]
     query: Optional[str]
     columns: List[ColumnOutput]
+    sql_columns: Optional[List[ColumnOutput]]
     updated_at: UTCDatetime
     materializations: List[MaterializationConfigOutput]
     tags: Optional[List[TagOutput]]
 
-    class Config:  # pylint: disable=missing-class-docstring,too-few-public-methods
+    class Config:
         allow_population_by_field_name = True
         orm_mode = True
 

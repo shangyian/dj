@@ -1,5 +1,7 @@
 """Dimension links table."""
-from typing import TYPE_CHECKING, Dict, Optional
+
+from functools import cached_property
+from typing import TYPE_CHECKING, Dict, List, Optional, Set
 
 from sqlalchemy import JSON, BigInteger, Enum, ForeignKey, Integer
 from sqlalchemy.ext.hybrid import hybrid_property
@@ -8,12 +10,13 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from datajunction_server.database.base import Base
 from datajunction_server.database.node import Node, NodeRevision
 from datajunction_server.models.dimensionlink import JoinCardinality, JoinType
+from datajunction_server.utils import SEPARATOR
 
 if TYPE_CHECKING:
     from datajunction_server.sql.parsing.backends.antlr4 import ast
 
 
-class DimensionLink(Base):  # pylint: disable=too-few-public-methods
+class DimensionLink(Base):
     """
     The join definition between a given node (source, dimension, or transform)
     and a dimension node.
@@ -87,15 +90,15 @@ class DimensionLink(Base):  # pylint: disable=too-few-public-methods
         """
         The join query AST for this dimension link
         """
-        # pylint: disable=import-outside-toplevel
         from datajunction_server.sql.parsing.backends.antlr4 import parse
 
         return parse(
             f"select 1 from {self.node_revision.name} "
-            f"{self.join_type} join {self.dimension.name} on {self.join_sql}",
+            f"{self.join_type} join {self.dimension.name} "
+            + (f"on {self.join_sql}" if self.join_sql else ""),
         )
 
-    def joins(self) -> "ast.Join":
+    def joins(self) -> List["ast.Join"]:
         """
         The join ASTs for this dimension link
         """
@@ -109,15 +112,19 @@ class DimensionLink(Base):  # pylint: disable=too-few-public-methods
         returns a mapping between the foreign keys on the node and the primary keys of
         the dimension based on the join SQL.
         """
-        # pylint: disable=import-outside-toplevel
         from datajunction_server.sql.parsing.backends.antlr4 import ast
 
         # Find equality comparions (i.e., fact.order_id = dim.order_id)
-        equality_comparisons = [
-            expr
-            for expr in self.joins()[0].criteria.on.find_all(ast.BinaryOp)  # type: ignore
-            if expr.op == ast.BinaryOpKind.Eq
-        ]
+        join_asts = self.joins()
+        equality_comparisons = (
+            [
+                expr
+                for expr in join_asts[0].criteria.on.find_all(ast.BinaryOp)  # type: ignore
+                if expr.op == ast.BinaryOpKind.Eq
+            ]
+            if join_asts[0].criteria
+            else []
+        )
         mapping = {}
         for comp in equality_comparisons:
             if isinstance(comp.left, ast.Column) and isinstance(
@@ -133,12 +140,47 @@ class DimensionLink(Base):  # pylint: disable=too-few-public-methods
         return mapping
 
     @hybrid_property
-    def foreign_keys(self):
+    def foreign_keys(self) -> Dict[str, str | None]:
         """
         Returns a mapping from the foreign key column(s) on the origin node to
         the primary key column(s) on the dimension node. The dict values are column names.
         """
-        return {
+        from datajunction_server.sql.parsing.backends.antlr4 import ast
+
+        # Build equality operator-based mappings
+        join_asts = self.joins()
+        mapping: dict[str, str | None] = {
             right.identifier(): left.identifier()
+            for left, right in self.foreign_key_mapping().items()
+        }
+
+        # Add remaining foreign key references without an equality comparison
+        columns = [col.identifier() for col in join_asts[0].find_all(ast.Column)]
+        foreign_key_refs = [
+            col for col in columns if col.startswith(self.node_revision.name)
+        ]
+        for foreign_key in foreign_key_refs:
+            if foreign_key not in mapping:
+                mapping[foreign_key] = None
+        return mapping
+
+    @hybrid_property
+    def foreign_key_column_names(self) -> Set[str]:
+        """
+        Returns a set of foreign key column names
+        """
+        return {
+            fk.replace(f"{self.node_revision.name}{SEPARATOR}", "")
+            for fk in self.foreign_keys.keys()
+        }
+
+    @cached_property
+    def foreign_keys_reversed(self):
+        """
+        Returns a mapping from the primary key column(s) on the dimension node to the
+        foreign key column(s) on the origin node. The dict values are column names.
+        """
+        return {
+            left.identifier(): right.identifier()
             for left, right in self.foreign_key_mapping().items()
         }

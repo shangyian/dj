@@ -7,9 +7,6 @@ import ListGroupItem from '../../components/ListGroupItem';
 import ToggleSwitch from '../../components/ToggleSwitch';
 import DJClientContext from '../../providers/djclient';
 import { labelize } from '../../../utils/form';
-import { AlertMessage } from '../AddEditNodePage/AlertMessage';
-import AlertIcon from '../../icons/AlertIcon';
-import InvalidIcon from '../../icons/InvalidIcon';
 
 SyntaxHighlighter.registerLanguage('sql', sql);
 foundation.hljs['padding'] = '2rem';
@@ -50,7 +47,10 @@ export default function NodeInfoTab({ node }) {
           The following functions used in the metric definition may not be
           compatible with Druid SQL:{' '}
           {node?.incompatible_druid_functions.map(func => (
-            <li style={{ listStyleType: 'none', margin: '0.7rem 0.7rem' }}>
+            <li
+              style={{ listStyleType: 'none', margin: '0.7rem 0.7rem' }}
+              key={func}
+            >
               ⇢{' '}
               <span style={{ background: '#fff', padding: '0.3rem' }}>
                 {func}
@@ -71,24 +71,30 @@ export default function NodeInfoTab({ node }) {
     ) : (
       ''
     );
-  const metricQueryDiv = (
-    <div className="list-group-item d-flex">
-      <div className="gap-2 w-100 justify-content-between py-3">
-        <div style={{ marginBottom: '30px' }}>
-          <h6 className="mb-0 w-100">Upstream Node</h6>
-          <p>
-            <a href={`/nodes/${node?.upstream_node}`}>{node?.upstream_node}</a>
-          </p>
-        </div>
-        <div>
-          <h6 className="mb-0 w-100">Aggregate Expression</h6>
-          <SyntaxHighlighter language="sql" style={foundation}>
-            {node?.expression}
-          </SyntaxHighlighter>
+
+  const metricQueryDiv =
+    node?.type === 'metric' ? (
+      <div className="list-group-item d-flex">
+        <div className="gap-2 w-100 justify-content-between py-3">
+          <div style={{ marginBottom: '30px' }}>
+            <h6 className="mb-0 w-100">Upstream Node</h6>
+            <p>
+              <a href={`/nodes/${node?.upstream_node}`}>
+                {node?.upstream_node}
+              </a>
+            </p>
+          </div>
+          <div>
+            <h6 className="mb-0 w-100">Aggregate Expression</h6>
+            <SyntaxHighlighter language="sql" style={foundation}>
+              {node?.expression}
+            </SyntaxHighlighter>
+          </div>
         </div>
       </div>
-    </div>
-  );
+    ) : (
+      ''
+    );
   const queryDiv = node?.query ? (
     <div className="list-group-item d-flex">
       <div className="d-flex gap-2 w-100 justify-content-between py-3">
@@ -158,7 +164,7 @@ export default function NodeInfoTab({ node }) {
               aria-label="MetricDirection"
             >
               {node?.metric_metadata?.direction
-                ? labelize(node?.metric_metadata?.direction)
+                ? labelize(node?.metric_metadata?.direction?.toLowerCase())
                 : 'None'}
             </p>
           </div>
@@ -170,9 +176,20 @@ export default function NodeInfoTab({ node }) {
               aria-hidden="false"
               aria-label="MetricUnit"
             >
-              {node?.metric_metadata?.unit
-                ? labelize(node?.metric_metadata?.unit?.label)
+              {node?.metric_metadata?.unit?.name
+                ? labelize(node?.metric_metadata?.unit?.name?.toLowerCase())
                 : 'None'}
+            </p>
+          </div>
+          <div style={{ marginRight: '2rem' }}>
+            <h6 className="mb-0 w-100">Significant Digits</h6>
+            <p
+              className="mb-0 opacity-75"
+              role="dialog"
+              aria-hidden="false"
+              aria-label="SignificantDigits"
+            >
+              {node?.metric_metadata?.significantDigits || 'None'}
             </p>
           </div>
         </div>
@@ -226,7 +243,7 @@ export default function NodeInfoTab({ node }) {
             ))
           : node?.required_dimensions?.map(dim => (
               <span className="rounded-pill badge bg-secondary-soft PrimaryKey">
-                <a href={`/nodes/${node?.upstream_node}`}>{dim}</a>
+                <a href={`/nodes/${node?.upstream_node}`}>{dim.name}</a>
               </span>
             ))}
       </p>

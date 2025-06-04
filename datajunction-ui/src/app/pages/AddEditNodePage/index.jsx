@@ -3,8 +3,7 @@
  * node types is largely the same, with minor differences handled server-side. For the `query`
  * field, this page will render a CodeMirror SQL editor with autocompletion and syntax highlighting.
  */
-import { ErrorMessage, Field, Form, Formik } from 'formik';
-
+import { ErrorMessage, Form, Formik } from 'formik';
 import NamespaceHeader from '../../components/NamespaceHeader';
 import { useContext, useEffect, useState } from 'react';
 import DJClientContext from '../../providers/djclient';
@@ -13,7 +12,6 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { FullNameField } from './FullNameField';
 import { MetricQueryField } from './MetricQueryField';
 import { displayMessageAfterSubmit } from '../../../utils/form';
-import { PrimaryKeySelect } from './PrimaryKeySelect';
 import { NodeQueryField } from './NodeQueryField';
 import { MetricMetadataFields } from './MetricMetadataFields';
 import { UpstreamNodeField } from './UpstreamNodeField';
@@ -25,6 +23,7 @@ import { DescriptionField } from './DescriptionField';
 import { NodeModeField } from './NodeModeField';
 import { RequiredDimensionsSelect } from './RequiredDimensionsSelect';
 import LoadingIcon from '../../icons/LoadingIcon';
+import { ColumnsSelect } from './ColumnsSelect';
 
 class Action {
   static Add = new Action('add');
@@ -35,7 +34,7 @@ class Action {
   }
 }
 
-export function AddEditNodePage() {
+export function AddEditNodePage({ extensions = {} }) {
   const djClient = useContext(DJClientContext).DataJunctionAPI;
   const navigate = useNavigate();
 
@@ -77,6 +76,7 @@ export function AddEditNodePage() {
       });
     }
   };
+  const submitHandlers = [handleSubmit];
 
   const pageTitle =
     action === Action.Add ? (
@@ -93,10 +93,10 @@ export function AddEditNodePage() {
   const staticFieldsInEdit = node => (
     <>
       <div className="NodeNameInput NodeCreationInput">
-        <label htmlFor="name">Name</label> {name}
+        <label>Name</label> {name}
       </div>
       <div className="NodeNameInput NodeCreationInput">
-        <label htmlFor="name">Type</label> {node.type}
+        <label>Type</label> {node.type}
       </div>
     </>
   );
@@ -152,6 +152,7 @@ export function AddEditNodePage() {
       values.primary_key ? primaryKeyToList(values.primary_key) : null,
       values.metric_direction,
       values.metric_unit,
+      values.significant_digits,
       values.required_dimensions,
     );
     const tagsResponse = await djClient.tagsNode(
@@ -187,26 +188,35 @@ export function AddEditNodePage() {
   };
 
   const getExistingNodeData = async name => {
-    const data = await djClient.node(name);
-    if (data.type === 'metric') {
-      const metric = await djClient.metric(name);
-      data.upstream_node = metric.upstream_node;
-      data.expression = metric.expression;
-      data.required_dimensions = metric.required_dimensions;
+    const node = await djClient.getNodeForEditing(name);
+    if (node === null) {
+      return { message: `Node ${name} does not exist` };
     }
-    return data;
-  };
+    const baseData = {
+      name: node.name,
+      type: node.type.toLowerCase(),
+      display_name: node.current.displayName,
+      description: node.current.description,
+      primary_key: node.current.primaryKey,
+      query: node.current.query,
+      tags: node.tags,
+      mode: node.current.mode.toLowerCase(),
+    };
 
-  const primaryKeyFromNode = node => {
-    return node.columns
-      .filter(
-        col =>
-          col.attributes &&
-          col.attributes.filter(
-            attr => attr.attribute_type.name === 'primary_key',
-          ).length > 0,
-      )
-      .map(col => col.name);
+    if (node.type === 'METRIC') {
+      return {
+        ...baseData,
+        metric_direction: node.current.metricMetadata?.direction?.toLowerCase(),
+        metric_unit: node.current.metricMetadata?.unit?.name?.toLowerCase(),
+        significant_digits: node.current.metricMetadata?.significantDigits,
+        required_dimensions: node.current.requiredDimensions.map(
+          dim => dim.name,
+        ),
+        upstream_node: node.current.parents[0]?.name,
+        aggregate_expression: node.current.metricMetadata?.expression,
+      };
+    }
+    return baseData;
   };
 
   const runValidityChecks = (data, setNode, setMessage) => {
@@ -216,7 +226,6 @@ export function AddEditNodePage() {
       setMessage(`Node ${name} does not exist!`);
       return;
     }
-
     // Check if node type can be edited
     if (!nodeCanBeEdited(data.type)) {
       setNode(null);
@@ -245,14 +254,14 @@ export function AddEditNodePage() {
       'primary_key',
       'mode',
       'tags',
-      'expression',
+      'aggregate_expression',
       'upstream_node',
+      'metric_unit',
+      'metric_direction',
+      'significant_digits',
     ];
-    const primaryKey = primaryKeyFromNode(data);
     fields.forEach(field => {
-      if (field === 'primary_key') {
-        setFieldValue(field, primaryKey);
-      } else if (field === 'tags') {
+      if (field === 'tags') {
         setFieldValue(
           field,
           data[field].map(tag => tag.name),
@@ -261,21 +270,6 @@ export function AddEditNodePage() {
         setFieldValue(field, data[field] || '', false);
       }
     });
-    if (data.metric_metadata?.direction) {
-      setFieldValue('metric_direction', data.metric_metadata.direction);
-    }
-    if (data.metric_metadata?.unit) {
-      setFieldValue(
-        'metric_unit',
-        data.metric_metadata.unit.name.toLowerCase(),
-      );
-    }
-    if (data.expression) {
-      setFieldValue('aggregate_expression', data.expression);
-    }
-    if (data.upstream_node) {
-      setFieldValue('upstream_node', data.upstream_node);
-    }
     setNode(data);
 
     // For react-select fields, we have to explicitly set the entire
@@ -283,24 +277,27 @@ export function AddEditNodePage() {
     setSelectTags(
       <TagsField
         defaultValue={data.tags.map(t => {
-          return { value: t.name, label: t.display_name };
+          return { value: t.name, label: t.displayName };
         })}
       />,
     );
     setSelectPrimaryKey(
-      <PrimaryKeySelect
-        defaultValue={primaryKey.map(col => {
-          return { value: col, label: col };
-        })}
+      <ColumnsSelect
+        defaultValue={data.primary_key}
+        fieldName="primary_key"
+        label="Primary Key"
+        isMulti={true}
       />,
     );
-    setSelectRequiredDims(
-      <RequiredDimensionsSelect
-        defaultValue={data.required_dimensions.map(dim => {
-          return { value: dim, label: dim };
-        })}
-      />,
-    );
+    if (data.required_dimensions) {
+      setSelectRequiredDims(
+        <RequiredDimensionsSelect
+          defaultValue={data.required_dimensions.map(dim => {
+            return { value: dim, label: dim };
+          })}
+        />,
+      );
+    }
     setSelectUpstreamNode(
       <UpstreamNodeField
         defaultValue={{
@@ -313,7 +310,15 @@ export function AddEditNodePage() {
 
   return (
     <div className="mid">
-      <NamespaceHeader namespace="" />
+      <NamespaceHeader
+        namespace={
+          initialNamespace
+            ? initialNamespace
+            : name
+            ? name.substring(0, name.lastIndexOf('.'))
+            : ''
+        }
+      />
       <div className="card">
         <div className="card-header">
           {pageTitle}
@@ -321,7 +326,17 @@ export function AddEditNodePage() {
             <Formik
               initialValues={initialValues}
               validate={validator}
-              onSubmit={handleSubmit}
+              onSubmit={async (values, { setSubmitting, setStatus }) => {
+                try {
+                  for (const handler of submitHandlers) {
+                    await handler(values, { setSubmitting, setStatus });
+                  }
+                } catch (error) {
+                  console.error('Error in submission', error);
+                } finally {
+                  setSubmitting(false);
+                }
+              }}
             >
               {function Render({ isSubmitting, status, setFieldValue }) {
                 const [node, setNode] = useState([]);
@@ -381,7 +396,11 @@ export function AddEditNodePage() {
                         {nodeType === 'metric' || node.type === 'metric' ? (
                           <MetricQueryField
                             djClient={djClient}
-                            value={node.expression ? node.expression : ''}
+                            value={
+                              node.aggregate_expression
+                                ? node.aggregate_expression
+                                : ''
+                            }
                           />
                         ) : (
                           <NodeQueryField
@@ -399,12 +418,39 @@ export function AddEditNodePage() {
                           action === Action.Edit ? (
                             selectPrimaryKey
                           ) : (
-                            <PrimaryKeySelect />
+                            <ColumnsSelect
+                              defaultValue={[]}
+                              fieldName="primary_key"
+                              label="Primary Key"
+                              isMulti={true}
+                            />
                           )
                         ) : action === Action.Edit ? (
                           selectRequiredDims
                         ) : (
                           <RequiredDimensionsSelect />
+                        )}
+                        {Object.entries(extensions).map(
+                          ([key, ExtensionComponent]) => (
+                            <div key={key} className="mt-4 border-t pt-4">
+                              <ExtensionComponent
+                                node={node}
+                                action={action}
+                                registerSubmitHandler={(
+                                  onSubmit,
+                                  { prepend } = {},
+                                ) => {
+                                  if (!submitHandlers.includes(onSubmit)) {
+                                    if (prepend) {
+                                      submitHandlers.unshift(onSubmit);
+                                    } else {
+                                      submitHandlers.push(onSubmit);
+                                    }
+                                  }
+                                }}
+                              />
+                            </div>
+                          ),
                         )}
                         {action === Action.Edit ? selectTags : <TagsField />}
                         <NodeModeField />

@@ -1,18 +1,22 @@
 """
 Utility functions.
 """
+
 import asyncio
 import logging
 import os
 import re
 from functools import lru_cache
+from http import HTTPStatus
 
-# pylint: disable=line-too-long
-from typing import TYPE_CHECKING, AsyncIterator, List, Optional
+from typing import AsyncIterator, List, Optional
 
 from dotenv import load_dotenv
+from fastapi import Depends
 from rich.logging import RichHandler
 from sqlalchemy import AsyncAdaptedQueuePool
+from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.exc import MissingGreenlet, OperationalError
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -20,16 +24,22 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
+from sqlalchemy.sql import Select
+
 from starlette.requests import Request
 from yarl import URL
 
 from datajunction_server.config import Settings
+from datajunction_server.database.user import User
 from datajunction_server.enum import StrEnum
-from datajunction_server.errors import DJException
+from datajunction_server.errors import (
+    DJAuthenticationException,
+    DJDatabaseException,
+    DJInternalErrorException,
+    DJInvalidInputException,
+    DJUninitializedResourceException,
+)
 from datajunction_server.service_clients import QueryServiceClient
-
-if TYPE_CHECKING:
-    from datajunction_server.database.user import User
 
 
 def setup_logging(loglevel: str) -> None:
@@ -109,7 +119,9 @@ class DatabaseSessionManager:
         Close database session
         """
         if self.engine is None:  # pragma: no cover
-            raise DJException("DatabaseSessionManager is not initialized")
+            raise DJUninitializedResourceException(
+                "DatabaseSessionManager is not initialized",
+            )
         await self.engine.dispose()  # pragma: no cover
 
 
@@ -153,14 +165,55 @@ async def get_session() -> AsyncIterator[AsyncSession]:
     session = session_manager.session()
     try:
         yield session
-    except Exception as exc:  # pylint: disable=broad-exception-raised
+    except Exception as exc:
         await session.rollback()  # pragma: no cover
         raise exc  # pragma: no cover
     finally:
         await session.close()
 
 
-def get_query_service_client() -> Optional[QueryServiceClient]:
+async def refresh_if_needed(session: AsyncSession, obj, attributes: list[str]):
+    """
+    Conditionally refresh a list of attributes for a SQLAlchemy ORM object.
+    """
+    attributes_to_refresh = []
+
+    for attr_name in attributes:
+        try:
+            getattr(obj, attr_name)
+        except MissingGreenlet:
+            attributes_to_refresh.append(attr_name)
+
+    if attributes_to_refresh:
+        await session.refresh(obj, attributes_to_refresh)
+
+
+async def execute_with_retry(
+    session: AsyncSession,
+    statement: Select,
+    retries: int = 3,
+    base_delay: float = 1.0,
+):
+    """
+    Execute a SQLAlchemy statement with retry logic for transient errors.
+    """
+    attempt = 0
+    while True:
+        try:
+            return await session.execute(statement)
+        except OperationalError as exc:
+            attempt += 1
+            if attempt > retries:
+                raise DJDatabaseException(
+                    "Database operation failed after retries",
+                ) from exc
+            delay = base_delay * (2 ** (attempt - 1))
+            await asyncio.sleep(delay)
+
+
+def get_query_service_client(
+    request: Request = None,
+) -> Optional[QueryServiceClient]:
     """
     Return query service client
     """
@@ -221,10 +274,7 @@ class Version:
         version_regex = re.compile(r"^v(?P<major>[0-9]+)\.(?P<minor>[0-9]+)")
         matcher = version_regex.search(version_string)
         if not matcher:
-            raise DJException(
-                http_status_code=500,
-                message=f"Unparseable version {version_string}!",
-            )
+            raise DJInternalErrorException(f"Unparseable version {version_string}!")
         results = matcher.groupdict()
         return Version(int(results["major"]), int(results["minor"]))
 
@@ -248,17 +298,48 @@ def get_namespace_from_name(name: str) -> str:
     if "." in name:
         node_namespace, _ = name.rsplit(".", 1)
     else:  # pragma: no cover
-        raise DJException(f"No namespace provided: {name}")
+        raise DJInvalidInputException(f"No namespace provided: {name}")
     return node_namespace
 
 
-async def get_current_user(request: Request) -> Optional["User"]:
+async def get_current_user(request: Request) -> "User":
     """
     Returns the current authenticated user
     """
-    if hasattr(request.state, "user"):
-        return request.state.user
-    return None  # pragma: no cover
+    if not hasattr(request.state, "user"):  # pragma: no cover
+        raise DJAuthenticationException(
+            message="Unauthorized, request state has no user",
+            http_status_code=HTTPStatus.UNAUTHORIZED,
+        )
+    return request.state.user
+
+
+async def get_and_update_current_user(
+    session: AsyncSession = Depends(get_session),
+    current_user: "User" = Depends(get_current_user),
+) -> "User":
+    """
+    Wrapper for the get_current_user dependency that creates a DJ user object if required
+    """
+    statement = insert(User).values(
+        username=current_user.username,
+        email=current_user.email,
+        name=current_user.name,
+        oauth_provider=current_user.oauth_provider,
+    )
+    update_dict = {
+        "email": current_user.email,
+        "name": current_user.name,
+        "oauth_provider": current_user.oauth_provider,
+    }
+    statement = statement.on_conflict_do_update(
+        index_elements=["username"],
+        set_=update_dict,
+    )
+    await session.execute(statement)
+    await session.commit()
+    refreshed_user = await User.get_by_username(session, current_user.username)
+    return refreshed_user  # type: ignore
 
 
 SEPARATOR = "."

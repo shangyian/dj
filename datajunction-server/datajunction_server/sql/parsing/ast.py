@@ -1,14 +1,15 @@
-# pylint: disable=R0401,C0302
-# pylint: skip-file
 # mypy: ignore-errors
 import collections
 import decimal
+import logging
 from abc import ABC, abstractmethod
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from dataclasses import dataclass, field, fields
 from enum import Enum
 from functools import reduce
 from itertools import chain, zip_longest
+import re
 from typing import (
     Any,
     Callable,
@@ -33,7 +34,13 @@ from datajunction_server.database.dimensionlink import DimensionLink
 from datajunction_server.database.node import Node as DJNodeRef
 from datajunction_server.database.node import NodeRevision
 from datajunction_server.database.node import NodeRevision as DJNode
-from datajunction_server.errors import DJError, DJErrorException, DJException, ErrorCode
+from datajunction_server.errors import (
+    DJError,
+    DJErrorException,
+    DJException,
+    DJQueryBuildException,
+    ErrorCode,
+)
 from datajunction_server.models.column import SemanticType
 from datajunction_server.models.node import BuildCriteria
 from datajunction_server.models.node_type import NodeType as DJNodeType
@@ -61,8 +68,10 @@ from datajunction_server.sql.parsing.types import (
     WildcardType,
     YearMonthIntervalType,
 )
+from datajunction_server.utils import SEPARATOR
 
 PRIMITIVES = {int, float, str, bool, type(None)}
+logger = logging.getLogger(__name__)
 
 
 def flatten(maybe_iterables: Any) -> Iterator:
@@ -85,7 +94,7 @@ class CompileContext:
 
 # typevar used for node methods that return self
 # so the typesystem can correlate the self type with the return type
-TNode = TypeVar("TNode", bound="Node")  # pylint: disable=C0103
+TNode = TypeVar("TNode", bound="Node")
 
 
 class Node(ABC):
@@ -221,7 +230,6 @@ class Node(ABC):
         """
         return self.filter(lambda _: True)
 
-    # pylint: disable=R0913
     def fields(
         self,
         flat: bool = True,
@@ -286,7 +294,7 @@ class Node(ABC):
                     else (child[1] is not None),
                     child_generator,
                 ),
-            )  # pylint: disable=C0301
+            )
 
         return child_generator
 
@@ -304,7 +312,7 @@ class Node(ABC):
             named=False,
         )
 
-    def replace(  # pylint: disable=invalid-name
+    def replace(
         self,
         from_: "Node",
         to: "Node",
@@ -373,7 +381,7 @@ class Node(ABC):
         """
         Compare two ASTs for deep equality
         """
-        if type(self) != type(other):  # pylint: disable=unidiomatic-typecheck
+        if type(self) != type(other):
             return False
         if id(self) == id(other):
             return True
@@ -423,10 +431,8 @@ class Node(ABC):
         Compares all others for type equality only. No recursing.
         Note: Does not check (sub)AST. See `Node.compare` for comparing (sub)ASTs.
         """
-        return type(self) == type(other) and all(  # pylint: disable=C0123
-            s == o
-            if type(s) in PRIMITIVES  # pylint: disable=C0123
-            else type(s) == type(o)  # pylint: disable=C0123
+        return type(self) == type(other) and all(
+            s == o if type(s) in PRIMITIVES else type(s) == type(o)
             for s, o in zip(
                 (self.fields(False, False, False, True)),
                 (other.fields(False, False, False, True)),
@@ -530,7 +536,7 @@ class Aliasable(Node):
             raise DJParseException("Node has no alias or name.")
 
 
-AliasedType = TypeVar("AliasedType", bound=Node)  # pylint: disable=C0103
+AliasedType = TypeVar("AliasedType", bound=Node)
 
 
 @dataclass(eq=False)
@@ -560,7 +566,7 @@ class Alias(Aliasable, Generic[AliasedType]):
         return [self]
 
 
-TExpression = TypeVar("TExpression", bound="Expression")  # pylint: disable=C0103
+TExpression = TypeVar("TExpression", bound="Expression")
 
 
 @dataclass(eq=False)
@@ -588,10 +594,10 @@ class Expression(Node):
         """
         Determines whether an Expression is an aggregation or not
         """
-        for child in self.children:
-            if hasattr(child, "is_aggregation") and child.is_aggregation():
-                return True
-        return False
+        return any(
+            hasattr(child, "is_aggregation") and child.is_aggregation()
+            for child in self.children
+        )
 
     def set_alias(self: TExpression, alias: "Name") -> Alias[TExpression]:
         return Alias(child=self).set_alias(alias)
@@ -641,12 +647,10 @@ class Name(Node):
         """
         quote_style = "" if not quotes else self.quote_style
         namespace = str(self.namespace) + "." if self.namespace else ""
-        return (
-            f"{namespace}{quote_style}{self.name}{quote_style}"  # pylint: disable=C0301
-        )
+        return f"{namespace}{quote_style}{self.name}{quote_style}"
 
 
-TNamed = TypeVar("TNamed", bound="Named")  # pylint: disable=C0103
+TNamed = TypeVar("TNamed", bound="Named")
 
 
 @dataclass(eq=False)  # type: ignore
@@ -727,6 +731,7 @@ class Column(Aliasable, Named, Expression):
     _expression: Optional[Expression] = field(repr=False, default=None)
     _is_compiled: bool = False
     role: Optional[str] = None
+    dimension_ref: Optional[str] = None
 
     @property
     def type(self):
@@ -841,6 +846,23 @@ class Column(Aliasable, Named, Expression):
             column_namespace = self.namespace[0].name
         return column_namespace, column_name, subscript_name
 
+    @classmethod
+    def from_existing(
+        cls,
+        col: Union[Aliasable, Expression, "Column"],
+        table: "TableExpression",
+    ):
+        """
+        Build a selectable column from an existing one
+        """
+        return Column(
+            col.alias_or_name,
+            _type=col.type,
+            semantic_entity=col.semantic_entity,
+            semantic_type=col.semantic_type,
+            _table=table,
+        )
+
     async def find_table_sources(
         self,
         ctx: CompileContext,
@@ -884,8 +906,7 @@ class Column(Aliasable, Named, Expression):
                 # This column may be namespaced, in which case we'll search for an origin table
                 # that has the namespace as an alias or name. If this column has no namespace,
                 # it should be sourced from the immediate table
-                not namespace
-                or namespace == table.alias_or_name.identifier(False)
+                not namespace or namespace == table.alias_or_name.identifier(False)
             ):
                 result = await table.add_ref_column(self, ctx)
                 if result:
@@ -895,8 +916,15 @@ class Column(Aliasable, Named, Expression):
         # a column name, and a subscript
         if not found:
             for table in direct_tables:
+                namespace = namespace.split(SEPARATOR)[0]
                 if table.column_mapping.get(namespace) or (
-                    table.column_mapping.get(column_name) and is_struct
+                    table.column_mapping.get(column_name)
+                    and is_struct
+                    and (
+                        not namespace
+                        or table.alias_or_name.namespace
+                        and table.alias_or_name.namespace.identifier() == namespace
+                    )
                 ):
                     if await table.add_ref_column(self, ctx):
                         found.append(table)
@@ -922,11 +950,17 @@ class Column(Aliasable, Named, Expression):
 
         # Check for ctes
         alpha_query = self.get_furthest_parent()
+        direct_table_names = {
+            direct_table.alias_or_name.identifier() for direct_table in direct_tables
+        }
         if isinstance(alpha_query, Query) and alpha_query.ctes:
-            for table in alpha_query.ctes:
-                if table.alias_or_name.identifier(False) == namespace:
-                    if await table.add_ref_column(self, ctx):
-                        found.append(table)
+            for cte in alpha_query.ctes:
+                cte_name = cte.alias_or_name.identifier(False)
+                if cte_name == namespace or (
+                    not namespace and cte_name in direct_table_names
+                ):
+                    if await cte.add_ref_column(self, ctx):
+                        found.append(cte)
 
         # If nothing was found in the initial AST, traverse through dimensions graph
         # to find another table in DJ that could be its origin
@@ -941,7 +975,7 @@ class Column(Aliasable, Named, Expression):
                 not namespace
                 or current_table.alias_or_name.identifier(False) == namespace
             ):
-                if current_table.add_ref_column(self, ctx):
+                if await current_table.add_ref_column(self, ctx):
                     found.append(current_table)
                     return found
 
@@ -1209,7 +1243,16 @@ class TableExpression(Aliasable, Expression):
                     "add Column ref without a compilation context.",
                 )
             await self.compile(ctx)
+        return self.add_column_reference(column)
 
+    def add_column_reference(
+        self,
+        column: Column,
+    ) -> bool:
+        """
+        Add column referenced from this table. Returns True if the table has the column
+        and False otherwise.
+        """
         if not isinstance(column, Alias):
             ref_col_name = column.name.name
             if matching_column := self.column_mapping.get(ref_col_name):
@@ -1368,7 +1411,6 @@ class Operation(Expression):
     """
 
 
-# pylint: disable=C0103
 class UnaryOpKind(DJEnum):
     """
     The accepted unary operations
@@ -1402,8 +1444,7 @@ class UnaryOp(Operation):
 
         def raise_unop_exception():
             raise DJParseException(
-                "Incompatible type in unary operation "
-                f"{self}. Got {type} in {self}.",
+                f"Incompatible type in unary operation {self}. Got {type} in {self}.",
             )
 
         if self.op == UnaryOpKind.Not:
@@ -1418,7 +1459,6 @@ class UnaryOp(Operation):
         raise DJParseException(f"Unary operation {self.op} not supported!")
 
 
-# pylint: disable=C0103
 class BinaryOpKind(DJEnum):
     """
     The DJ AST accepted binary operations
@@ -1459,7 +1499,7 @@ class BinaryOp(Operation):
     use_alias_as_name: Optional[bool] = False
 
     @classmethod
-    def And(  # pylint: disable=invalid-name,keyword-arg-before-vararg
+    def And(
         cls,
         left: Expression,
         right: Optional[Expression] = None,
@@ -1480,7 +1520,7 @@ class BinaryOp(Operation):
         )
 
     @classmethod
-    def Eq(  # pylint: disable=invalid-name
+    def Eq(
         cls,
         left: Expression,
         right: Optional[Expression],
@@ -1549,7 +1589,7 @@ class BinaryOp(Operation):
                 return left
             return left
 
-        BINOP_TYPE_COMBO_LOOKUP: Dict[  # pylint: disable=C0103
+        BINOP_TYPE_COMBO_LOOKUP: Dict[
             BinaryOpKind,
             Callable[[ColumnType, ColumnType], ColumnType],
         ] = {
@@ -1652,6 +1692,18 @@ class Over(Expression):
         return f"OVER ({consolidated_by}{window_frame})"
 
 
+class SetQuantifier(DJEnum):
+    """
+    The accepted set quantifiers
+    """
+
+    All = "ALL"
+    Distinct = "DISTINCT"
+
+    def __str__(self):
+        return self.value
+
+
 @dataclass(eq=False)
 class Function(Named, Operation):
     """
@@ -1659,8 +1711,9 @@ class Function(Named, Operation):
     """
 
     args: List[Expression] = field(default_factory=list)
-    quantifier: str = ""
+    quantifier: SetQuantifier | None = None
     over: Optional[Over] = None
+    args_compiled: bool = False
 
     def __new__(
         cls,
@@ -1671,7 +1724,8 @@ class Function(Named, Operation):
     ):
         # Check if function is a table-valued function
         if (
-            not quantifier
+            hasattr(name, "name")
+            and not quantifier
             and over is None
             and name.name.upper() in table_function_registry
         ):
@@ -1724,7 +1778,17 @@ class Function(Named, Operation):
                 await arg.compile(ctx)
                 arg._is_compiled = True
 
-        self.function().compile_lambda(*self.args)
+        # FIXME: We currently catch this exception because we are unable
+        # to infer types for nested lambda functions. For the time being, an easy workaround is to
+        # add a CAST(...) wrapper around the nested lambda function so that the type hard-coded by
+        # the argument to CAST
+        try:
+            self.function().compile_lambda(*self.args)
+        except DJParseException as parse_exc:
+            if "Cannot resolve type of column" in parse_exc.message:
+                logger.warning(parse_exc)
+            else:
+                raise parse_exc
 
         for child in self.children:
             if not child.is_compiled():
@@ -1781,7 +1845,7 @@ class Number(Value):
                 except (ValueError, OverflowError) as exception:
                     cast_exceptions.append(exception)
             if len(cast_exceptions) >= len(numeric_types):
-                raise DJException(message="Not a valid number!")
+                raise DJParseException(message="Not a valid number!")
 
     def __str__(self) -> str:
         return str(self.value)
@@ -2012,7 +2076,7 @@ class Like(Predicate):
     def __str__(self) -> str:
         not_ = "NOT " if self.negated else ""
         if self.quantifier:  # quantifier means a pattern with multiple elements
-            pattern = f'({", ".join(str(p) for p in self.patterns)})'
+            pattern = f"({', '.join(str(p) for p in self.patterns)})"
         else:
             pattern = self.patterns
         escape_char = f" ESCAPE '{self.escape_char}'" if self.escape_char else ""
@@ -2109,11 +2173,6 @@ class Case(Expression):
         if self.parenthesized:
             return f"({ret})"
         return ret
-
-    def is_aggregation(self) -> bool:
-        return all(result.is_aggregation() for result in self.results) and (
-            self.else_result.is_aggregation() if self.else_result else True
-        )
 
     @property
     def type(self) -> ColumnType:
@@ -2233,14 +2292,15 @@ class InlineTable(TableExpression, Named):
 
     def __str__(self) -> str:
         values = "VALUES " + ",\n\t".join(
-            [f'({", ".join([str(col) for col in row])})' for row in self.values],
+            [f"({', '.join([str(col) for col in row])})" for row in self.values],
         )
-        alias = f"{self.alias_or_name.name}" + (
+        inline_alias = self.alias_or_name.name if self.alias_or_name else ""
+        alias = inline_alias + (
             f"({', '.join([col.alias_or_name.name for col in self.columns])})"
             if self.explicit_columns
             else ""
         )
-        return f"{values} AS {alias}"
+        return f"{values} AS {alias}" if alias else values
 
 
 @dataclass(eq=False)
@@ -2266,7 +2326,15 @@ class FunctionTable(FunctionTableExpression):
             if self.column_list
             else ""
         )
-        column_list_str = f"({cols})" if len(self.column_list) > 1 else str(cols)
+
+        column_parens = False
+        if self.name.name.upper() == "UNNEST" or (
+            self.name.name.upper() == "EXPLODE"
+            and not isinstance(self.parent, LateralView)
+        ):
+            column_parens = True
+
+        column_list_str = f"({cols})" if column_parens else f"{cols}"
         args_str = f"({', '.join(str(col) for col in self.args)})" if self.args else ""
         return f"{self.name}{args_str}{alias}{as_}{column_list_str}"
 
@@ -2358,6 +2426,21 @@ class From(Node):
 
         return "".join(parts)
 
+    @classmethod
+    def Table(cls, table_name: str):
+        """
+        Create a FROM clause sourcing from this table name
+        """
+        return From(
+            relations=[
+                Relation(
+                    primary=Table(
+                        Name(table_name),
+                    ),
+                ),
+            ],
+        )
+
 
 @dataclass(eq=False)
 class SetOp(Node):
@@ -2390,6 +2473,17 @@ class Cast(Expression):
         Return the type of the expression
         """
         return self.data_type
+
+    async def compile(self, ctx: CompileContext):
+        """
+        In most cases we can short-circuit the CAST expression's compilation, since the output
+        type is determined directly by `data_type`, so evaluating the expression is unnecessary.
+        """
+        for child in self.find_all(Column):
+            await child.compile(ctx)
+
+        if self.data_type:
+            return
 
 
 @dataclass(eq=False)
@@ -2425,6 +2519,24 @@ class Organization(Node):
 
 
 @dataclass(eq=False)
+class Hint(Node):
+    """
+    An Spark SQL hint statement
+    """
+
+    name: Name
+    parameters: List[Column] = field(default_factory=list)
+
+    def __str__(self) -> str:
+        params = (
+            f"({', '.join(str(param) for param in self.parameters)})"
+            if self.parameters
+            else ""
+        )
+        return f"{self.name}{params}"
+
+
+@dataclass(eq=False)
 class SelectExpression(Aliasable, Expression):
     """
     An uninitializable Type for Select for use as a default where
@@ -2441,6 +2553,7 @@ class SelectExpression(Aliasable, Expression):
     set_op: Optional[SetOp] = None
     limit: Optional[Expression] = None
     organization: Optional[Organization] = None
+    hints: Optional[List[Hint]] = None
 
     def add_set_op(self, set_op: SetOp):
         if self.set_op:
@@ -2461,6 +2574,71 @@ class SelectExpression(Aliasable, Expression):
                 projection.append(expression)
         self.projection = projection
 
+    def where_clause_expressions_list(self) -> Optional[List[Expression]]:
+        """
+        Converts the WHERE clause to a list of expressions separated by AND operators
+        """
+        if not self.where:
+            return self.where
+
+        filters = []
+        processing = collections.deque([self.where])
+        while processing:
+            current_clause = processing.pop()
+            if current_clause:
+                if (
+                    isinstance(current_clause, BinaryOp)
+                    and current_clause.op == BinaryOpKind.And
+                ):
+                    processing.append(current_clause.left)
+                    processing.append(current_clause.right)
+                else:
+                    filters.append(current_clause)
+        return filters
+
+    @property
+    def column_mapping(self) -> Dict[str, "Column"]:
+        """
+        Returns a dictionary with the output column names mapped to the columns
+        """
+        return {col.alias_or_name.name: col for col in self.projection}
+
+    @property
+    def semantic_column_mapping(self) -> Dict[str, "Column"]:
+        """
+        Returns a dictionary with the output column names mapped to the columns
+        """
+        return {col.semantic_entity: col for col in self.projection}
+
+
+@dataclass(eq=False)
+class QueryParameter(Expression):
+    """
+    Represents a query parameter that can be substituted in a query
+    """
+
+    name: str
+    prefix: str = ":"
+    quote_style: str = ""
+    _type: Optional["ColumnType"] = field(repr=False, default=None)
+
+    def __str__(self) -> str:
+        return self.identifier(quotes=True)
+
+    def identifier(self, quotes: bool = True) -> str:
+        """
+        The full parameter name, including the prefix and quotes
+        """
+        quote_style = "" if not quotes else self.quote_style
+        return f"{self.prefix}{quote_style}{self.name}{quote_style}"
+
+    @property
+    def type(self) -> ColumnType:
+        """
+        The type of the parameter
+        """
+        return self._type if self._type else StringType()
+
 
 class Select(SelectExpression):
     """
@@ -2469,6 +2647,8 @@ class Select(SelectExpression):
 
     def __str__(self) -> str:
         parts = ["SELECT "]
+        if self.hints:
+            parts.append(f"/*+ {', '.join(str(hint) for hint in self.hints)} */\n")
         if self.quantifier:
             parts.append(f"{self.quantifier}\n")
         parts.append(",\n\t".join(str(exp) for exp in self.projection))
@@ -2496,6 +2676,9 @@ class Select(SelectExpression):
         if self.alias:
             as_ = " AS " if self.as_ else " "
             return f"{select}{as_}{self.alias}"
+        if isinstance(self.parent, Alias):
+            if self.set_op:
+                return f"({select})"
         return select
 
     @property
@@ -2519,7 +2702,6 @@ class Select(SelectExpression):
                     context=str(self),
                 ),
             )
-
         await super().compile(ctx)
 
 
@@ -2540,6 +2722,91 @@ class Query(TableExpression, UnNamed):
     async def compile(self, ctx: CompileContext):
         if self._is_compiled:
             return
+
+        def _compile(info: Tuple[Column, List[TableExpression]]):
+            """
+            Given a list of table sources, find a matching origin table for the column.
+            """
+            col, table_options = info
+            matching_origin_tables = 0
+            for option in table_options:
+                namespace = col.namespace[0].name if col.namespace else None
+                table_alias = option.alias.name if option.alias else None
+                if namespace is None or namespace == table_alias:
+                    result = option.add_column_reference(col)
+                    if result:
+                        matching_origin_tables += 1
+                        col._is_compiled = True
+                elif SEPARATOR in col.identifier():
+                    dimension_node = col.identifier().rsplit(SEPARATOR, 1)[0]
+                    if (
+                        SEPARATOR in dimension_node
+                        and dimension_node == option.identifier()
+                    ):
+                        result = option.add_column_reference(col)
+                        if result:
+                            matching_origin_tables += 1
+                            col._is_compiled = True
+            if matching_origin_tables > 1:
+                ctx.exception.errors.append(
+                    DJError(
+                        code=ErrorCode.INVALID_COLUMN,
+                        message=f"Column `{col.name.name}` found in multiple tables."
+                        " Consider using fully qualified name.",
+                    ),
+                )
+
+        # Work backwards from the table expressions on the query's SELECT clause
+        # and assign references between the columns and the tables
+        nearest_query = self.get_nearest_parent_of_type(Query)
+        cte_mapping = {
+            cte.alias_or_name.name: cte
+            for cte in (nearest_query.ctes if nearest_query else [])
+        }
+        referenced_dimension_options = [
+            Table(Name(col.identifier().rsplit(SEPARATOR, 1)[0]))
+            for col in self.select.find_all(Column)
+            if SEPARATOR in col.identifier().rsplit(SEPARATOR, 1)[0]
+        ]
+        table_options = (
+            [
+                tbl
+                for tbl in self.select.from_.find_all(TableExpression)
+                if tbl.get_nearest_parent_of_type(Query) is self
+            ]
+            if self.select.from_
+            else []
+        ) + referenced_dimension_options
+        if table_options:
+            for idx, option in enumerate(table_options):
+                if isinstance(option, Table):
+                    if option.name.name in cte_mapping:
+                        table_options[idx] = cte_mapping[option.name.name]
+                await table_options[idx].compile(ctx)
+
+            expressions_to_compile = [
+                self.select.projection,
+                self.select.group_by,
+                self.select.having,
+                self.select.where,
+                self.select.organization,
+            ]
+            columns_to_compile = []
+            for expression in expressions_to_compile:
+                if expression and not isinstance(expression, list):
+                    columns_to_compile += list(expression.find_all(Column))
+                if isinstance(expression, list):
+                    columns_to_compile += [
+                        col for expr in expression for col in expr.find_all(Column)
+                    ]
+
+            with ThreadPoolExecutor() as executor:
+                list(
+                    executor.map(
+                        _compile,
+                        [(col, table_options) for col in columns_to_compile],
+                    ),
+                )
 
         for child in self.children:
             if child is not self and not child.is_compiled():
@@ -2566,6 +2833,17 @@ class Query(TableExpression, UnNamed):
         self.ctes = []
         return self
 
+    def to_cte(self, cte_name: Name, parent_ast: Optional["Query"] = None) -> "Query":
+        """
+        Prepares the query to be a CTE
+        """
+        self.alias = cte_name
+        self.parenthesized = True
+        self.as_ = True
+        if parent_ast:
+            self.set_parent(parent_ast, "ctes")
+        return self
+
     def __str__(self) -> str:
         is_cte = self.parent is not None and self.parent_key == "ctes"
         ctes = ",\n".join(str(cte) for cte in self.ctes)
@@ -2575,8 +2853,9 @@ class Query(TableExpression, UnNamed):
 
         parts = [f"{with_}{self.select}\n"]
         query = "".join(parts)
+        newline = "\n" if is_cte else ""
         if self.parenthesized:
-            query = f"({query.strip()})"
+            query = f"({newline}{query.strip()}{newline})"
         if self.alias:
             as_ = " AS " if self.as_ else " "
             if is_cte:
@@ -2602,7 +2881,9 @@ class Query(TableExpression, UnNamed):
 
         if not self.is_compiled():
             if not context:
-                raise DJException("Context not provided for query compilation!")
+                raise DJQueryBuildException(
+                    "Context not provided for query compilation!",
+                )
             await self.compile(context)
 
         deps: Dict[NodeRevision, List[Table]] = {}
@@ -2621,29 +2902,3 @@ class Query(TableExpression, UnNamed):
     @property
     def type(self) -> ColumnType:
         return self.select.type
-
-    async def build(  # pylint: disable=R0913,C0415
-        self,
-        session: AsyncSession,
-        memoized_queries: Dict[int, "Query"],
-        build_criteria: Optional[BuildCriteria] = None,
-        filters: Optional[List[str]] = None,
-        dimensions: Optional[List[str]] = None,
-        access_control=None,
-    ):
-        """
-        Transforms a query ast by replacing dj node references with their asts
-        """
-        from datajunction_server.construction.build import _build_select_ast
-
-        self.bake_ctes()  # pylint: disable=W0212
-        await _build_select_ast(
-            session,
-            self.select,
-            memoized_queries,
-            build_criteria,
-            filters,
-            dimensions,
-            access_control,
-        )
-        self.select.add_aliases_to_unnamed_columns()

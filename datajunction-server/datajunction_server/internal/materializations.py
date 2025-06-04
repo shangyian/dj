@@ -1,19 +1,27 @@
 """Node materialization helper functions"""
+
+import logging
 import zlib
-from typing import Dict, List, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union
 
 from pydantic import ValidationError
 from sqlalchemy.exc import InvalidRequestError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from datajunction_server.api.helpers import build_sql_for_multiple_metrics
-from datajunction_server.construction.build import build_node, get_measures_query
+from datajunction_server.construction.build import get_default_criteria
+from datajunction_server.construction.build_v2 import QueryBuilder, get_measures_query
 from datajunction_server.database.materialization import Materialization
 from datajunction_server.database.node import NodeRevision
+from datajunction_server.database.user import User
 from datajunction_server.errors import DJException, DJInvalidInputException
+from datajunction_server.internal.cube_materializations import (
+    build_cube_materialization,
+)
 from datajunction_server.materialization.jobs import MaterializationJob
 from datajunction_server.models import access
 from datajunction_server.models.column import SemanticType
+from datajunction_server.models.cube_materialization import UpsertCubeMaterialization
 from datajunction_server.models.materialization import (
     DruidMeasuresCubeConfig,
     DruidMetricsCubeConfig,
@@ -35,6 +43,7 @@ from datajunction_server.sql.parsing.types import TimestampType
 from datajunction_server.utils import SEPARATOR
 
 MAX_COLUMN_NAME_LENGTH = 128
+_logger = logging.getLogger(__name__)
 
 
 async def rewrite_metrics_expressions(
@@ -50,7 +59,7 @@ async def rewrite_metrics_expressions(
     metrics_expressions = {}
     measures_to_output_columns_lookup = {
         column.semantic_entity: column.name
-        for column in measures_query.columns  # type: ignore # pylint: disable=not-an-iterable
+        for column in measures_query.columns  # type: ignore
     }
     for metric in current_revision.cube_metrics():
         measures_for_metric = []
@@ -60,18 +69,19 @@ async def rewrite_metrics_expressions(
             full_column_name = (
                 col.table.dj_node.name + SEPARATOR + col.alias_or_name.name  # type: ignore
             )
-            measures_for_metric.append(
-                Measure(
-                    name=full_column_name,
-                    field_name=measures_to_output_columns_lookup[full_column_name],
-                    type=str(col.type),
-                    agg="sum",
-                ),
-            )
             if (
                 full_column_name in measures_to_output_columns_lookup
             ):  # pragma: no cover
-                col._table = None  # pylint: disable=protected-access
+                measures_for_metric.append(
+                    Measure(
+                        name=full_column_name,
+                        field_name=measures_to_output_columns_lookup[full_column_name],
+                        type=str(col.type),
+                        agg="sum",
+                    ),
+                )
+
+                col._table = None
                 col.name = ast.Name(
                     measures_to_output_columns_lookup[full_column_name],
                 )
@@ -80,11 +90,12 @@ async def rewrite_metrics_expressions(
             and metric_ast.select.projection[0].alias  # type: ignore
         ):
             metric_ast.select.projection[0].alias.name = ""  # type: ignore
-        metrics_expressions[metric.name] = MetricMeasures(
-            metric=metric.name,
-            measures=measures_for_metric,
-            combiner=str(metric_ast.select.projection[0]),
-        )
+        if measures_for_metric:
+            metrics_expressions[metric.name] = MetricMeasures(
+                metric=metric.name,
+                measures=measures_for_metric,
+                combiner=str(metric_ast.select.projection[0]),
+            )
     return metrics_expressions
 
 
@@ -93,6 +104,7 @@ async def build_cube_materialization_config(
     current_revision: NodeRevision,
     upsert_input: UpsertMaterialization,
     validate_access: access.ValidateAccessFn,
+    current_user: User,
 ) -> DruidMeasuresCubeConfig:
     """
     Builds the materialization config for a cube.
@@ -118,16 +130,17 @@ async def build_cube_materialization_config(
                 use_materialized=False,
             )
             generic_config = DruidMetricsCubeConfig(
+                lookback_window=upsert_input.config.lookback_window,
                 node_name=current_revision.name,
                 query=metrics_query.sql,
                 dimensions=[
                     col.name
-                    for col in metrics_query.columns  # type: ignore # pylint: disable=not-an-iterable
+                    for col in metrics_query.columns  # type: ignore
                     if col.semantic_type != SemanticType.METRIC
                 ],
                 metrics=[
                     col
-                    for col in metrics_query.columns  # type: ignore # pylint: disable=not-an-iterable
+                    for col in metrics_query.columns  # type: ignore
                     if col.semantic_type == SemanticType.METRIC
                 ],
                 spark=upsert_input.config.spark,
@@ -137,32 +150,38 @@ async def build_cube_materialization_config(
             return generic_config
 
         # Druid Measures Cube (Pre-Agg)
-        measures_query = await get_measures_query(
+        measures_queries = await get_measures_query(
             session=session,
             metrics=[node.name for node in current_revision.cube_metrics()],
             dimensions=current_revision.cube_dimensions(),
             filters=[],
+            current_user=current_user,
             validate_access=validate_access,
-            cast_timestamp_to_ms=True,
         )
-        metrics_expressions = await rewrite_metrics_expressions(
-            session,
-            current_revision,
-            measures_query,
-        )
-        generic_config = DruidMeasuresCubeConfig(
-            node_name=current_revision.name,
-            query=measures_query.sql,
-            dimensions=[
-                col.name
-                for col in measures_query.columns  # type: ignore # pylint: disable=not-an-iterable
-                if col.semantic_type == SemanticType.DIMENSION
-            ],
-            measures=metrics_expressions,
-            spark=upsert_input.config.spark,
-            upstream_tables=measures_query.upstream_tables,
-            columns=measures_query.columns,
-        )
+        for measures_query in measures_queries:
+            metrics_expressions = await rewrite_metrics_expressions(
+                session,
+                current_revision,
+                measures_query,
+            )
+            generic_config = DruidMeasuresCubeConfig(
+                node_name=current_revision.name,
+                query=measures_query.sql,
+                dimensions=[
+                    col.name
+                    for col in measures_query.columns  # type: ignore
+                    if col.semantic_type == SemanticType.DIMENSION
+                ],
+                measures=metrics_expressions,
+                spark=upsert_input.config.spark.__root__
+                if hasattr(upsert_input, "config") and upsert_input.config.spark
+                else {},
+                upstream_tables=measures_query.upstream_tables,
+                columns=measures_query.columns,
+                lookback_window=upsert_input.lookback_window
+                if hasattr(upsert_input, "lookback_window")
+                else "",
+            )
         return generic_config
     except (KeyError, ValidationError, AttributeError) as exc:  # pragma: no cover
         raise DJInvalidInputException(  # pragma: no cover
@@ -183,11 +202,18 @@ async def build_non_cube_materialization_config(
     """
     Build materialization config for non-cube nodes (transforms and dimensions).
     """
-    materialization_ast = await build_node(
-        session=session,
+    _logger.info(
+        "Building materialization config for node=%s node_type=%s %s",
+        current_revision.name,
+        current_revision.type,
+        upsert,
+    )
+    build_criteria = get_default_criteria(
         node=current_revision,
-        dimensions=[],
-        orderby=[],
+    )
+    query_builder = await QueryBuilder.create(session, current_revision)
+    materialization_ast = await (
+        query_builder.ignore_errors().with_build_criteria(build_criteria).build()
     )
     generic_config = GenericMaterializationConfig(
         lookback_window=upsert.config.lookback_window,
@@ -208,8 +234,9 @@ async def build_non_cube_materialization_config(
 async def create_new_materialization(
     session: AsyncSession,
     current_revision: NodeRevision,
-    upsert: UpsertMaterialization,
+    upsert: UpsertMaterialization | UpsertCubeMaterialization,
     validate_access: access.ValidateAccessFn,
+    current_user: User,
 ) -> Materialization:
     """
     Create a new materialization based on the input values.
@@ -233,6 +260,7 @@ async def create_new_materialization(
             upsert,
         )
 
+    categorical_partitions = current_revision.categorical_partition_columns()
     if current_revision.type == NodeType.CUBE:
         if not temporal_partition and not timestamp_columns:
             raise DJInvalidInputException(
@@ -240,15 +268,27 @@ async def create_new_materialization(
                 "temporal partition specified on the cube. Please make sure at "
                 "least one cube element has a temporal partition defined",
             )
-        generic_config = await build_cube_materialization_config(
-            session,
-            current_revision,
-            upsert,
-            validate_access,
-        )
+
+        # Druid Cube (this job will subsume all existing cube materialization types)
+        if upsert.job == MaterializationJobTypeEnum.DRUID_CUBE:
+            generic_config = await build_cube_materialization(
+                session=session,
+                current_revision=current_revision,
+                upsert_input=upsert,
+            )
+        else:
+            generic_config = await build_cube_materialization_config(
+                session,
+                current_revision,
+                upsert,
+                validate_access,
+                current_user=current_user,
+            )
     materialization_name = (
         f"{upsert.job.name.lower()}__{upsert.strategy.name.lower()}"
         + (f"__{temporal_partition[0].name}" if temporal_partition else "")
+        + ("__" if categorical_partitions else "")
+        + ("__".join([partition.name for partition in categorical_partitions]))
     )
     return Materialization(
         name=materialization_name,
@@ -260,13 +300,21 @@ async def create_new_materialization(
     )
 
 
-def schedule_materialization_jobs(
-    materializations: List[Materialization],
+async def schedule_materialization_jobs(
+    session: AsyncSession,
+    node_revision_id: int,
+    materialization_names: List[str],
     query_service_client: QueryServiceClient,
+    request_headers: Optional[Dict[str, str]] = None,
 ) -> Dict[str, MaterializationInfo]:
     """
     Schedule recurring materialization jobs
     """
+    materializations = await Materialization.get_by_names(
+        session,
+        node_revision_id,
+        materialization_names,
+    )
     materialization_jobs = {
         cls.__name__: cls for cls in MaterializationJob.__subclasses__()
     }
@@ -277,6 +325,7 @@ def schedule_materialization_jobs(
             materialization_to_output[materialization.name] = clazz().schedule(  # type: ignore
                 materialization,
                 query_service_client,
+                request_headers=request_headers,
             )
     return materialization_to_output
 
@@ -298,7 +347,7 @@ def _get_readable_name(expr):
     )
 
 
-def decompose_expression(  # pylint: disable=too-many-return-statements
+def decompose_expression(
     expr: Union[ast.Aliasable, ast.Expression],
 ) -> Tuple[ast.Expression, List[ast.Alias]]:
     """

@@ -35,6 +35,7 @@ export const initializeMockDJClient = () => {
         ];
       },
       metrics: {},
+      getNodeForEditing: jest.fn(),
       namespaces: () => {
         return [
           {
@@ -138,13 +139,17 @@ describe('AddEditNodePage', () => {
       ).toMatchSnapshot();
 
       // The namespace should be set to the one provided in params
-      expect(screen.getByText('default')).toBeInTheDocument();
+      screen
+        .getAllByText('default')
+        .forEach(element => expect(element).toBeInTheDocument());
     });
   });
 
   it('Edit node page renders with the selected node', async () => {
     const mockDjClient = initializeMockDJClient();
-    mockDjClient.DataJunctionAPI.node.mockReturnValue(mocks.mockMetricNode);
+    mockDjClient.DataJunctionAPI.getNodeForEditing.mockReturnValue(
+      mocks.mockGetMetricNode,
+    );
 
     const element = testElement(mockDjClient);
     renderEditNode(element);
@@ -173,17 +178,12 @@ describe('AddEditNodePage', () => {
 
   it('Verify edit page node not found', async () => {
     const mockDjClient = initializeMockDJClient();
-    mockDjClient.DataJunctionAPI.node = jest.fn();
-    mockDjClient.DataJunctionAPI.node.mockReturnValue({
-      message: 'A node with name `default.num_repair_orders` does not exist.',
-      errors: [],
-      warnings: [],
-    });
+    mockDjClient.DataJunctionAPI.getNodeForEditing.mockReturnValue(null);
     const element = testElement(mockDjClient);
     renderEditNode(element);
 
     await waitFor(() => {
-      expect(mockDjClient.DataJunctionAPI.node).toBeCalledTimes(1);
+      expect(mockDjClient.DataJunctionAPI.getNodeForEditing).toBeCalledTimes(1);
       expect(
         screen.getByText('Node default.num_repair_orders does not exist!'),
       ).toBeInTheDocument();
@@ -192,18 +192,14 @@ describe('AddEditNodePage', () => {
 
   it('Verify only transforms, metrics, and dimensions can be edited', async () => {
     const mockDjClient = initializeMockDJClient();
-    mockDjClient.DataJunctionAPI.node = jest.fn();
-    mockDjClient.DataJunctionAPI.node.mockReturnValue({
-      namespace: 'default',
-      type: 'source',
-      name: 'default.repair_orders',
-      display_name: 'Default: Repair Orders',
-    });
+    mockDjClient.DataJunctionAPI.getNodeForEditing.mockReturnValue(
+      mocks.mockGetSourceNode,
+    );
     const element = testElement(mockDjClient);
     renderEditNode(element);
 
     await waitFor(() => {
-      expect(mockDjClient.DataJunctionAPI.node).toBeCalledTimes(1);
+      expect(mockDjClient.DataJunctionAPI.getNodeForEditing).toBeCalledTimes(1);
       expect(
         screen.getByText(
           'Node default.num_repair_orders is of type source and cannot be edited',

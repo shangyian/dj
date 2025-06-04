@@ -1,6 +1,7 @@
 """
 A DataJunction client for connecting to a DataJunction server
 """
+
 from importlib.metadata import PackageNotFoundError, version  # pragma: no cover
 
 from datajunction.admin import DJAdmin
@@ -14,6 +15,9 @@ from datajunction.models import (
     Materialization,
     MaterializationJobType,
     MaterializationStrategy,
+    MetricDirection,
+    MetricMetadata,
+    MetricUnit,
     NodeMode,
 )
 from datajunction.nodes import (
@@ -50,6 +54,9 @@ __all__ = [
     "MaterializationJobType",
     "MaterializationStrategy",
     "Metric",
+    "MetricDirection",
+    "MetricMetadata",
+    "MetricUnit",
     "Cube",
     "Node",
     "NodeMode",

@@ -2,12 +2,12 @@
 Tests DJ client (internal) functionality.
 """
 
-from unittest.mock import MagicMock, call
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 
 from datajunction._internal import DJClient
-from datajunction.exceptions import DJTagDoesNotExist
+from datajunction.exceptions import DJClientException, DJTagDoesNotExist
 
 
 class TestDJClient:  # pylint: disable=too-many-public-methods, protected-access
@@ -16,11 +16,11 @@ class TestDJClient:  # pylint: disable=too-many-public-methods, protected-access
     """
 
     @pytest.fixture
-    def client(self, server):
+    def client(self, module__server):
         """
         Returns a DJ client instance
         """
-        return DJClient(requests_session=server)
+        return DJClient(requests_session=module__server)
 
     def test_create_user(self, client):
         """
@@ -42,17 +42,23 @@ class TestDJClient:  # pylint: disable=too-many-public-methods, protected-access
         """
         Check that `client.basic_login()` works as expected.
         """
-        client._session.post = MagicMock(
-            return_value=MagicMock(
-                json=MagicMock(return_value={"text": "User created."}),
-            ),
-        )
-        response = client.basic_login(username="bar", password="baz")
-        assert response == {"text": "User created."}
+        client._session.post = MagicMock()
+        client.basic_login(username="bar", password="baz")
         assert client._session.post.call_args == call(
             "/basic/login/",
             data={"username": "bar", "password": "baz"},
         )
+
+    def test__verify_node_exists(self, client):
+        """
+        Check that `client._verify_node_exists()` works as expected.
+        """
+        with patch("starlette.testclient.TestClient.get") as get_mock:
+            get_mock.return_value = MagicMock(
+                json=MagicMock(return_value={"name": "_", "type": "foo"}),
+            )
+            with pytest.raises(DJClientException):
+                client._verify_node_exists(node_name="_", type_="bar")
 
     def test__list_nodes_with_tag(self, client):
         """

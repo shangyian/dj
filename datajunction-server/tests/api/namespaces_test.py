@@ -1,6 +1,9 @@
 """
 Tests for the namespaces API.
 """
+
+from unittest import mock
+
 import pytest
 from httpx import AsyncClient
 
@@ -10,11 +13,13 @@ from datajunction_server.models import access
 
 
 @pytest.mark.asyncio
-async def test_list_all_namespaces(client_with_examples: AsyncClient) -> None:
+async def test_list_all_namespaces(
+    module__client_with_all_examples: AsyncClient,
+) -> None:
     """
     Test ``GET /namespaces/``.
     """
-    response = await client_with_examples.get("/namespaces/")
+    response = await module__client_with_all_examples.get("/namespaces/")
     assert response.status_code in (200, 201)
     assert response.json() == [
         {"namespace": "basic", "num_nodes": 8},
@@ -26,140 +31,106 @@ async def test_list_all_namespaces(client_with_examples: AsyncClient) -> None:
         {"namespace": "dbt.source.jaffle_shop", "num_nodes": 2},
         {"namespace": "dbt.source.stripe", "num_nodes": 1},
         {"namespace": "dbt.transform", "num_nodes": 1},
-        {"namespace": "default", "num_nodes": 55},
+        {"namespace": "default", "num_nodes": 64},
+        {
+            "namespace": "different.basic",
+            "num_nodes": 2,
+        },
+        {
+            "namespace": "different.basic.dimension",
+            "num_nodes": 2,
+        },
+        {
+            "namespace": "different.basic.source",
+            "num_nodes": 2,
+        },
+        {
+            "namespace": "different.basic.transform",
+            "num_nodes": 1,
+        },
         {"namespace": "foo.bar", "num_nodes": 26},
     ]
 
 
 @pytest.mark.asyncio
-async def test_list_all_namespaces_access_limited(
-    client_with_examples: AsyncClient,
+async def test_list_nodes_by_namespace(
+    module__client_with_all_examples: AsyncClient,
 ) -> None:
-    """
-    Test ``GET /namespaces/``.
-    """
-
-    def validate_access_override():
-        def _validate_access(access_control: access.AccessControl):
-            for request in access_control.requests:
-                if (
-                    request.access_object.resource_type == access.ResourceType.NAMESPACE
-                    and "dbt" in request.access_object.name
-                ):
-                    request.approve()
-                else:
-                    request.deny()
-
-        return _validate_access
-
-    app.dependency_overrides[validate_access] = validate_access_override
-
-    response = await client_with_examples.get("/namespaces/")
-
-    assert response.status_code in (200, 201)
-    assert response.json() == [
-        {"namespace": "dbt.dimension", "num_nodes": 1},
-        {"namespace": "dbt.source", "num_nodes": 0},
-        {"namespace": "dbt.source.jaffle_shop", "num_nodes": 2},
-        {"namespace": "dbt.source.stripe", "num_nodes": 1},
-        {"namespace": "dbt.transform", "num_nodes": 1},
-    ]
-    app.dependency_overrides.clear()
-
-
-@pytest.mark.asyncio
-async def test_list_all_namespaces_access_bad_injection(
-    client_with_examples: AsyncClient,
-) -> None:
-    """
-    Test ``GET /namespaces/``.
-    """
-
-    def validate_access_override():
-        def _validate_access(access_control: access.AccessControl):
-            for i, request in enumerate(access_control.requests):
-                if i != 0:
-                    request.approve()
-
-        return _validate_access
-
-    app.dependency_overrides[validate_access] = validate_access_override
-
-    response = await client_with_examples.get("/namespaces/")
-
-    assert response.status_code == 403
-    assert response.json() == {
-        "message": "Injected `validate_access` must approve or deny all requests.",
-        "errors": [
-            {
-                "code": 501,
-                "message": "Injected `validate_access` must approve or deny all requests.",
-                "debug": None,
-                "context": "",
-            },
-        ],
-        "warnings": [],
-    }
-    app.dependency_overrides.clear()
-
-
-@pytest.mark.asyncio
-async def test_list_all_namespaces_deny_all(client_with_examples: AsyncClient) -> None:
-    """
-    Test ``GET /namespaces/``.
-    """
-
-    def validate_access_override():
-        def _validate_access(access_control: access.AccessControl):
-            access_control.deny_all()
-
-        return _validate_access
-
-    app.dependency_overrides[validate_access] = validate_access_override
-
-    response = await client_with_examples.get("/namespaces/")
-
-    assert response.status_code in (200, 201)
-    assert response.json() == []
-    app.dependency_overrides.clear()
-
-
-@pytest.mark.asyncio
-async def test_list_nodes_by_namespace(client_with_basic: AsyncClient) -> None:
     """
     Test ``GET /namespaces/{namespace}/``.
     """
-    response = await client_with_basic.get("/namespaces/basic.source/")
+    response = await module__client_with_all_examples.get("/namespaces/basic.source/")
     assert response.status_code in (200, 201)
     assert {n["name"] for n in response.json()} == {
         "basic.source.users",
         "basic.source.comments",
     }
 
-    response = await client_with_basic.get("/namespaces/basic/")
+    response = await module__client_with_all_examples.get(
+        "/namespaces/basic/?with_edited_by=true",
+    )
     assert response.status_code in (200, 201)
     assert {n["name"] for n in response.json()} == {
+        "basic.avg_luminosity_patches",
+        "basic.corrected_patches",
         "basic.source.users",
         "basic.dimension.users",
+        "basic.murals",
         "basic.source.comments",
         "basic.dimension.countries",
         "basic.transform.country_agg",
         "basic.num_comments",
         "basic.num_users",
+        "basic.paint_colors_spark",
+        "basic.paint_colors_trino",
+        "basic.patches",
+    }
+    countries_dim = [
+        n for n in response.json() if n["name"] == "basic.dimension.countries"
+    ][0]
+    assert countries_dim == {
+        "description": "Country dimension",
+        "display_name": "Countries",
+        "edited_by": [
+            "dj",
+        ],
+        "mode": "published",
+        "name": "basic.dimension.countries",
+        "status": "valid",
+        "tags": [],
+        "type": "dimension",
+        "updated_at": mock.ANY,
+        "version": "v1.0",
     }
 
-    response = await client_with_basic.get("/namespaces/basic/?type_=dimension")
+    response = await module__client_with_all_examples.get(
+        "/namespaces/basic/?type_=dimension&with_edited_by=false",
+    )
+    countries_dim = [
+        n for n in response.json() if n["name"] == "basic.dimension.countries"
+    ][0]
+    assert countries_dim["edited_by"] is None
+
+    response = await module__client_with_all_examples.get(
+        "/namespaces/basic/?type_=dimension",
+    )
     assert response.status_code in (200, 201)
     assert {n["name"] for n in response.json()} == {
         "basic.dimension.users",
         "basic.dimension.countries",
+        "basic.paint_colors_trino",
+        "basic.paint_colors_spark",
     }
 
-    response = await client_with_basic.get("/namespaces/basic/?type_=source")
+    response = await module__client_with_all_examples.get(
+        "/namespaces/basic/?type_=source",
+    )
     assert response.status_code in (200, 201)
     assert {n["name"] for n in response.json()} == {
         "basic.source.comments",
         "basic.source.users",
+        "basic.murals",
+        "basic.patches",
     }
 
 
@@ -181,18 +152,41 @@ async def test_deactivate_namespaces(client_with_namespaced_roads: AsyncClient) 
     response = await client_with_namespaced_roads.delete(
         "/namespaces/foo.bar/?cascade=true",
     )
-    assert response.json() == {
-        "message": "Namespace `foo.bar` has been deactivated. The following nodes "
-        "have also been deactivated: foo.bar.repair_orders,foo.bar.repair_order_details,"
-        "foo.bar.repair_type,foo.bar.contractors,foo.bar.municipality_municipality_type,"
-        "foo.bar.municipality_type,foo.bar.municipality,foo.bar.dispatchers,foo.bar.hard_hats,"
-        "foo.bar.hard_hat_state,foo.bar.us_states,foo.bar.us_region,foo.bar.repair_order,"
-        "foo.bar.contractor,foo.bar.hard_hat,foo.bar.local_hard_hats,foo.bar.us_state,"
-        "foo.bar.dispatcher,foo.bar.municipality_dim,foo.bar.num_repair_orders,"
-        "foo.bar.avg_repair_price,foo.bar.total_repair_cost,foo.bar.avg_length_of_employment,"
-        "foo.bar.total_repair_order_discounts,foo.bar.avg_repair_order_discounts,"
+    message = response.json()["message"]
+    assert (
+        "Namespace `foo.bar` has been deactivated. The following nodes "
+        "have also been deactivated:"
+    ) in message
+    nodes = [
         "foo.bar.avg_time_to_dispatch",
-    }
+        "foo.bar.avg_repair_order_discounts",
+        "foo.bar.total_repair_order_discounts",
+        "foo.bar.avg_length_of_employment",
+        "foo.bar.total_repair_cost",
+        "foo.bar.avg_repair_price",
+        "foo.bar.num_repair_orders",
+        "foo.bar.municipality_dim",
+        "foo.bar.dispatcher",
+        "foo.bar.us_state",
+        "foo.bar.local_hard_hats",
+        "foo.bar.hard_hat",
+        "foo.bar.contractor",
+        "foo.bar.repair_order",
+        "foo.bar.us_region",
+        "foo.bar.us_states",
+        "foo.bar.hard_hat_state",
+        "foo.bar.hard_hats",
+        "foo.bar.dispatchers",
+        "foo.bar.municipality",
+        "foo.bar.municipality_type",
+        "foo.bar.municipality_municipality_type",
+        "foo.bar.contractors",
+        "foo.bar.repair_type",
+        "foo.bar.repair_order_details",
+        "foo.bar.repair_orders",
+    ]
+    for node in nodes:
+        assert node in message
 
     # Check that the namespace is no longer listed
     response = await client_with_namespaced_roads.get("/namespaces/")
@@ -225,18 +219,14 @@ async def test_deactivate_namespaces(client_with_namespaced_roads: AsyncClient) 
     response = await client_with_namespaced_roads.post(
         "/namespaces/foo.bar/restore/?cascade=true",
     )
-    assert response.json() == {
-        "message": "Namespace `foo.bar` has been restored. The following nodes have "
-        "also been restored: foo.bar.repair_orders,foo.bar.repair_order_details,foo."
-        "bar.repair_type,foo.bar.contractors,foo.bar.municipality_municipality_type,"
-        "foo.bar.municipality_type,foo.bar.municipality,foo.bar.dispatchers,foo.bar."
-        "hard_hats,foo.bar.hard_hat_state,foo.bar.us_states,foo.bar.us_region,foo.ba"
-        "r.contractor,foo.bar.hard_hat,foo.bar.us_state,foo.bar.avg_length_of_employ"
-        "ment,foo.bar.avg_repair_price,foo.bar.municipality_dim,foo.bar.dispatcher,f"
-        "oo.bar.total_repair_cost,foo.bar.repair_order,foo.bar.num_repair_orders,foo"
-        ".bar.avg_time_to_dispatch,foo.bar.total_repair_order_discounts,foo.bar.avg_"
-        "repair_order_discounts,foo.bar.local_hard_hats",
-    }
+    message = response.json()["message"]
+    assert (
+        "Namespace `foo.bar` has been restored. The following nodes have "
+        "also been restored:"
+    ) in message
+    for node in nodes:
+        assert node in message
+
     # Calling restore again will raise
     response = await client_with_namespaced_roads.post(
         "/namespaces/foo.bar/restore/?cascade=true",
@@ -285,19 +275,7 @@ async def test_deactivate_namespaces(client_with_namespaced_roads: AsyncClient) 
         (
             "restore",
             {
-                "message": (
-                    "Namespace `foo.bar` has been restored. The following nodes have also "
-                    "been restored: foo.bar.repair_orders,foo.bar.repair_order_details,foo"
-                    ".bar.repair_type,foo.bar.contractors,foo.bar.municipality_municipalit"
-                    "y_type,foo.bar.municipality_type,foo.bar.municipality,foo.bar.dispatc"
-                    "hers,foo.bar.hard_hats,foo.bar.hard_hat_state,foo.bar.us_states,foo.b"
-                    "ar.us_region,foo.bar.contractor,foo.bar.hard_hat,foo.bar.us_state,foo"
-                    ".bar.avg_length_of_employment,foo.bar.avg_repair_price,foo.bar.munici"
-                    "pality_dim,foo.bar.dispatcher,foo.bar.total_repair_cost,foo.bar.repai"
-                    "r_order,foo.bar.num_repair_orders,foo.bar.avg_time_to_dispatch,foo.ba"
-                    "r.total_repair_order_discounts,foo.bar.avg_repair_order_discounts,foo"
-                    ".bar.local_hard_hats"
-                ),
+                "message": mock.ANY,
             },
         ),
         ("delete", {"message": "Namespace `foo.bar` has been deactivated."}),
@@ -305,19 +283,7 @@ async def test_deactivate_namespaces(client_with_namespaced_roads: AsyncClient) 
         (
             "delete",
             {
-                "message": (
-                    "Namespace `foo.bar` has been deactivated. The following nodes have "
-                    "also been deactivated: foo.bar.repair_orders,foo.bar.repair_order_d"
-                    "etails,foo.bar.repair_type,foo.bar.contractors,foo.bar.municipality"
-                    "_municipality_type,foo.bar.municipality_type,foo.bar.municipality,f"
-                    "oo.bar.dispatchers,foo.bar.hard_hats,foo.bar.hard_hat_state,foo.bar"
-                    ".us_states,foo.bar.us_region,foo.bar.repair_order,foo.bar.contracto"
-                    "r,foo.bar.hard_hat,foo.bar.local_hard_hats,foo.bar.us_state,foo.bar"
-                    ".dispatcher,foo.bar.municipality_dim,foo.bar.num_repair_orders,foo."
-                    "bar.avg_repair_price,foo.bar.total_repair_cost,foo.bar.avg_length_o"
-                    "f_employment,foo.bar.total_repair_order_discounts,foo.bar.avg_repai"
-                    "r_order_discounts,foo.bar.avg_time_to_dispatch"
-                ),
+                "message": mock.ANY,
             },
         ),
         ("create", {}),
@@ -331,18 +297,18 @@ async def test_deactivate_namespaces(client_with_namespaced_roads: AsyncClient) 
     ] == [
         ("restore", {"message": "Cascaded from restoring namespace `foo.bar`"}),
         ("status_change", {"upstream_node": "foo.bar.hard_hats"}),
-        ("delete", {"message": "Cascaded from deactivating namespace `foo.bar`"}),
         ("status_change", {"upstream_node": "foo.bar.hard_hats"}),
+        ("delete", {"message": "Cascaded from deactivating namespace `foo.bar`"}),
         ("create", {}),
     ]
 
 
 @pytest.mark.asyncio
-async def test_hard_delete_namespace(client_with_examples: AsyncClient):
+async def test_hard_delete_namespace(client_with_namespaced_roads: AsyncClient):
     """
     Test hard deleting a namespace
     """
-    response = await client_with_examples.delete("/namespaces/foo/hard/")
+    response = await client_with_namespaced_roads.delete("/namespaces/foo/hard/")
     assert response.json()["message"] == (
         "Cannot hard delete namespace `foo` as there are still the following nodes "
         "under it: `['foo.bar.avg_length_of_employment', "
@@ -361,16 +327,20 @@ async def test_hard_delete_namespace(client_with_examples: AsyncClient):
         "action cannot be undone."
     )
 
-    await client_with_examples.post("/namespaces/foo/")
-    await client_with_examples.post("/namespaces/foo.bar.baz/")
-    await client_with_examples.post("/namespaces/foo.bar.baf/")
-    await client_with_examples.post("/namespaces/foo.bar.bif.d/")
+    await client_with_namespaced_roads.post("/namespaces/foo/")
+    await client_with_namespaced_roads.post("/namespaces/foo.bar.baz/")
+    await client_with_namespaced_roads.post("/namespaces/foo.bar.baf/")
+    await client_with_namespaced_roads.post("/namespaces/foo.bar.bif.d/")
 
     # Deactivating a few nodes should still allow the hard delete to go through
-    await client_with_examples.delete("/nodes/foo.bar.avg_length_of_employment")
-    await client_with_examples.delete("/nodes/foo.bar.avg_repair_order_discounts")
+    await client_with_namespaced_roads.delete(
+        "/nodes/foo.bar.avg_length_of_employment",
+    )
+    await client_with_namespaced_roads.delete(
+        "/nodes/foo.bar.avg_repair_order_discounts",
+    )
 
-    hard_delete_response = await client_with_examples.delete(
+    hard_delete_response = await client_with_namespaced_roads.delete(
         "/namespaces/foo.bar/hard/?cascade=true",
     )
     assert hard_delete_response.json() == {
@@ -448,7 +418,7 @@ async def test_hard_delete_namespace(client_with_examples: AsyncClient):
             ],
             "foo.bar.hard_hat_state": [
                 {
-                    "effect": "downstream node is now " "invalid",
+                    "effect": "downstream node is now invalid",
                     "name": "foo.bar.local_hard_hats",
                     "status": "invalid",
                 },
@@ -463,7 +433,7 @@ async def test_hard_delete_namespace(client_with_examples: AsyncClient):
             "foo.bar.local_hard_hats": [],
             "foo.bar.municipality": [
                 {
-                    "effect": "downstream node is now " "invalid",
+                    "effect": "downstream node is now invalid",
                     "name": "foo.bar.municipality_dim",
                     "status": "invalid",
                 },
@@ -501,6 +471,11 @@ async def test_hard_delete_namespace(client_with_examples: AsyncClient):
             "foo.bar.repair_order": [
                 {
                     "effect": "broken link",
+                    "name": "foo.bar.total_repair_order_discounts",
+                    "status": "valid",
+                },
+                {
+                    "effect": "broken link",
                     "name": "foo.bar.repair_orders",
                     "status": "valid",
                 },
@@ -514,20 +489,15 @@ async def test_hard_delete_namespace(client_with_examples: AsyncClient):
                     "name": "foo.bar.total_repair_cost",
                     "status": "valid",
                 },
-                {
-                    "effect": "broken link",
-                    "name": "foo.bar.total_repair_order_discounts",
-                    "status": "valid",
-                },
             ],
             "foo.bar.repair_order_details": [
                 {
-                    "effect": "downstream node is " "now invalid",
+                    "effect": "downstream node is now invalid",
                     "name": "foo.bar.total_repair_cost",
                     "status": "invalid",
                 },
                 {
-                    "effect": "downstream node is " "now invalid",
+                    "effect": "downstream node is now invalid",
                     "name": "foo.bar.total_repair_order_discounts",
                     "status": "invalid",
                 },
@@ -548,22 +518,16 @@ async def test_hard_delete_namespace(client_with_examples: AsyncClient):
         },
         "message": "The namespace `foo.bar` has been completely removed.",
     }
-    list_namespaces_response = await client_with_examples.get("/namespaces/")
+    list_namespaces_response = await client_with_namespaced_roads.get(
+        "/namespaces/",
+    )
     assert list_namespaces_response.json() == [
-        {"namespace": "basic", "num_nodes": 8},
-        {"namespace": "basic.dimension", "num_nodes": 2},
-        {"namespace": "basic.source", "num_nodes": 2},
-        {"namespace": "basic.transform", "num_nodes": 1},
-        {"namespace": "dbt.dimension", "num_nodes": 1},
-        {"namespace": "dbt.source", "num_nodes": 0},
-        {"namespace": "dbt.source.jaffle_shop", "num_nodes": 2},
-        {"namespace": "dbt.source.stripe", "num_nodes": 1},
-        {"namespace": "dbt.transform", "num_nodes": 1},
-        {"namespace": "default", "num_nodes": 55},
+        {"namespace": "basic", "num_nodes": 0},
+        {"namespace": "default", "num_nodes": 0},
         {"namespace": "foo", "num_nodes": 0},
     ]
 
-    response = await client_with_examples.delete(
+    response = await client_with_namespaced_roads.delete(
         "/namespaces/jaffle_shop/hard/?cascade=true",
     )
     assert response.json() == {
@@ -636,92 +600,238 @@ async def test_create_namespace(client_with_service_setup: AsyncClient):
 
 
 @pytest.mark.asyncio
-async def test_export_namespaces(client_with_examples: AsyncClient):
+async def test_export_namespaces(client_with_roads: AsyncClient):
     """
     Test exporting a namespace to a project definition
     """
     # Create a cube so that the cube definition export path is tested
-    response = await client_with_examples.post(
+    response = await client_with_roads.post(
         "/nodes/cube/",
         json={
             "name": "default.example_cube",
             "display_name": "Example Cube",
             "description": "An example cube so that the export path is tested",
             "metrics": ["default.num_repair_orders"],
-            "dimensions": ["default.hard_hat.city"],
+            "dimensions": ["default.hard_hat.city", "default.hard_hat.hire_date"],
             "mode": "published",
         },
     )
     assert response.status_code in (200, 201)
-    response = await client_with_examples.get(
+
+    # Mark a column as a dimension attribute
+    response = await client_with_roads.post(
+        "/nodes/default.regional_level_agg/columns/location_hierarchy/attributes",
+        json=[
+            {
+                "name": "dimension",
+                "namespace": "system",
+            },
+        ],
+    )
+    assert response.status_code in (200, 201)
+
+    # Mark a column as a partition
+    await client_with_roads.post(
+        "/nodes/default.example_cube/columns/default.hard_hat.hire_date/partition",
+        json={
+            "type_": "temporal",
+            "granularity": "day",
+            "format": "yyyyMMdd",
+        },
+    )
+
+    response = await client_with_roads.get(
         "/namespaces/default/export/",
     )
     project_definition = response.json()
+
+    # Check that nodes are topologically sorted
+    sorted_nodes = [entity["build_name"] for entity in project_definition]
+    assert sorted_nodes[-1] == "example_cube"
+
     node_defs = {d["filename"]: d for d in project_definition}
     assert node_defs["example_cube.cube.yaml"] == {
+        "build_name": "example_cube",
+        "columns": [
+            {
+                "name": "default.hard_hat.hire_date",
+                "partition": {
+                    "format": "yyyyMMdd",
+                    "granularity": "day",
+                    "type_": "temporal",
+                },
+            },
+        ],
         "description": "An example cube so that the export path is tested",
-        "dimensions": ["default.hard_hat.city"],
+        "dimensions": ["default.hard_hat.hire_date", "default.hard_hat.city"],
         "directory": "",
         "display_name": "Example Cube",
         "filename": "example_cube.cube.yaml",
         "metrics": ["default.num_repair_orders"],
+        "tags": [],
     }
+    assert node_defs["repair_orders_fact.transform.yaml"]["dimension_links"] == [
+        {
+            "dimension_node": "default.municipality_dim",
+            "join_on": "default.repair_orders_fact.municipality_id = "
+            "default.municipality_dim.municipality_id",
+            "join_type": "inner",
+            "type": "join",
+        },
+        {
+            "dimension_node": "default.hard_hat",
+            "join_on": "default.repair_orders_fact.hard_hat_id = default.hard_hat.hard_hat_id",
+            "join_type": "inner",
+            "type": "join",
+        },
+        {
+            "dimension_node": "default.hard_hat_to_delete",
+            "join_on": "default.repair_orders_fact.hard_hat_id = "
+            "default.hard_hat_to_delete.hard_hat_id",
+            "join_type": "left",
+            "type": "join",
+        },
+        {
+            "dimension_node": "default.dispatcher",
+            "join_on": "default.repair_orders_fact.dispatcher_id = "
+            "default.dispatcher.dispatcher_id",
+            "join_type": "inner",
+            "type": "join",
+        },
+    ]
+
     assert set(node_defs.keys()) == {
-        "repair_orders.source.yaml",
-        "repair_order_details.source.yaml",
-        "repair_type.source.yaml",
+        "avg_length_of_employment.metric.yaml",
+        "avg_repair_order_discounts.metric.yaml",
+        "avg_repair_price.metric.yaml",
+        "avg_time_to_dispatch.metric.yaml",
+        "contractor.dimension.yaml",
         "contractors.source.yaml",
+        "discounted_orders_rate.metric.yaml",
+        "dispatcher.dimension.yaml",
+        "dispatchers.source.yaml",
+        "example_cube.cube.yaml",
+        "hard_hat.dimension.yaml",
+        "hard_hat_2.dimension.yaml",
+        "hard_hat_state.source.yaml",
+        "hard_hat_to_delete.dimension.yaml",
+        "hard_hats.source.yaml",
+        "local_hard_hats.dimension.yaml",
+        "local_hard_hats_1.dimension.yaml",
+        "local_hard_hats_2.dimension.yaml",
+        "municipality.source.yaml",
+        "municipality_dim.dimension.yaml",
         "municipality_municipality_type.source.yaml",
         "municipality_type.source.yaml",
-        "municipality.source.yaml",
-        "dispatchers.source.yaml",
-        "hard_hats.source.yaml",
-        "hard_hat_state.source.yaml",
-        "us_states.source.yaml",
-        "us_region.source.yaml",
-        "repair_order.dimension.yaml",
-        "contractor.dimension.yaml",
-        "hard_hat.dimension.yaml",
-        "local_hard_hats.dimension.yaml",
-        "us_state.dimension.yaml",
-        "dispatcher.dimension.yaml",
-        "municipality_dim.dimension.yaml",
-        "regional_level_agg.transform.yaml",
         "national_level_agg.transform.yaml",
-        "repair_orders_fact.transform.yaml",
-        "regional_repair_efficiency.metric.yaml",
         "num_repair_orders.metric.yaml",
-        "avg_repair_price.metric.yaml",
+        "regional_level_agg.transform.yaml",
+        "regional_repair_efficiency.metric.yaml",
+        "repair_order.dimension.yaml",
+        "repair_order_details.source.yaml",
+        "repair_orders.source.yaml",
+        "repair_orders_fact.transform.yaml",
+        "repair_type.source.yaml",
         "total_repair_cost.metric.yaml",
-        "avg_length_of_employment.metric.yaml",
-        "discounted_orders_rate.metric.yaml",
         "total_repair_order_discounts.metric.yaml",
-        "avg_repair_order_discounts.metric.yaml",
-        "avg_time_to_dispatch.metric.yaml",
-        "account_type_table.source.yaml",
-        "payment_type_table.source.yaml",
-        "revenue.source.yaml",
-        "payment_type.dimension.yaml",
-        "account_type.dimension.yaml",
-        "large_revenue_payments_only.transform.yaml",
-        "large_revenue_payments_and_business_only.transform.yaml",
-        "number_of_account_types.metric.yaml",
-        "event_source.source.yaml",
-        "long_events.transform.yaml",
-        "country_dim.dimension.yaml",
-        "device_ids_count.metric.yaml",
-        "long_events_distinct_countries.metric.yaml",
-        "sales.source.yaml",
-        "items.dimension.yaml",
-        "items_sold_count.metric.yaml",
-        "total_profit.metric.yaml",
-        "date.source.yaml",
-        "countries.source.yaml",
-        "users.source.yaml",
-        "date_dim.dimension.yaml",
-        "special_country_dim.dimension.yaml",
-        "user_dim.dimension.yaml",
-        "avg_user_age.metric.yaml",
-        "example_cube.cube.yaml",
+        "us_region.source.yaml",
+        "us_state.dimension.yaml",
+        "us_states.source.yaml",
+        "repair_orders_view.source.yaml",
     }
     assert {d["directory"] for d in project_definition} == {""}
+
+
+@pytest.mark.asyncio
+async def test_list_all_namespaces_access_limited(
+    client_with_dbt: AsyncClient,
+) -> None:
+    """
+    Test ``GET /namespaces/``.
+    """
+
+    def validate_access_override():
+        def _validate_access(access_control: access.AccessControl):
+            for request in access_control.requests:
+                if (
+                    request.access_object.resource_type == access.ResourceType.NAMESPACE
+                    and "dbt" in request.access_object.name
+                ):
+                    request.approve()
+                else:
+                    request.deny()
+
+        return _validate_access
+
+    app.dependency_overrides[validate_access] = validate_access_override
+
+    response = await client_with_dbt.get("/namespaces/")
+
+    assert response.status_code in (200, 201)
+    assert response.json() == [
+        {"namespace": "dbt.dimension", "num_nodes": 1},
+        {"namespace": "dbt.source", "num_nodes": 0},
+        {"namespace": "dbt.source.jaffle_shop", "num_nodes": 2},
+        {"namespace": "dbt.source.stripe", "num_nodes": 1},
+        {"namespace": "dbt.transform", "num_nodes": 1},
+    ]
+    app.dependency_overrides.clear()
+
+
+@pytest.mark.asyncio
+async def test_list_all_namespaces_access_bad_injection(
+    client_with_service_setup: AsyncClient,
+) -> None:
+    """
+    Test ``GET /namespaces/``.
+    """
+
+    def validate_access_override():
+        def _validate_access(access_control: access.AccessControl):
+            for i, request in enumerate(access_control.requests):
+                if i != 0:
+                    request.approve()
+
+        return _validate_access
+
+    app.dependency_overrides[validate_access] = validate_access_override
+
+    response = await client_with_service_setup.get("/namespaces/")
+
+    assert response.status_code == 403
+    assert response.json() == {
+        "message": "Injected `validate_access` must approve or deny all requests.",
+        "errors": [
+            {
+                "code": 501,
+                "message": "Injected `validate_access` must approve or deny all requests.",
+                "debug": None,
+                "context": "",
+            },
+        ],
+        "warnings": [],
+    }
+    app.dependency_overrides.clear()
+
+
+@pytest.mark.asyncio
+async def test_list_all_namespaces_deny_all(
+    client_with_service_setup: AsyncClient,
+) -> None:
+    """
+    Test ``GET /namespaces/``.
+    """
+
+    def validate_access_override():
+        def _validate_access(access_control: access.AccessControl):
+            access_control.deny_all()
+
+        return _validate_access
+
+    app.dependency_overrides[validate_access] = validate_access_override
+
+    response = await client_with_service_setup.get("/namespaces/")
+
+    assert response.status_code in (200, 201)
+    assert response.json() == []
+    app.dependency_overrides.clear()

@@ -2,7 +2,6 @@
 Tests for compiling nodes
 """
 
-# pylint: disable=too-many-lines
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -151,6 +150,7 @@ async def test_raise_on_compile_node_with_no_query(construction_session: AsyncSe
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason="DJ should not validate query correctness")
 async def test_raise_on_unjoinable_automatic_dimension_groupby(
     construction_session: AsyncSession,
 ):
@@ -188,9 +188,7 @@ async def test_raise_on_having_without_a_groupby(construction_session: AsyncSess
     node_a_rev = NodeRevision(
         node=node_a,
         version="1",
-        query=(
-            "SELECT country FROM basic.transform.country_agg " "HAVING country='US'"
-        ),
+        query=("SELECT country FROM basic.transform.country_agg HAVING country='US'"),
     )
 
     query_ast = parse(node_a_rev.query)

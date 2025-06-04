@@ -12,6 +12,8 @@ export default function AddMaterializationPopover({ node, onSubmit }) {
   const [options, setOptions] = useState([]);
   const [jobs, setJobs] = useState([]);
 
+  const timePartitionColumns = node.columns.filter(col => col.partition);
+
   const ref = useRef(null);
 
   useEffect(() => {
@@ -39,15 +41,28 @@ export default function AddMaterializationPopover({ node, onSubmit }) {
     const config = {};
     config.spark = values.spark_config;
     config.lookback_window = values.lookback_window;
-    const { status, json } = await djClient.materialize(
-      values.node,
-      values.job_type,
-      values.strategy,
-      values.schedule,
-      config,
-    );
+    if (!values.job_type) {
+      values.job_type = 'spark_sql';
+    }
+    const { status, json } =
+      values.job_type === 'druid_cube'
+        ? await djClient.materializeCube(
+            values.node,
+            values.job_type,
+            values.strategy,
+            values.schedule,
+            values.lookback_window,
+          )
+        : await djClient.materialize(
+            values.node,
+            values.job_type,
+            values.strategy,
+            values.schedule,
+            config,
+          );
     if (status === 200 || status === 201) {
       setStatus({ success: json.message });
+      window.location.reload();
     } else {
       setStatus({
         failure: `${json.message}`,
@@ -94,9 +109,9 @@ export default function AddMaterializationPopover({ node, onSubmit }) {
         <Formik
           initialValues={{
             node: node?.name,
-            job_type:
-              node?.type === 'cube' ? 'druid_metrics_cube' : 'spark_sql',
-            strategy: 'full',
+            job_type: node?.type === 'cube' ? 'druid_cube' : 'spark_sql',
+            strategy:
+              timePartitionColumns.length == 1 ? 'incremental_time' : 'full',
             schedule: '@daily',
             lookback_window: '1 DAY',
             spark_config: {
@@ -111,39 +126,32 @@ export default function AddMaterializationPopover({ node, onSubmit }) {
               <Form>
                 <h2>Configure Materialization</h2>
                 {displayMessageAfterSubmit(status)}
-                <span data-testid="job-type">
-                  <label htmlFor="job_type">Job Type</label>
-                  <Field as="select" name="job_type">
-                    <>
-                      <option
-                        key={'druid_measures_cube'}
-                        value={'druid_measures_cube'}
-                      >
-                        Druid Measures Cube (Pre-Agg Cube)
-                      </option>
-                      <option
-                        key={'druid_metrics_cube'}
-                        value={'druid_metrics_cube'}
-                      >
-                        Druid Metrics Cube (Post-Agg Cube)
-                      </option>
-                      <option key={'spark_sql'} value={'spark_sql'}>
-                        Iceberg Table
-                      </option>
-                    </>
-                  </Field>
-                </span>
+                {node.type === 'cube' ? (
+                  <span data-testid="job-type">
+                    <label htmlFor="job_type">Job Type</label>
+
+                    <Field as="select" name="job_type">
+                      <>
+                        <option key={'druid_cube'} value={'druid_cube'}>
+                          Druid
+                        </option>
+                      </>
+                    </Field>
+                    <br />
+                    <br />
+                  </span>
+                ) : (
+                  ''
+                )}
                 <input
                   hidden={true}
                   name="node"
                   value={node?.name}
                   readOnly={true}
                 />
-                <br />
-                <br />
                 <span data-testid="edit-partition">
                   <label htmlFor="strategy">Strategy</label>
-                  <Field as="select" name="strategy">
+                  <Field as="select" name="strategy" id="strategy">
                     <>
                       <option key={'full'} value={'full'}>
                         Full
@@ -171,7 +179,7 @@ export default function AddMaterializationPopover({ node, onSubmit }) {
                 <br />
                 <div className="DescriptionInput">
                   <ErrorMessage name="description" component="span" />
-                  <label htmlFor="Config">Lookback Window</label>
+                  <label htmlFor="lookback_window">Lookback Window</label>
                   <Field
                     type="text"
                     name="lookback_window"

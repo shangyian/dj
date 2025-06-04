@@ -1,4 +1,5 @@
 """Naming related utils."""
+
 from string import ascii_letters, digits
 from typing import List
 
@@ -51,5 +52,8 @@ def from_amenable_name(name: str) -> str:
     """
     Takes a string and converts it back to a namespaced name
     """
-    to_replace = f"_{LOOKUP_CHARS[SEPARATOR]}_"
-    return name.replace(to_replace, SEPARATOR)
+    for replacement, to_replace in LOOKUP_CHARS.items():
+        name = name.replace(f"_{to_replace}_", replacement)
+        name = name.replace(f"_{to_replace}", replacement)
+        name = name.replace(f"{to_replace}_", replacement)
+    return name

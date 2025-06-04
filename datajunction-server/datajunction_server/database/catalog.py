@@ -1,4 +1,5 @@
 """Catalog database schema."""
+
 from datetime import datetime, timezone
 from functools import partial
 from typing import TYPE_CHECKING, Dict, List, Optional
@@ -55,7 +56,7 @@ class Catalog(Base):
         return hash(self.id)
 
 
-class CatalogEngines(Base):  # type: ignore  # pylint: disable=too-few-public-methods
+class CatalogEngines(Base):  # type: ignore
     """
     Join table for catalogs and engines.
     """

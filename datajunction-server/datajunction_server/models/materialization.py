@@ -1,4 +1,5 @@
 """Models for materialization"""
+
 import enum
 from typing import TYPE_CHECKING, Dict, List, Optional, Union
 
@@ -6,16 +7,15 @@ from pydantic import AnyHttpUrl, BaseModel, validator
 
 from datajunction_server.enum import StrEnum
 from datajunction_server.errors import DJInvalidInputException
-from datajunction_server.models.column import SemanticType
 from datajunction_server.models.node_type import NodeType
 from datajunction_server.models.partition import (
     BackfillOutput,
+    Granularity,
     PartitionColumnOutput,
     PartitionType,
 )
 from datajunction_server.models.query import ColumnMetadata
 from datajunction_server.naming import amenable_name
-from datajunction_server.sql.parsing.types import TimestampType
 
 if TYPE_CHECKING:
     from datajunction_server.database.node import NodeRevision
@@ -92,6 +92,7 @@ class GenericMaterializationInput(BaseModel):
     spark_conf: Optional[Dict] = None
     partitions: Optional[List[Dict]] = None
     columns: List[ColumnMetadata]
+    lookback_window: Optional[str] = "1 DAY"
 
 
 class DruidMaterializationInput(GenericMaterializationInput):
@@ -125,7 +126,7 @@ class MaterializationConfigOutput(BaseModel):
     backfills: List[BackfillOutput]
     strategy: Optional[str]
 
-    class Config:  # pylint: disable=missing-class-docstring, too-few-public-methods
+    class Config:
         orm_mode = True
 
 
@@ -208,7 +209,7 @@ class GenericMaterializationConfig(GenericMaterializationConfigInput):
                 type_=PartitionType.CATEGORICAL,
             )
             for col in self.columns  # type: ignore
-            if col.column in user_defined_categorical_columns
+            if col.semantic_entity in user_defined_categorical_columns
         ]
 
 
@@ -289,7 +290,7 @@ class DruidMeasuresCubeConfig(DruidCubeConfigInput, GenericCubeConfig):
         """
         Returns the Druid metrics spec for ingestion
         """
-        self.dimensions += [  # type: ignore  # pylint: disable=no-member
+        self.dimensions += [  # type: ignore
             measure.field_name
             for measure_group in self.measures.values()  # type: ignore
             for measure in measure_group.measures
@@ -313,33 +314,22 @@ class DruidMeasuresCubeConfig(DruidCubeConfigInput, GenericCubeConfig):
         node_name = node_revision.name
         metrics_spec = list(self.metrics_spec().values())
 
-        # Either a temporal partition is configured or a timestamp column must exist on the cube
+        # A temporal partition should be configured on the cube, raise an error if not
         user_defined_temporal_partitions = node_revision.temporal_partition_columns()
-        timestamp_columns = [
-            col.name for col in node_revision.columns if col.type == TimestampType()
-        ]
-        if not user_defined_temporal_partitions and not timestamp_columns:
+        if not user_defined_temporal_partitions:
             raise DJInvalidInputException(  # pragma: no cover
-                "There must be at least one timestamp column or temporal partition configured"
+                "There must be at least one time-based partition configured"
                 " on this cube or it cannot be materialized to Druid.",
             )
 
-        # Select which timestamp column to use: the user-defined temporal partition
-        # if it exists or a timestamp column if it doesn't
+        # Use the user-defined temporal partition if it exists
         user_defined_temporal_partition = None
-        if user_defined_temporal_partitions:
-            user_defined_temporal_partition = user_defined_temporal_partitions[0]
-            timestamp_column = [
-                col.name
-                for col in self.columns  # type: ignore
-                if col.semantic_entity == user_defined_temporal_partition.name
-            ][0]
-        else:
-            timestamp_column = [
-                col.name
-                for col in self.columns  # type: ignore
-                if col.semantic_type == SemanticType.TIMESTAMP
-            ][0]
+        user_defined_temporal_partition = user_defined_temporal_partitions[0]
+        timestamp_column = [
+            col.name
+            for col in self.columns  # type: ignore
+            if col.semantic_entity == user_defined_temporal_partition.name
+        ][0]
 
         druid_datasource_name = (
             self.prefix  # type: ignore
@@ -356,7 +346,6 @@ class DruidMeasuresCubeConfig(DruidCubeConfigInput, GenericCubeConfig):
                         "format": "parquet",
                         "dimensionsSpec": {
                             "dimensions": sorted(
-                                # pylint: disable=no-member
                                 list(set(self.dimensions)),  # type: ignore
                             ),
                         },
@@ -373,11 +362,11 @@ class DruidMeasuresCubeConfig(DruidCubeConfigInput, GenericCubeConfig):
                 "metricsSpec": metrics_spec,
                 "granularitySpec": {
                     "type": "uniform",
-                    "segmentGranularity": (
+                    "segmentGranularity": str(
                         user_defined_temporal_partition.partition.granularity
                         if user_defined_temporal_partition
-                        else "DAY"
-                    ),
+                        else Granularity.DAY,
+                    ).upper(),
                     "intervals": [],  # this should be set at runtime
                 },
             },
@@ -393,9 +382,7 @@ class DruidMeasuresCubeConfig(DruidCubeConfigInput, GenericCubeConfig):
         return druid_spec
 
 
-class DruidMetricsCubeConfig(
-    DruidMeasuresCubeConfig,
-):  # pylint: disable=too-many-ancestors
+class DruidMetricsCubeConfig(DruidMeasuresCubeConfig):
     """
     Specific cube materialization implementation with Spark and Druid ingestion and
     optional prefix and/or suffix to include with the materialized entity's name.
@@ -471,6 +458,17 @@ class MaterializationJobTypeEnum(enum.Enum):
         job_class="DruidMetricsCubeMaterializationJob",
     )
 
+    DRUID_CUBE = MaterializationJobType(
+        name="druid_cube",
+        label="Druid Cube",
+        description=(
+            "Used to materialize a cube of metrics and dimensions to Druid for low-latency access."
+            "Will replace the other cube materialization types."
+        ),
+        allowed_node_types=[NodeType.CUBE],
+        job_class="DruidCubeMaterializationJob",
+    )
+
     @classmethod
     def find_match(cls, job_name: str) -> "MaterializationJobTypeEnum":
         """Find a matching enum value for the given job name"""
@@ -493,7 +491,7 @@ class UpsertMaterialization(BaseModel):
     strategy: MaterializationStrategy
 
     @validator("job", pre=True)
-    def validate_job(  # pylint: disable=no-self-argument
+    def validate_job(
         cls,
         job: Union[str, MaterializationJobTypeEnum],
     ) -> MaterializationJobTypeEnum:
@@ -502,9 +500,7 @@ class UpsertMaterialization(BaseModel):
         """
         if isinstance(job, str):
             job_name = job.upper()
-            options = (
-                MaterializationJobTypeEnum._member_names_  # pylint: disable=protected-access,no-member
-            )
+            options = MaterializationJobTypeEnum._member_names_
             if job_name not in options:
                 raise DJInvalidInputException(
                     http_status_code=404,

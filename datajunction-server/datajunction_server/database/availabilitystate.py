@@ -1,7 +1,8 @@
 """Availability state database schema."""
+
 from datetime import datetime, timezone
 from functools import partial
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 import sqlalchemy as sa
 from sqlalchemy import JSON, DateTime, ForeignKey
@@ -12,7 +13,7 @@ from datajunction_server.models.node import BuildCriteria, PartitionAvailability
 from datajunction_server.typing import UTCDatetime
 
 
-class AvailabilityState(Base):  # pylint: disable=too-few-public-methods
+class AvailabilityState(Base):
     """
     The availability of materialized data for a node
     """
@@ -29,6 +30,7 @@ class AvailabilityState(Base):  # pylint: disable=too-few-public-methods
     table: Mapped[str]
     valid_through_ts: Mapped[int] = mapped_column(sa.BigInteger())
     url: Mapped[Optional[str]]
+    links: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, default=dict)
 
     # An ordered list of categorical partitions like ["country", "group_id"]
     # or ["region_id", "age_group"]
@@ -65,16 +67,17 @@ class AvailabilityState(Base):  # pylint: disable=too-few-public-methods
 
     def is_available(
         self,
-        criteria: Optional[BuildCriteria] = None,  # pylint: disable=unused-argument
+        criteria: Optional[BuildCriteria] = None,
     ) -> bool:  # pragma: no cover
         """
         Determine whether an availability state is useable given criteria
         """
-        # Criteria to determine if an availability state should be used needs to be added
+        # TODO: we should evaluate this availability state against the criteria.
+        #       Remember that VTTS can be also evaluated at runtime dependency.
         return True
 
 
-class NodeAvailabilityState(Base):  # pylint: disable=too-few-public-methods
+class NodeAvailabilityState(Base):
     """
     Join table for availability state
     """

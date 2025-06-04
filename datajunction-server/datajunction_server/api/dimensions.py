@@ -1,6 +1,7 @@
 """
 Dimensions related APIs.
 """
+
 import logging
 from typing import List, Optional
 
@@ -17,38 +18,51 @@ from datajunction_server.internal.access.authorization import (
     validate_access_requests,
 )
 from datajunction_server.models import access
-from datajunction_server.models.node import NodeRevisionOutput
+from datajunction_server.models.node import NodeIndegreeOutput, NodeRevisionOutput
 from datajunction_server.models.node_type import NodeType
 from datajunction_server.sql.dag import (
+    get_dimension_dag_indegree,
     get_nodes_with_common_dimensions,
     get_nodes_with_dimension,
 )
-from datajunction_server.utils import get_current_user, get_session, get_settings
+from datajunction_server.utils import (
+    get_and_update_current_user,
+    get_session,
+    get_settings,
+)
 
 settings = get_settings()
 _logger = logging.getLogger(__name__)
 router = SecureAPIRouter(tags=["dimensions"])
 
 
-@router.get("/dimensions/", response_model=List[str])
+@router.get("/dimensions/", response_model=List[NodeIndegreeOutput])
 async def list_dimensions(
     prefix: Optional[str] = None,
     *,
     session: AsyncSession = Depends(get_session),
-    current_user: Optional[User] = Depends(get_current_user),
-    validate_access: access.ValidateAccessFn = Depends(  # pylint: disable=W0621
+    current_user: User = Depends(get_and_update_current_user),
+    validate_access: access.ValidateAccessFn = Depends(
         validate_access,
     ),
-) -> List[str]:
+) -> List[NodeIndegreeOutput]:
     """
     List all available dimensions.
     """
-    return await list_nodes(
+    node_names = await list_nodes(
         node_type=NodeType.DIMENSION,
         prefix=prefix,
         session=session,
         current_user=current_user,
         validate_access=validate_access,
+    )
+    node_indegrees = await get_dimension_dag_indegree(session, node_names)
+    return sorted(
+        [
+            NodeIndegreeOutput(name=node, indegree=node_indegrees[node])
+            for node in node_names
+        ],
+        key=lambda n: -n.indegree,
     )
 
 
@@ -58,8 +72,8 @@ async def find_nodes_with_dimension(
     *,
     node_type: List[NodeType] = Query([]),
     session: AsyncSession = Depends(get_session),
-    current_user: Optional[User] = Depends(get_current_user),
-    validate_access: access.ValidateAccessFn = Depends(  # pylint: disable=W0621
+    current_user: User = Depends(get_and_update_current_user),
+    validate_access: access.ValidateAccessFn = Depends(
         validate_access,
     ),
 ) -> List[NodeRevisionOutput]:
@@ -91,8 +105,8 @@ async def find_nodes_with_common_dimensions(
     node_type: List[NodeType] = Query([]),
     *,
     session: AsyncSession = Depends(get_session),
-    current_user: Optional[User] = Depends(get_current_user),
-    validate_access: access.ValidateAccessFn = Depends(  # pylint: disable=W0621
+    current_user: User = Depends(get_and_update_current_user),
+    validate_access: access.ValidateAccessFn = Depends(
         validate_access,
     ),
 ) -> List[NodeRevisionOutput]:
