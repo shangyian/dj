@@ -5,11 +5,13 @@ import zlib
 from datetime import datetime, timezone
 from functools import partial
 from http import HTTPStatus
-from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 import sqlalchemy as sa
-from pydantic import Extra
-from sqlalchemy import JSON
+from pydantic import ConfigDict
+from sqlalchemy import JSON, and_, desc
+from sqlalchemy.orm import aliased
+
 from sqlalchemy import Column as SqlalchemyColumn
 from sqlalchemy import (
     DateTime,
@@ -25,7 +27,14 @@ from sqlalchemy import (
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.ext.hybrid import hybrid_property
-from sqlalchemy.orm import Mapped, joinedload, mapped_column, relationship, selectinload
+from sqlalchemy.orm import (
+    Mapped,
+    joinedload,
+    mapped_column,
+    relationship,
+    selectinload,
+    MappedColumn,
+)
 from sqlalchemy.sql.base import ExecutableOption
 from sqlalchemy.sql.operators import is_, or_
 
@@ -45,6 +54,15 @@ from datajunction_server.errors import (
     DJNodeNotFound,
 )
 from datajunction_server.models.base import labelize
+from datajunction_server.models.deployment import (
+    CubeSpec,
+    DimensionReferenceLinkSpec,
+    DimensionSpec,
+    MetricSpec,
+    NodeSpec,
+    SourceSpec,
+    TransformSpec,
+)
 from datajunction_server.models.node import (
     DEFAULT_DRAFT_VERSION,
     BuildCriteria,
@@ -60,6 +78,7 @@ from datajunction_server.utils import SEPARATOR, execute_with_retry
 
 if TYPE_CHECKING:
     from datajunction_server.database.dimensionlink import DimensionLink
+    from datajunction_server.database.measure import FrozenMeasure
 
 
 class NodeRelationship(Base):
@@ -68,9 +87,17 @@ class NodeRelationship(Base):
     """
 
     __tablename__ = "noderelationship"
+    __table_args__ = (
+        Index("idx_noderelationship_parent_id", "parent_id"),
+        Index("idx_noderelationship_child_id", "child_id"),
+    )
 
     parent_id: Mapped[int] = mapped_column(
-        ForeignKey("node.id", name="fk_noderelationship_parent_id_node"),
+        ForeignKey(
+            "node.id",
+            name="fk_noderelationship_parent_id_node",
+            ondelete="CASCADE",
+        ),
         primary_key=True,
     )
 
@@ -79,7 +106,11 @@ class NodeRelationship(Base):
     parent_version: Mapped[Optional[str]] = mapped_column(default="latest")
 
     child_id: Mapped[int] = mapped_column(
-        ForeignKey("noderevision.id", name="fk_noderelationship_child_id_noderevision"),
+        ForeignKey(
+            "noderevision.id",
+            name="fk_noderelationship_child_id_noderevision",
+            ondelete="CASCADE",
+        ),
         primary_key=True,
     )
 
@@ -90,14 +121,23 @@ class CubeRelationship(Base):
     """
 
     __tablename__ = "cube"
+    __table_args__ = (Index("idx_cube_cube_id", "cube_id"),)
 
     cube_id: Mapped[int] = mapped_column(
-        ForeignKey("noderevision.id", name="fk_cube_cube_id_noderevision"),
+        ForeignKey(
+            "noderevision.id",
+            name="fk_cube_cube_id_noderevision",
+            ondelete="CASCADE",
+        ),
         primary_key=True,
     )
 
     cube_element_id: Mapped[int] = mapped_column(
-        ForeignKey("column.id", name="fk_cube_cube_element_id_column"),
+        ForeignKey(
+            "column.id",
+            name="fk_cube_cube_element_id_column",
+            ondelete="CASCADE",
+        ),
         primary_key=True,
     )
 
@@ -114,6 +154,7 @@ class BoundDimensionsRelationship(Base):
         ForeignKey(
             "noderevision.id",
             name="fk_metric_required_dimensions_metric_id_noderevision",
+            ondelete="CASCADE",
         ),
         primary_key=True,
     )
@@ -122,6 +163,7 @@ class BoundDimensionsRelationship(Base):
         ForeignKey(
             "column.id",
             name="fk_metric_required_dimensions_bound_dimension_id_column",
+            ondelete="CASCADE",
         ),
         primary_key=True,
     )
@@ -219,6 +261,19 @@ class Node(Base):
         default=None,
     )
 
+    owner_associations = relationship(
+        "NodeOwner",
+        back_populates="node",
+        cascade="all, delete-orphan",
+        overlaps="owners",
+    )
+    owners: Mapped[list[User]] = relationship(
+        "User",
+        secondary="node_owners",
+        back_populates="owned_nodes",
+        overlaps="owner_associations",
+    )
+
     revisions: Mapped[List["NodeRevision"]] = relationship(
         "NodeRevision",
         back_populates="node",
@@ -271,6 +326,128 @@ class Node(Base):
             {entry.user for entry in self.history if entry.user},
         )
 
+    def upstream_cache_key(self, node_type: NodeType | None = None) -> str:
+        base = f"upstream:{self.name}@{self.current_version}"
+        return f"{base}:{node_type.value}" if node_type is not None else base
+
+    async def to_spec(self, session: AsyncSession) -> NodeSpec:
+        """
+        Convert the node to a spec
+        """
+        node_spec_class_map: dict[NodeType, type[NodeSpec]] = {
+            NodeType.SOURCE: SourceSpec,
+            NodeType.TRANSFORM: TransformSpec,
+            NodeType.DIMENSION: DimensionSpec,
+            NodeType.METRIC: MetricSpec,
+            NodeType.CUBE: CubeSpec,
+        }
+
+        await session.refresh(self, ["owners"])
+
+        # Base kwargs common to all node types
+        base_kwargs = dict(
+            name=self.name,
+            node_type=self.type,
+            owners=[owner.username for owner in self.owners],
+            display_name=self.current.display_name,
+            description=self.current.description,
+            tags=[tag.name for tag in self.tags],
+            mode=self.current.mode,
+            custom_metadata=self.current.custom_metadata,
+        )
+
+        # Type-specific extra arguments
+        extra_kwargs: dict[str, Any] = {}
+
+        # Nodes with queries
+        if self.type in (NodeType.TRANSFORM, NodeType.DIMENSION, NodeType.METRIC):
+            extra_kwargs.update(
+                query=self.current.query,
+            )
+
+        if self.type in (
+            NodeType.TRANSFORM,
+            NodeType.DIMENSION,
+            NodeType.METRIC,
+            NodeType.CUBE,
+        ):
+            cols = [col.to_spec() for col in self.current.columns]
+            extra_kwargs.update(
+                columns=cols,
+            )
+
+        # Nodes with dimension links
+        if self.type in (NodeType.SOURCE, NodeType.DIMENSION, NodeType.TRANSFORM):
+            join_link_specs = [
+                link.to_spec()
+                for link in self.current.dimension_links  # type: ignore
+            ]
+            ref_link_specs = [
+                DimensionReferenceLinkSpec(
+                    node_column=col.name,
+                    dimension=f"{col.dimension.name}{SEPARATOR}{col.dimension_column}",
+                )
+                for col in self.current.columns
+                if col.dimension_id and col.dimension_column
+            ]
+            col_specs = [col.to_spec() for col in self.current.columns]
+            extra_kwargs.update(
+                primary_key=[
+                    col.name for col in col_specs if "primary_key" in col.attributes
+                ],
+                dimension_links=join_link_specs + ref_link_specs,
+            )
+
+        # Source-specific
+        if self.type == NodeType.SOURCE:
+            extra_kwargs.update(
+                table=f"{self.current.catalog.name}.{self.current.schema_}.{self.current.table}",
+                columns=[col.to_spec() for col in self.current.columns],
+            )
+
+        # Metric-specific
+        if self.type == NodeType.METRIC:
+            extra_kwargs.update(
+                required_dimensions=[
+                    col.name for col in self.current.required_dimensions
+                ],
+                direction=self.current.metric_metadata.direction
+                if self.current.metric_metadata
+                else None,
+                unit_enum=(
+                    self.current.metric_metadata.unit
+                    if self.current.metric_metadata
+                    and self.current.metric_metadata.unit
+                    else None
+                ),
+                significant_digits=self.current.metric_metadata.significant_digits
+                if self.current.metric_metadata
+                else None,
+                min_decimal_exponent=self.current.metric_metadata.min_decimal_exponent
+                if self.current.metric_metadata
+                else None,
+                max_decimal_exponent=self.current.metric_metadata.max_decimal_exponent
+                if self.current.metric_metadata
+                else None,
+            )
+
+        # Cube-specific
+        if self.type == NodeType.CUBE:
+            extra_kwargs.update(
+                metrics=self.current.cube_node_metrics,
+                dimensions=self.current.cube_node_dimensions,
+            )
+
+        node_spec_cls = node_spec_class_map[self.type]
+        return node_spec_cls(**base_kwargs, **extra_kwargs)
+
+    @classmethod
+    def cube_load_options(cls) -> List[ExecutableOption]:
+        return [
+            selectinload(Node.current).options(*NodeRevision.cube_load_options()),
+            selectinload(Node.tags),
+        ]
+
     @classmethod
     async def get_by_name(
         cls,
@@ -291,6 +468,7 @@ class Node(Base):
             ),
             selectinload(Node.tags),
             selectinload(Node.created_by),
+            selectinload(Node.owners),
         ]
         statement = statement.options(*options)
         if not include_inactive:
@@ -317,7 +495,7 @@ class Node(Base):
         include_inactive: bool = False,
     ) -> List["Node"]:
         """
-        Get a node by name
+        Get nodes by names
         """
         statement = select(Node).where(Node.name.in_(names))
         options = options or [
@@ -331,7 +509,9 @@ class Node(Base):
             statement = statement.where(is_(Node.deactivated_at, None))
         result = await session.execute(statement)
         nodes = result.unique().scalars().all()
-        return nodes
+        nodes_by_name = {node.name: node for node in nodes}
+        ordered_nodes = [nodes_by_name[name] for name in names if name in nodes_by_name]
+        return ordered_nodes
 
     @classmethod
     async def get_cube_by_name(
@@ -354,7 +534,7 @@ class Node(Base):
                         Materialization.backfills,
                     ),
                     selectinload(NodeRevision.cube_elements)
-                    .selectinload(Column.node_revisions)
+                    .selectinload(Column.node_revision)
                     .options(
                         selectinload(NodeRevision.node),
                     ),
@@ -371,17 +551,15 @@ class Node(Base):
         cls,
         session: AsyncSession,
         node_id: int,
-        *options: ExecutableOption,
+        options: list[ExecutableOption] = None,
     ) -> Optional["Node"]:
         """
         Get a node by id
         """
-        statement = (
-            select(Node).where(Node.id == node_id).options(*options)
-        )  # pragma: no cover
-        result = await session.execute(statement)  # pragma: no cover
-        node = result.unique().scalar_one_or_none()  # pragma: no cover
-        return node  # pragma: no cover
+        statement = select(Node).where(Node.id == node_id).options(*(options or []))
+        result = await session.execute(statement)
+        node = result.unique().scalar_one_or_none()
+        return node
 
     @classmethod
     async def find(
@@ -408,20 +586,27 @@ class Node(Base):
     async def find_by(
         cls,
         session: AsyncSession,
-        names: Optional[List[str]] = None,
-        fragment: Optional[str] = None,
-        node_types: Optional[List[NodeType]] = None,
-        tags: Optional[List[str]] = None,
-        edited_by: Optional[str] = None,
-        namespace: Optional[str] = None,
-        limit: Optional[int] = 100,
-        before: Optional[str] = None,
-        after: Optional[str] = None,
+        names: list[str] | None = None,
+        fragment: str | None = None,
+        node_types: list[NodeType] | None = None,
+        tags: list[str] | None = None,
+        edited_by: str | None = None,
+        namespace: str | None = None,
+        limit: int | None = 100,
+        before: str | None = None,
+        after: str | None = None,
+        order_by: MappedColumn | None = None,
+        ascending: bool = False,
         options: list[ExecutableOption] = None,
     ) -> List["Node"]:
         """
         Finds a list of nodes by prefix
         """
+        if not order_by:
+            order_by = Node.created_at
+
+        NodeRevisionAlias = aliased(NodeRevision)
+
         nodes_with_tags = []
         if tags:
             statement = (
@@ -436,6 +621,17 @@ class Node(Base):
                 return []
 
         statement = select(Node).where(is_(Node.deactivated_at, None))
+
+        # Join NodeRevision if needed for order_by or fragment filtering
+        order_by_node_revision = (
+            order_by and getattr(order_by, "class_", None) is NodeRevision
+        )
+        join_revision = True if fragment or order_by_node_revision else False
+        if join_revision:
+            statement = statement.join(NodeRevisionAlias, Node.current)
+            if order_by_node_revision:
+                order_by = getattr(NodeRevisionAlias, order_by.key)
+
         if namespace:
             statement = statement.where(
                 (Node.namespace.like(f"{namespace}.%")) | (Node.namespace == namespace),
@@ -449,10 +645,10 @@ class Node(Base):
                 Node.name.in_(names),  # type: ignore
             )
         if fragment:
-            statement = statement.join(NodeRevision, Node.current).where(
+            statement = statement.where(
                 or_(
-                    Node.name.like(f"%{fragment}%"),  # type: ignore
-                    NodeRevision.display_name.ilike(f"%{fragment}%"),  # type: ignore
+                    Node.name.like(f"%{fragment}%"),
+                    NodeRevisionAlias.display_name.ilike(f"%{fragment}%"),
                 ),
             )
 
@@ -481,9 +677,17 @@ class Node(Base):
             statement = statement.where(
                 (Node.created_at, Node.id) >= (cursor.created_at, cursor.id),
             )
-            statement = statement.order_by(Node.created_at.asc(), Node.id.asc())
+            statement = statement.order_by(
+                order_by.asc() if ascending else order_by.desc(),
+                Node.created_at.asc(),
+                Node.id.asc(),
+            )
         else:
-            statement = statement.order_by(Node.created_at.desc(), Node.id.desc())
+            statement = statement.order_by(
+                order_by.asc() if ascending else order_by.desc(),
+                Node.created_at.desc(),
+                Node.id.desc(),
+            )
 
         limit = limit if limit and limit > 0 else 100
         statement = statement.limit(limit)
@@ -591,7 +795,7 @@ class NodeRevision(
         default=str(DEFAULT_DRAFT_VERSION),
     )
     node_id: Mapped[int] = mapped_column(
-        ForeignKey("node.id", name="fk_noderevision_node_id_node"),
+        ForeignKey("node.id", name="fk_noderevision_node_id_node", ondelete="CASCADE"),
     )
     node: Mapped[Node] = relationship(
         "Node",
@@ -635,7 +839,7 @@ class NodeRevision(
         secondary="cube",
         primaryjoin="NodeRevision.id==CubeRelationship.cube_id",
         secondaryjoin="Column.id==CubeRelationship.cube_element_id",
-        lazy="joined",
+        lazy="selectin",
         order_by="Column.order",
     )
 
@@ -663,10 +867,9 @@ class NodeRevision(
     )
 
     columns: Mapped[List["Column"]] = relationship(
-        secondary="nodecolumns",
-        primaryjoin="NodeRevision.id==NodeColumns.node_id",
-        secondaryjoin="Column.id==NodeColumns.column_id",
-        cascade="all, delete",
+        "Column",
+        back_populates="node_revision",
+        cascade="all, delete-orphan",
         order_by="Column.order",
     )
 
@@ -708,6 +911,13 @@ class NodeRevision(
         JSON,
         default={},
     )
+
+    # Measures
+    frozen_measures: Mapped[List["FrozenMeasure"]] = relationship(
+        secondary="node_revision_frozen_measures",
+        back_populates="used_by_node_revisions",
+    )
+    derived_expression: Mapped[Optional[str]]
 
     def __hash__(self) -> int:
         return hash(self.id)
@@ -752,6 +962,20 @@ class NodeRevision(
             selectinload(NodeRevision.availability),
         )
 
+    @classmethod
+    def cube_load_options(cls):
+        """
+        Default options when loading a cube node
+        """
+        return (
+            *cls.default_load_options(),
+            selectinload(NodeRevision.cube_elements)
+            .selectinload(Column.node_revision)
+            .options(
+                selectinload(NodeRevision.node),
+            ),
+        )
+
     @staticmethod
     def format_metric_alias(query: str, name: str) -> str:
         """
@@ -767,6 +991,23 @@ class NodeRevision(
             ast.Name(amenable_name(name)),
         )
         return str(tree)
+
+    @classmethod
+    async def get_by_id(
+        cls,
+        session: AsyncSession,
+        node_revision_id: int,
+        options: list[ExecutableOption] = None,
+    ) -> Optional["NodeRevision"]:
+        """
+        Get a node revision by id
+        """
+        statement = select(NodeRevision).where(NodeRevision.id == node_revision_id)
+        if options:  # pragma: no cover
+            statement = statement.options(*options)
+        result = await session.execute(statement)
+        node_revision = result.unique().scalar_one_or_none()
+        return node_revision
 
     def check_metric(self):
         """
@@ -850,8 +1091,7 @@ class NodeRevision(
                 col.attributes = old_columns_mapping[col.name].attributes or []
         return self
 
-    class Config:
-        extra = Extra.allow
+    model_config = ConfigDict(extra="allow")
 
     def has_available_materialization(self, build_criteria: BuildCriteria) -> bool:
         """
@@ -877,7 +1117,14 @@ class NodeRevision(
         """
         Cube elements along with their nodes
         """
-        return [(element, element.node_revision()) for element in self.cube_elements]
+        return [(element, element.node_revision) for element in self.cube_elements]
+
+    def metric_node_revisions(self) -> list[Optional["NodeRevision"]]:
+        """
+        Cube elements along with their nodes
+        """
+        node_revisions = [element.node_revision for element in self.cube_elements]
+        return [rev for rev in node_revisions if rev.type == NodeType.METRIC]
 
     def cube_metrics(self) -> List[Node]:
         """
@@ -978,19 +1225,92 @@ class NodeRevision(
         """
         return None
 
+    def _find_cube_by_statement(
+        name: str | None = None,
+        version: str | None = None,
+        catalog: str | None = None,
+        page: int = 1,
+        page_size: int = 10,
+    ):
+        from datajunction_server.database.measure import FrozenMeasure
 
-class NodeColumns(Base):
-    """
-    Join table for node columns.
-    """
+        if not version or version == "latest":
+            version_condition = NodeRevision.version == Node.current_version
+        else:
+            version_condition = NodeRevision.version == version
 
-    __tablename__ = "nodecolumns"
+        statement = (
+            select(NodeRevision)
+            .select_from(Node)
+            .where(and_(is_(Node.deactivated_at, None), Node.type == NodeType.CUBE))
+            .join(
+                NodeRevision,
+                (NodeRevision.name == Node.name) & (version_condition),
+            )
+            .options(
+                selectinload(NodeRevision.columns),
+                selectinload(  # Ensure availability is loaded for filtering
+                    NodeRevision.availability,
+                ),
+                selectinload(NodeRevision.materializations).selectinload(
+                    Materialization.backfills,
+                ),
+                selectinload(NodeRevision.cube_elements)
+                .selectinload(Column.node_revision)
+                .options(
+                    joinedload(NodeRevision.node),
+                    selectinload(NodeRevision.frozen_measures).options(
+                        selectinload(FrozenMeasure.upstream_revision),
+                    ),
+                ),
+                selectinload(NodeRevision.node).options(selectinload(Node.tags)),
+            )
+        )
+        if name:
+            statement = statement.where(Node.name == name)
+        else:
+            statement = statement.order_by(desc(NodeRevision.updated_at))
+        if catalog:
+            statement = statement.join(
+                AvailabilityState,
+                NodeRevision.availability,
+            ).where(
+                AvailabilityState.catalog == catalog,
+            )
+        offset = (page - 1) * page_size
+        statement = statement.offset(offset).limit(page_size)
+        return statement
 
-    node_id: Mapped[int] = mapped_column(
-        ForeignKey("noderevision.id", name="fk_nodecolumns_node_id_noderevision"),
-        primary_key=True,
-    )
-    column_id: Mapped[int] = mapped_column(
-        ForeignKey("column.id", name="fk_nodecolumns_column_id_column"),
-        primary_key=True,
-    )
+    @classmethod
+    async def get_cube_revision(
+        cls,
+        session: AsyncSession,
+        name: str,
+        version: str | None = None,
+    ) -> Optional["NodeRevision"]:
+        """
+        Get a cube by name
+        """
+        statement = NodeRevision._find_cube_by_statement(name=name, version=version)
+        result = await session.execute(statement)
+        return result.unique().scalar_one_or_none()
+
+    @classmethod
+    async def get_cube_revisions(
+        cls,
+        session: AsyncSession,
+        catalog: Optional[str] = None,
+        page: int = 1,
+        page_size: int = 10,
+    ) -> list["NodeRevision"]:
+        """
+        Returns cube revision metadata for the latest version of all cubes, with pagination.
+        Optionally filters by the catalog in which the cube is available.
+        """
+        statement = NodeRevision._find_cube_by_statement(
+            catalog=catalog,
+            page=page,
+            page_size=page_size,
+        )
+        result = await session.execute(statement)
+        return result.unique().scalars().all()

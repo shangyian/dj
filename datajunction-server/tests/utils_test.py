@@ -4,29 +4,40 @@ Tests for ``datajunction_server.utils``.
 
 import logging
 from unittest.mock import AsyncMock, MagicMock, patch
+import json
+import pytest
+from starlette.requests import Request
+from starlette.datastructures import Headers
+from starlette.types import Scope
 
 import pytest
 from pytest_mock import MockerFixture
 from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.background import BackgroundTasks
 from testcontainers.postgres import PostgresContainer
 from yarl import URL
 
-from datajunction_server.config import Settings
+from datajunction_server.config import DatabaseConfig, Settings
 from datajunction_server.database.user import OAuthProvider, User
-from datajunction_server.errors import DJDatabaseException, DJException
+from datajunction_server.errors import (
+    DJDatabaseException,
+    DJException,
+    DJUninitializedResourceException,
+)
 from datajunction_server.utils import (
+    DatabaseSessionManager,
     Version,
     execute_with_retry,
     get_and_update_current_user,
-    get_engine,
     get_issue_url,
     get_query_service_client,
     get_session,
+    get_session_manager,
     get_settings,
     setup_logging,
+    is_graphql_query,
 )
 
 
@@ -52,8 +63,44 @@ async def test_get_session(mocker: MockerFixture) -> None:
         mocker.MagicMock(autospec=BackgroundTasks),
     ) as background_tasks:
         background_tasks.side_effect = lambda x, y: None
-        session = await anext(get_session())
+        session = await anext(get_session(request=mocker.MagicMock()))
         assert isinstance(session, AsyncSession)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "method,expected_session_attr",
+    [
+        ("GET", "reader_session"),
+        ("POST", "writer_session"),
+    ],
+)
+async def test_get_session_uses_correct_session(method, expected_session_attr):
+    """
+    Ensure get_session uses reader_session for GET and writer_session for others.
+    """
+    get_session_manager.cache_clear()
+    mock_session_manager = get_session_manager()
+    request = MagicMock()
+    request.method = method
+    assert mock_session_manager.reader_engine is not None
+    assert mock_session_manager.writer_engine is not None
+    assert mock_session_manager.reader_sessionmaker is not None
+    assert mock_session_manager.writer_sessionmaker is not None
+
+    agen = get_session(request)
+    session = await anext(agen)
+    if expected_session_attr == "reader_session":
+        assert (
+            str(session.bind.url)
+            == "postgresql+psycopg://readonly_user:***@postgres_metadata:5432/dj"
+        )
+    else:
+        assert (
+            str(session.bind.url)
+            == "postgresql+psycopg://dj:***@postgres_metadata:5432/dj"
+        )
+    await agen.aclose()
 
 
 def test_get_settings(mocker: MockerFixture) -> None:
@@ -88,21 +135,44 @@ def test_get_issue_url() -> None:
     )
 
 
-def test_get_engine(
+def test_database_session_manager(
     mocker: MockerFixture,
     settings: Settings,
     postgres_container: PostgresContainer,
 ) -> None:
     """
-    Test ``get_engine``.
+    Test DatabaseSessionManager.
     """
     connection_url = postgres_container.get_connection_url()
-    settings.index = connection_url
+    settings.writer_db = DatabaseConfig(uri=connection_url)
     mocker.patch("datajunction_server.utils.get_settings", return_value=settings)
-    engine = get_engine()
-    assert engine.pool.size() == settings.db_pool_size
-    assert engine.pool.timeout() == settings.db_pool_timeout
-    assert engine.pool.overflow() == -settings.db_max_overflow
+
+    session_manager = DatabaseSessionManager()
+    with pytest.raises(DJUninitializedResourceException):
+        session_manager.reader_engine
+    with pytest.raises(DJUninitializedResourceException):
+        session_manager.writer_engine
+    with pytest.raises(DJUninitializedResourceException):
+        session_manager.reader_sessionmaker
+    with pytest.raises(DJUninitializedResourceException):
+        session_manager.writer_sessionmaker
+
+    session_manager.init_db()
+
+    writer_engine = session_manager.writer_engine
+    writer_engine.pool.size() == settings.writer_db.pool_size  # type: ignore
+    writer_engine.pool.timeout() == settings.writer_db.pool_timeout  # type: ignore
+    writer_engine.pool.overflow() == settings.writer_db.max_overflow  # type: ignore
+
+    reader_engine = session_manager.reader_engine
+    reader_engine.pool.size() == settings.reader_db.pool_size  # type: ignore
+    reader_engine.pool.timeout() == settings.reader_db.pool_timeout  # type: ignore
+    reader_engine.pool.overflow() == settings.reader_db.max_overflow  # type: ignore
+
+    assert session_manager.reader_engine != session_manager.writer_engine
+    assert isinstance(session_manager.reader_sessionmaker, async_sessionmaker)
+    assert isinstance(session_manager.writer_sessionmaker, async_sessionmaker)
+    assert session_manager.sessionmaker == session_manager.writer_sessionmaker
 
 
 def test_get_query_service_client(mocker: MockerFixture, settings: Settings) -> None:
@@ -145,7 +215,6 @@ async def test_get_and_update_current_user(session: AsyncSession):
     Test upserting the current user
     """
     example_user = User(
-        id=1,
         username="userfoo",
         password="passwordfoo",
         name="djuser",
@@ -158,20 +227,20 @@ async def test_get_and_update_current_user(session: AsyncSession):
         session=session,
         current_user=example_user,
     )
-    assert current_user.id == example_user.id
+    assert current_user.id == 1
     assert current_user.username == example_user.username
 
     # Confirm that the user was upserted
     result = await session.execute(select(User).where(User.username == "userfoo"))
     found_user = result.unique().scalar_one_or_none()
-    assert found_user.id == 1
-    assert found_user.username == "userfoo"
+    assert found_user.id == current_user.id
+    assert found_user.username == "userfoo"  # type: ignore
     assert (
-        found_user.password is None
+        found_user.password is None  # type: ignore
     )  # If the user is added via upsert, auth is externally managed
-    assert found_user.name == "djuser"
-    assert found_user.email == "userfoo@datajunction.io"
-    assert found_user.oauth_provider == "basic"
+    assert found_user.name == "djuser"  # type: ignore
+    assert found_user.email == "userfoo@datajunction.io"  # type: ignore
+    assert found_user.oauth_provider == "basic"  # type: ignore
 
 
 @pytest.mark.asyncio
@@ -189,8 +258,8 @@ async def test_execute_with_retry_success_after_flaky_connection():
         "node2",
     ]
     session.execute.side_effect = [
-        OperationalError("flaky", None, None),
-        OperationalError("still flaky", None, None),
+        OperationalError("flaky", None, None),  # type: ignore
+        OperationalError("still flaky", None, None),  # type: ignore
         mock_result,
     ]
 
@@ -209,9 +278,57 @@ async def test_execute_with_retry_exhausts_retries():
     statement = MagicMock()
 
     # Always fail
-    session.execute.side_effect = OperationalError("permanent fail", None, None)
+    session.execute.side_effect = OperationalError("permanent fail", None, None)  # type: ignore
 
     with pytest.raises(DJDatabaseException):
         await execute_with_retry(session, statement, retries=3, base_delay=0.01)
 
     assert session.execute.call_count == 4  # initial try + 3 retries
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "path, body, expected",
+    [
+        # Not /graphql
+        ("/not-graphql", json.dumps({"query": "query { users }"}), False),
+        # /graphql with query
+        ("/graphql", json.dumps({"query": "query { users }"}), True),
+        # /graphql with mutation
+        (
+            "/graphql",
+            json.dumps({"query": 'mutation { addUser(name: "Hi") { id } }'}),
+            False,
+        ),
+        # /graphql with invalid JSON
+        ("/graphql", "not json", False),
+        # /graphql with no query key
+        ("/graphql", json.dumps({"foo": "bar"}), False),
+        # /graphql with empty body
+        ("/graphql", "", False),
+    ],
+)
+async def test_is_graphql_query(path, body, expected):
+    """
+    Test the `is_graphql_query` utility function.
+    This function checks if the request is a GraphQL query based on the path and body.
+    """
+    # Build a fake ASGI scope
+    scope: Scope = {
+        "type": "http",
+        "method": "POST",
+        "path": path,
+        "headers": Headers({"content-type": "application/json"}).raw,
+    }
+
+    # Create a receive function that yields the body
+    async def receive() -> dict:
+        return {
+            "type": "http.request",
+            "body": body.encode(),
+            "more_body": False,
+        }
+
+    request = Request(scope, receive)
+    result = await is_graphql_query(request)
+    assert result is expected

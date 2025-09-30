@@ -3,7 +3,7 @@
 from functools import cached_property
 from typing import TYPE_CHECKING, Dict, List, Optional, Set
 
-from sqlalchemy import JSON, BigInteger, Enum, ForeignKey, Integer
+from sqlalchemy import JSON, BigInteger, Enum, ForeignKey, Index, Integer
 from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -23,6 +23,10 @@ class DimensionLink(Base):
     """
 
     __tablename__ = "dimensionlink"
+    __table_args__ = (
+        Index("idx_dimensionlink_node_revision_id", "node_revision_id"),
+        Index("idx_dimensionlink_dimension_id", "dimension_id"),
+    )
 
     id: Mapped[int] = mapped_column(
         BigInteger().with_variant(Integer, "sqlite"),
@@ -73,6 +77,16 @@ class DimensionLink(Base):
 
     # Additional materialization settings that are needed in order to do this join
     materialization_conf: Mapped[Optional[Dict]] = mapped_column(JSON, default={})
+
+    def to_spec(self):
+        from datajunction_server.models.deployment import DimensionJoinLinkSpec
+
+        return DimensionJoinLinkSpec(
+            role=self.role,
+            dimension_node=self.dimension.name,
+            join_on=self.join_sql,
+            join_type=self.join_type if self.join_type else JoinType.LEFT,
+        )
 
     @classmethod
     def parse_join_type(cls, join_type: str) -> Optional[JoinType]:
@@ -169,6 +183,7 @@ class DimensionLink(Base):
         """
         Returns a set of foreign key column names
         """
+
         return {
             fk.replace(f"{self.node_revision.name}{SEPARATOR}", "")
             for fk in self.foreign_keys.keys()

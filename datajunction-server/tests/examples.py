@@ -4,17 +4,20 @@ Post requests for all example entities
 
 from datajunction_server.database.column import Column
 from datajunction_server.models.query import QueryWithResults
-from datajunction_server.sql.parsing.types import IntegerType, StringType, TimestampType
+from datajunction_server.sql.parsing.types import (
+    BinaryType,
+    BooleanType,
+    IntegerType,
+    StringType,
+    TimestampType,
+    FloatType,
+)
 from datajunction_server.typing import QueryState
 
 SERVICE_SETUP = (  # type: ignore
     (
         "/catalogs/",
         {"name": "draft"},
-    ),
-    (
-        "/catalogs/",
-        {"name": "default"},
     ),
     (
         "/engines/",
@@ -35,6 +38,14 @@ SERVICE_SETUP = (  # type: ignore
     (
         "/catalogs/",
         {"name": "public"},
+    ),
+    (
+        "/catalogs/",
+        {"name": "basic"},
+    ),
+    (
+        "/catalogs/basic/engines/",
+        [{"name": "spark", "version": "3.1.1", "dialect": "spark"}],
     ),
     (
         "/engines/",
@@ -602,6 +613,7 @@ GROUP BY
             "name": "default.repair_orders_fact",
             "display_name": "Repair Orders Fact",
             "mode": "published",
+            "custom_metadata": {"foo": "bar"},
             "query": """SELECT
   repair_orders.repair_order_id,
   repair_orders.municipality_id,
@@ -655,6 +667,9 @@ CROSS JOIN
             "metric_metadata": {
                 "direction": "higher_is_better",
                 "unit": "dollar",
+            },
+            "custom_metadata": {
+                "foo": "bar",
             },
         },
     ),
@@ -1395,7 +1410,7 @@ ACCOUNT_REVENUE = (  # type: ignore
             "description": "A source table for account type data",
             "mode": "published",
             "name": "default.account_type_table",
-            "catalog": "default",
+            "catalog": "basic",
             "schema_": "accounting",
             "table": "account_type_table",
         },
@@ -1411,7 +1426,7 @@ ACCOUNT_REVENUE = (  # type: ignore
             "description": "A source table for different types of payments",
             "mode": "published",
             "name": "default.payment_type_table",
-            "catalog": "default",
+            "catalog": "basic",
             "schema_": "accounting",
             "table": "payment_type_table",
         },
@@ -1429,7 +1444,7 @@ ACCOUNT_REVENUE = (  # type: ignore
             "description": "All repair orders",
             "mode": "published",
             "name": "default.revenue",
-            "catalog": "default",
+            "catalog": "basic",
             "schema_": "accounting",
             "table": "revenue",
         },
@@ -2478,9 +2493,116 @@ COLUMN_MAPPINGS = {
         Column(name="dispatcher_id", type=IntegerType(), order=6),
         Column(name="rating", type=IntegerType(), order=7),
     ],
+    "default.roads.municipality": [
+        Column(name="municipality_id", type=StringType(), order=0),
+        Column(name="contact_name", type=StringType(), order=1),
+        Column(name="contact_title", type=StringType(), order=2),
+        Column(name="local_region", type=StringType(), order=3),
+        Column(name="phone", type=StringType(), order=4),
+        Column(name="state_id", type="int", order=5),
+    ],
+    "default.roads.repair_order_details": [
+        Column(name="repair_order_id", type=IntegerType(), order=0),
+        Column(name="repair_type_id", type=IntegerType(), order=1),
+        Column(name="price", type=FloatType(), order=2),
+        Column(name="quantity", type=IntegerType(), order=3),
+        Column(name="discount", type=FloatType(), order=4),
+    ],
+    "default.roads.repair_type": [
+        Column(name="repair_type_id", type=IntegerType(), order=0),
+        Column(name="repair_type_name", type=StringType(), order=1),
+        Column(name="contractor_id", type=IntegerType(), order=2),
+    ],
+    "default.roads.contractors": [
+        Column(name="contractor_id", type=IntegerType(), order=0),
+        Column(name="company_name", type=StringType(), order=1),
+        Column(name="contact_name", type=StringType(), order=2),
+        Column(name="contact_title", type=StringType(), order=3),
+        Column(name="address", type=StringType(), order=4),
+        Column(name="city", type=StringType(), order=5),
+        Column(name="state", type=StringType(), order=6),
+        Column(name="postal_code", type=StringType(), order=7),
+        Column(name="country", type=StringType(), order=8),
+        Column(name="phone", type=StringType(), order=9),
+    ],
+    "default.roads.municipality_municipality_type": [
+        Column(name="municipality_id", type=StringType(), order=0),
+        Column(name="municipality_type_id", type=StringType(), order=1),
+    ],
+    "default.roads.municipality_type": [
+        Column(name="municipality_type_id", type=StringType(), order=0),
+        Column(name="municipality_type_desc", type=StringType(), order=1),
+    ],
+    "default.roads.dispatchers": [
+        Column(name="dispatcher_id", type=IntegerType(), order=0),
+        Column(name="company_name", type=StringType(), order=1),
+        Column(name="phone", type=StringType(), order=2),
+    ],
+    "default.roads.hard_hats": [
+        Column(name="hard_hat_id", type=IntegerType(), order=0),
+        Column(name="last_name", type=StringType(), order=1),
+        Column(name="first_name", type=StringType(), order=2),
+        Column(name="title", type=StringType(), order=3),
+        Column(name="birth_date", type=TimestampType(), order=4),
+        Column(name="hire_date", type=TimestampType(), order=5),
+        Column(name="address", type=StringType(), order=6),
+        Column(name="city", type=StringType(), order=7),
+        Column(name="state", type=StringType(), order=8),
+        Column(name="postal_code", type=StringType(), order=9),
+        Column(name="country", type=StringType(), order=10),
+        Column(name="manager", type=IntegerType(), order=11),
+        Column(name="contractor_id", type=IntegerType(), order=12),
+    ],
+    "default.roads.hard_hat_state": [
+        Column(name="hard_hat_id", type=IntegerType(), order=0),
+        Column(name="state_id", type=StringType(), order=1),
+    ],
+    "default.roads.us_states": [
+        Column(name="state_id", type=IntegerType(), order=0),
+        Column(name="state_name", type=StringType(), order=1),
+        Column(name="state_abbr", type=StringType(), order=2),
+        Column(name="state_region", type=IntegerType(), order=3),
+    ],
+    "default.roads.us_region": [
+        Column(name="us_region_id", type=IntegerType(), order=0),
+        Column(name="us_region_description", type=StringType(), order=1),
+    ],
     "public.main.view_foo": [
         Column(name="one", type=IntegerType(), order=0),
         Column(name="two", type=StringType(), order=1),
+    ],
+    "dj_metadata.public.node": [
+        Column(name="name", type=StringType(), order=0),
+        Column(name="type", type=StringType(), order=1),
+        Column(name="display_name", type=StringType(), order=2),
+        Column(name="created_at", type=TimestampType(), order=3),
+        Column(name="deactivated_at", type=TimestampType(), order=4),
+        Column(name="id", type=IntegerType(), order=5),
+        Column(name="namespace", type=StringType(), order=6),
+        Column(name="current_version", type=StringType(), order=7),
+        Column(name="missing_table", type=BooleanType(), order=8),
+        Column(name="created_by_id", type=TimestampType(), order=9),
+    ],
+    "dj_metadata.public.noderevision": [
+        Column(name="name", type=StringType(), order=0),
+        Column(name="display_name", type=StringType(), order=1),
+        Column(name="type", type=StringType(), order=2),
+        Column(name="updated_at", type=TimestampType(), order=3),
+        Column(name="lineage", type=StringType(), order=4),
+        Column(name="description", type=StringType(), order=5),
+        Column(name="query", type=StringType(), order=6),
+        Column(name="mode", type=StringType(), order=7),
+        Column(name="id", type=IntegerType(), order=8),
+        Column(name="version", type=StringType(), order=9),
+        Column(name="node_id", type=IntegerType(), order=10),
+        Column(name="catalog_id", type=IntegerType(), order=11),
+        Column(name="schema_", type=StringType(), order=12),
+        Column(name="table", type=StringType(), order=13),
+        Column(name="metric_metadata_id", type=IntegerType(), order=14),
+        Column(name="status", type=StringType(), order=15),
+        Column(name="created_by_id", type=IntegerType(), order=16),
+        Column(name="query_ast", type=BinaryType(), order=17),
+        Column(name="custom_metadata", type=StringType(), order=18),
     ],
 }
 

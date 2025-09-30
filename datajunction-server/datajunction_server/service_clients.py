@@ -165,7 +165,7 @@ class QueryServiceClient:
             }
             if request_headers
             else self.requests_session.headers,
-            json=query_create.dict(),
+            json=query_create.model_dump(),
         )
         response_data = response.json()
         if response.status_code not in (200, 201):
@@ -192,15 +192,16 @@ class QueryServiceClient:
             headers={
                 **self.requests_session.headers,
                 **QueryServiceClient.filtered_headers(request_headers),
+                "accept": "application/json",
             }
             if request_headers
             else self.requests_session.headers,
-            json=query_create.dict(),
+            json=query_create.model_dump(),
         )
         response_data = response.json()
         if response.status_code not in (200, 201):
             raise DJQueryServiceClientException(
-                message=f"Error response from query service: {response_data['message']}",
+                message=f"Error response from query service: {response_data}",
                 errors=[
                     DJError(code=ErrorCode.QUERY_SERVICE_ERROR, message=error)
                     for error in response_data["errors"]
@@ -262,7 +263,7 @@ class QueryServiceClient:
         """
         response = self.requests_session.post(
             "/materialization/",
-            json=materialization_input.dict(),
+            json=materialization_input.model_dump(),
             headers={
                 **self.requests_session.headers,
                 **QueryServiceClient.filtered_headers(request_headers),
@@ -274,7 +275,7 @@ class QueryServiceClient:
             _logger.exception(
                 "[DJQS] Failed to materialize node=%s with `POST /materialization/`: %s",
                 materialization_input.node_name,
-                materialization_input.dict(),
+                materialization_input.model_dump(),
                 exc_info=True,
             )
             return MaterializationInfo(urls=[], output_tables=[])
@@ -297,7 +298,7 @@ class QueryServiceClient:
         """
         response = self.requests_session.post(
             "/cubes/materialize",
-            json=materialization_input.dict(),
+            json=materialization_input.model_dump(),
             headers={
                 **self.requests_session.headers,
                 **QueryServiceClient.filtered_headers(request_headers),
@@ -326,6 +327,7 @@ class QueryServiceClient:
         self,
         node_name: str,
         materialization_name: str,
+        node_version: str | None = None,
         request_headers: Optional[Dict[str, str]] = None,
     ) -> MaterializationInfo:
         """
@@ -340,19 +342,22 @@ class QueryServiceClient:
             }
             if request_headers
             else self.requests_session.headers,
+            json={"node_version": node_version} if node_version else {},
         )
         if response.status_code not in (200, 201):  # pragma: no cover
             _logger.exception(
-                "[DJQS] Failed to deactivate materialization for node=%s with `DELETE %s`",
+                "[DJQS] Failed to deactivate materialization for node=%s, version=%s with `DELETE %s`",
                 node_name,
+                node_version,
                 deactivate_endpoint,
                 exc_info=True,
             )
             return MaterializationInfo(urls=[], output_tables=[])
         result = response.json()
         _logger.info(
-            "[DJQS] Deactivated materialization for node=%s with `DELETE %s`",
+            "[DJQS] Deactivated materialization for node=%s, version=%s with `DELETE %s`",
             node_name,
+            node_version,
             deactivate_endpoint,
         )
         return MaterializationInfo(**result)
@@ -414,7 +419,7 @@ class QueryServiceClient:
         )
         response = self.requests_session.post(
             backfill_endpoint,
-            json=[partition.dict() for partition in partitions],
+            json=[partition.model_dump() for partition in partitions],
             headers={
                 **self.requests_session.headers,
                 **QueryServiceClient.filtered_headers(request_headers),

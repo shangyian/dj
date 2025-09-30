@@ -3,12 +3,14 @@ Node materialization related APIs.
 """
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from http import HTTPStatus
-from typing import Callable, List
+from typing import Annotated, Callable, List
 
 from fastapi import Depends, Request
+from pydantic import Discriminator
 from fastapi.responses import JSONResponse
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload, selectinload
 
@@ -30,6 +32,7 @@ from datajunction_server.materialization.jobs import MaterializationJob
 from datajunction_server.models import access
 from datajunction_server.models.base import labelize
 from datajunction_server.models.cube_materialization import UpsertCubeMaterialization
+from datajunction_server.models.node import AvailabilityStateInfo
 from datajunction_server.models.materialization import (
     MaterializationConfigInfoUnified,
     MaterializationInfo,
@@ -66,7 +69,9 @@ def materialization_jobs_info() -> JSONResponse:
     return JSONResponse(
         status_code=200,
         content={
-            "job_types": [value.value.dict() for value in MaterializationJobTypeEnum],
+            "job_types": [
+                value.value.model_dump() for value in MaterializationJobTypeEnum
+            ],
             "strategies": [
                 {"name": value, "label": labelize(value)}
                 for value in MaterializationStrategy
@@ -82,7 +87,10 @@ def materialization_jobs_info() -> JSONResponse:
 )
 async def upsert_materialization(
     node_name: str,
-    data: UpsertMaterialization | UpsertCubeMaterialization,
+    materialization: Annotated[
+        UpsertCubeMaterialization | UpsertMaterialization,
+        Discriminator("job"),
+    ],
     *,
     session: AsyncSession = Depends(get_session),
     request: Request,
@@ -115,20 +123,20 @@ async def upsert_materialization(
     current_revision = node.current  # type: ignore
     old_materializations = {mat.name: mat for mat in current_revision.materializations}
 
-    if data.strategy == MaterializationStrategy.INCREMENTAL_TIME:
+    if materialization.strategy == MaterializationStrategy.INCREMENTAL_TIME:  # type: ignore
         if not node.current.temporal_partition_columns():  # type: ignore
             raise DJInvalidInputException(
                 http_status_code=HTTPStatus.BAD_REQUEST,
                 message="Cannot create materialization with strategy "
-                f"`{data.strategy}` without specifying a time partition column!",
+                f"`{materialization.strategy}` without specifying a time partition column!",  # type: ignore
             )
 
     # Create a new materialization
     new_materialization = await create_new_materialization(
         session,
         current_revision,
-        data,
-        validate_access,
+        materialization,
+        validate_access,  # type: ignore
         current_user=current_user,
     )
 
@@ -192,7 +200,7 @@ async def upsert_materialization(
                     f"already exists for node `{node_name}` but was deactivated. It has now been "
                     f"restored."
                 ),
-                "info": existing_materialization_info.dict(),
+                "info": existing_materialization_info.model_dump(),
             },
         )
     # If changes are detected, update the existing or save the new materialization
@@ -316,51 +324,90 @@ async def list_node_materializations(
 
 @router.delete(
     "/nodes/{node_name}/materializations/",
-    response_model=List[MaterializationConfigInfoUnified],
+    response_model=None,
     name="Deactivate a Materialization for a Node",
 )
 async def deactivate_node_materializations(
     node_name: str,
     materialization_name: str,
+    node_version: str | None = None,
     *,
     session: AsyncSession = Depends(get_session),
     request: Request,
     query_service_client: QueryServiceClient = Depends(get_query_service_client),
     current_user: User = Depends(get_and_update_current_user),
     save_history: Callable = Depends(get_save_history),
-) -> List[MaterializationConfigInfoUnified]:
+) -> JSONResponse:
     """
     Deactivate the node materialization with the provided name.
     Also calls the query service to deactivate the associated scheduled jobs.
+
+    If node_version not provided, it will deactivate the materialization
+    for the current version of the node.
     """
     request_headers = dict(request.headers)
-    node = await Node.get_by_name(session, node_name)
+
+    # find the node revision to deactivate the materialization for
+    node_revision = None
+    if node_version:
+        stmt = (
+            select(NodeRevision)
+            .options(*NodeRevision.default_load_options())
+            .where(NodeRevision.name == node_name, NodeRevision.version == node_version)
+        )
+        result = await session.execute(stmt)
+        node_revision = result.scalars().first()
+        if not node_revision:
+            raise DJDoesNotExistException(  # pragma: no cover
+                f"Node revision with version '{node_version}' not found for node {node_name} .",
+            )
+    else:
+        node = await Node.get_by_name(session, node_name)
+        node_revision = node.current  # type: ignore
+
+    # find the materialization to deactivate
+    materialization_to_deactivate = None
+    for materialization in node_revision.materializations:  # type: ignore
+        if materialization.name == materialization_name:
+            materialization_to_deactivate = materialization
+            break
+    if not materialization_to_deactivate:
+        raise DJDoesNotExistException(
+            f"Materialization with name '{materialization_name}' not found on "
+            f"version {node_version} of node {node_name} .",
+        )
+    elif materialization_to_deactivate.deactivated_at:  # pragma: no cover
+        return JSONResponse(
+            status_code=HTTPStatus.OK,
+            content={
+                "message": f"Materialization named `{materialization_name}` on node `{node_name}` "
+                f"version `{node_revision.version}` has been already inactive.",  # type: ignore
+            },
+        )
+    # do the deactivation
     query_service_client.deactivate_materialization(
         node_name,
         materialization_name,
+        node_version=node_revision.version,  # type: ignore
         request_headers=request_headers,
     )
-    for materialization in node.current.materializations:  # type: ignore
-        if (
-            materialization.name == materialization_name
-            and not materialization.deactivated_at
-        ):  # pragma: no cover
-            now = datetime.utcnow()
-            materialization.deactivated_at = UTCDatetime(
-                year=now.year,
-                month=now.month,
-                day=now.day,
-                hour=now.hour,
-                minute=now.minute,
-                second=now.second,
-            )
-            session.add(materialization)
-
+    now = datetime.now(timezone.utc)
+    materialization_to_deactivate.deactivated_at = UTCDatetime(
+        year=now.year,
+        month=now.month,
+        day=now.day,
+        hour=now.hour,
+        minute=now.minute,
+        second=now.second,
+    )
+    session.add(materialization_to_deactivate)
+    # save the history event
     await save_history(
         event=History(
             entity_type=EntityType.MATERIALIZATION,
             entity_name=materialization_name,
-            node=node.name,  # type: ignore
+            node=node_name,
+            version=node_revision.version,  # type: ignore
             activity_type=ActivityType.DELETE,
             details={},
             user=current_user.username,
@@ -368,12 +415,12 @@ async def deactivate_node_materializations(
         session=session,
     )
     await session.commit()
-    await session.refresh(node.current)  # type: ignore
+    # await session.refresh(node.current)  # type: ignore
     return JSONResponse(
         status_code=HTTPStatus.OK,
         content={
-            "message": f"The materialization named `{materialization_name}` on node `{node_name}` "
-            "has been successfully deactivated",
+            "message": f"Materialization named `{materialization_name}` on node `{node_name}` "
+            f"version `{node_revision.version}` has been successfully deactivated",
         },
     )
 
@@ -457,7 +504,10 @@ async def run_materialization_backfill(
     )
     backfill = Backfill(
         materialization=materialization,
-        spec=[backfill_partition.dict() for backfill_partition in backfill_partitions],
+        spec=[
+            backfill_partition.model_dump()
+            for backfill_partition in backfill_partitions
+        ],
         urls=materialization_output.urls,
     )
     materialization.backfills.append(backfill)
@@ -470,7 +520,7 @@ async def run_materialization_backfill(
             details={
                 "materialization": materialization_name,
                 "partition": [
-                    backfill_partition.dict()
+                    backfill_partition.model_dump()
                     for backfill_partition in backfill_partitions
                 ],
             },
@@ -480,3 +530,55 @@ async def run_materialization_backfill(
     )
     await session.commit()
     return materialization_output
+
+
+@router.get(
+    "/nodes/{node_name}/availability/",
+    response_model=List[AvailabilityStateInfo],
+    status_code=200,
+    name="List All Availability States for a Node",
+)
+async def list_node_availability_states(
+    node_name: str,
+    *,
+    session: AsyncSession = Depends(get_session),
+) -> List[AvailabilityStateInfo]:
+    """
+    Retrieve all availability states for a given node across all revisions.
+    """
+    # Get all revisions with their availability states
+    node = await Node.get_by_name(
+        session,
+        node_name,
+        options=[
+            joinedload(Node.revisions).options(
+                selectinload(NodeRevision.availability),
+            ),
+        ],
+        raise_if_not_exists=True,
+    )
+
+    # Collect availability states from all revisions
+    availability_states = []
+    for revision in node.revisions:  # type: ignore
+        if revision.availability:
+            availability_state = AvailabilityStateInfo(
+                id=revision.availability.id,
+                catalog=revision.availability.catalog,
+                schema_=revision.availability.schema_,
+                table=revision.availability.table,
+                valid_through_ts=revision.availability.valid_through_ts,
+                url=revision.availability.url,
+                links=revision.availability.links,
+                categorical_partitions=revision.availability.categorical_partitions,
+                temporal_partitions=revision.availability.temporal_partitions,
+                min_temporal_partition=revision.availability.min_temporal_partition,
+                max_temporal_partition=revision.availability.max_temporal_partition,
+                partitions=revision.availability.partitions,
+                updated_at=revision.availability.updated_at.isoformat(),
+                node_revision_id=revision.id,
+                node_version=revision.version,
+            )
+            availability_states.append(availability_state)
+
+    return availability_states

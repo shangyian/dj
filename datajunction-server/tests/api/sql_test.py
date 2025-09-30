@@ -86,18 +86,6 @@ async def test_sql(
     ]
     assert response["dialect"] is None
 
-    # Check that this query request has been saved
-    query_request = (await session.execute(select(QueryRequest))).scalars().all()
-    assert len(query_request) == 1
-    assert query_request[0].nodes == ["default.a_metric@1"]
-    assert query_request[0].dimensions == []
-    assert query_request[0].filters == []
-    assert query_request[0].orderby == []
-    assert query_request[0].limit is None
-    assert query_request[0].query_type == QueryBuildType.NODE
-    assert compare_query_strings(query_request[0].query, response["sql"])
-    assert query_request[0].columns == response["columns"]
-
 
 @pytest.fixture
 def transform_node_sql_request(client_with_roads: AsyncClient):
@@ -274,6 +262,7 @@ async def get_query_requests(session: AsyncSession, query_type: QueryBuildType):
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason="Not saving to query requests")
 async def test_saving_node_sql_requests(
     session: AsyncSession,
     client_with_roads: AsyncClient,
@@ -499,6 +488,7 @@ async def test_saving_measures_sql_requests(
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason="Not saving to query requests")
 async def test_saving_metrics_sql_requests(
     session: AsyncSession,
     client_with_roads: AsyncClient,
@@ -951,7 +941,7 @@ async def test_transform_sql_filter_dimension_pk_col(
                 "name": "default_DOT_hard_hat_DOT_hard_hat_id",
                 "node": "default.hard_hat",
                 "semantic_entity": "default.hard_hat.hard_hat_id",
-                "semantic_type": None,
+                "semantic_type": "dimension",
                 "type": "int",
             },
             {
@@ -2780,12 +2770,11 @@ async def test_get_sql_for_metrics_no_access(module__client_with_examples: Async
 
 
 @pytest.mark.asyncio
-async def test_get_sql_for_metrics2(module__client_with_examples: AsyncClient):
+async def test_get_sql_for_metrics2(client_with_examples: AsyncClient):
     """
     Test getting sql for multiple metrics.
     """
-
-    response = await module__client_with_examples.get(
+    response = await client_with_examples.get(
         "/sql/",
         params={
             "metrics": ["default.discounted_orders_rate", "default.num_repair_orders"],
@@ -2983,6 +2972,7 @@ async def test_get_sql_including_dimension_ids(
     """
     Test getting SQL when there are dimensions ids included
     """
+
     response = await module__client_with_examples.get(
         "/sql/",
         params={
@@ -3613,14 +3603,14 @@ async def test_filter_pushdowns(
 @pytest.mark.asyncio
 async def test_sql_use_materialized_table(
     measures_sql_request,
-    module__client_with_examples: AsyncClient,
+    client_with_roads: AsyncClient,
 ):
     """
     Posting a materialized table for a dimension node should result in building SQL
     that uses the materialized table whenever a dimension attribute on the node is
     requested.
     """
-    availability_response = await module__client_with_examples.post(
+    availability_response = await client_with_roads.post(
         "/data/default.hard_hat/availability",
         json={
             "catalog": "default",
@@ -3632,6 +3622,7 @@ async def test_sql_use_materialized_table(
         },
     )
     assert availability_response.status_code == 200
+    response = (await measures_sql_request()).json()
     response = (await measures_sql_request()).json()
     assert "xyz.hardhat" in response[0]["sql"]
     expected_sql = """WITH default_DOT_repair_orders_fact AS (

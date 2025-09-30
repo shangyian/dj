@@ -2,10 +2,12 @@
 DAG related functions.
 """
 
+import asyncio
 import itertools
-from typing import Dict, List, Optional, Set, Union, cast
+import logging
+from typing import Dict, List, Optional, Set, Tuple, Union, cast
 
-from sqlalchemy import and_, func, join, literal, or_, select
+from sqlalchemy import and_, func, join, literal, or_, select, distinct
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased, contains_eager, joinedload, selectinload
 from sqlalchemy.sql.operators import is_
@@ -15,8 +17,8 @@ from datajunction_server.database.attributetype import AttributeType, ColumnAttr
 from datajunction_server.database.column import Column
 from datajunction_server.database.dimensionlink import DimensionLink
 from datajunction_server.database.node import (
+    CubeRelationship,
     Node,
-    NodeColumns,
     NodeRelationship,
     NodeRevision,
 )
@@ -26,6 +28,7 @@ from datajunction_server.models.node import DimensionAttributeOutput
 from datajunction_server.models.node_type import NodeType
 from datajunction_server.utils import SEPARATOR, get_settings, refresh_if_needed
 
+logger = logging.getLogger(__name__)
 settings = get_settings()
 
 
@@ -51,6 +54,7 @@ def _node_output_options():
             ),
         ),
         selectinload(Node.tags),
+        selectinload(Node.owners),
     ]
 
 
@@ -89,6 +93,28 @@ async def get_downstream_nodes(
     )
     if not include_cubes:
         initial_dag = initial_dag.where((NodeRevision.type != NodeType.CUBE))
+    if not include_deactivated:
+        initial_dag = initial_dag.where(Node.deactivated_at.is_(None))
+
+    initial_count = await session.scalar(
+        select(func.count()).select_from(initial_dag.subquery()),
+    )
+    if initial_count >= settings.fanout_threshold:
+        logger.info(
+            "Initial fanout for node %s (%d) is greater than threshold %d. Switching to BFS...",
+            node_name,
+            initial_count,
+            settings.fanout_threshold,
+        )
+        return await get_downstream_nodes_bfs(
+            session,
+            node,
+            depth,
+            include_deactivated,
+            include_cubes,
+            node_type,
+        )
+
     dag = initial_dag.cte("downstreams", recursive=True).suffix_with(
         "CYCLE node_id SET is_cycle USING path",
     )
@@ -105,6 +131,8 @@ async def get_downstream_nodes(
     )
     if not include_cubes:
         next_layer = next_layer.where(NodeRevision.type != NodeType.CUBE)
+    if not include_deactivated:
+        next_layer = next_layer.where(Node.deactivated_at.is_(None))
 
     paths = dag.union_all(next_layer)
 
@@ -140,6 +168,139 @@ async def get_downstream_nodes(
         for downstream in results
         if downstream.type == node_type or node_type is None
     ]
+
+
+async def get_downstream_nodes_bfs(
+    session,
+    start_node: Node,
+    max_depth: int = -1,
+    include_deactivated: bool = True,
+    include_cubes: bool = True,
+    node_type: NodeType = None,
+) -> list[Node]:
+    """
+    Get all downstream nodes of a given node using BFS, which is more efficient for large graphs.
+    Each level is processed concurrently, with a limit on the number of concurrent tasks
+    configured by `max_concurrency`.
+    """
+    visited = set()
+    results = []
+    current_level: list[Tuple[int, int]] = [(start_node.id, 0)]
+
+    while current_level:
+        depth = current_level[0][1]
+        logger.info("Processing downstreams for %s at depth %s", start_node.name, depth)
+
+        current_ids = list(set([nid for nid, _ in current_level if nid not in visited]))
+        if not current_ids:
+            break  # pragma: no cover
+        visited.update(current_ids)
+
+        # Process nodes at this level concurrently
+        nodes_at_level = await _bfs_process_level_concurrently(
+            session,
+            current_ids,
+            include_deactivated,
+            include_cubes,
+            node_type,
+        )
+        results.extend(
+            [
+                node
+                for node in nodes_at_level
+                if node.id != start_node.id
+                and (node.type == node_type or node_type is None)
+            ],
+        )
+
+        if len(results) >= settings.node_list_max:
+            return results[: settings.node_list_max]
+
+        # Stop BFS if max depth reached
+        if max_depth != -1 and current_level[0][1] >= max_depth:
+            break
+
+        # Fetch children for next level
+        next_level = []
+        for node in nodes_at_level:
+            children_rows = await session.execute(
+                select(distinct(Node.id))
+                .select_from(NodeRelationship)
+                .join(NodeRevision, NodeRelationship.child_id == NodeRevision.id)
+                .join(Node, Node.id == NodeRevision.node_id)
+                .where(NodeRelationship.parent_id == node.id)
+                .where(
+                    Node.deactivated_at.is_(None) if not include_deactivated else True,
+                ),
+            )
+            children = [
+                (c[0], depth + 1)
+                for c in children_rows.fetchall()
+                if c[0] not in visited
+            ]
+            if children:
+                logger.info(
+                    "Processing downstreams for %s: extending from %s with %d children",
+                    start_node.name,
+                    node.name,
+                    len(children),
+                )
+                next_level.extend(children)
+
+        current_level = next_level
+
+    return results
+
+
+async def _bfs_process_level_concurrently(
+    session: AsyncSession,
+    node_ids: list[int],
+    include_deactivated: bool = True,
+    include_cubes: bool = True,
+    node_type: NodeType = None,
+):
+    """
+    Process all nodes at a BFS level concurrently with a concurrency limit.
+    """
+    effective_concurrency = min(
+        settings.max_concurrency,
+        max(1, settings.reader_db.pool_size // 2),
+    )
+    semaphore = asyncio.Semaphore(effective_concurrency)
+
+    async def _bfs_process_node(
+        session: AsyncSession,
+        node_id: int,
+        include_deactivated: bool = True,
+        include_cubes: bool = True,
+        node_type: NodeType = None,
+    ):
+        node = await Node.get_by_id(
+            session,
+            node_id,
+            options=_node_output_options(),
+        )
+        if not node:
+            return None  # pragma: no cover
+        if not include_deactivated and node.deactivated_at is not None:
+            return None  # pragma: no cover
+        if not include_cubes and node.type == NodeType.CUBE:
+            return None
+        return node
+
+    async def sem_task(node_id):
+        async with semaphore:
+            return await _bfs_process_node(
+                session,
+                node_id,
+                include_deactivated,
+                include_cubes,
+                node_type,
+            )
+
+    tasks = [sem_task(node_id) for node_id in node_ids]
+    processed = await asyncio.gather(*tasks)
+    return [node for node in processed if node is not None]
 
 
 async def get_upstream_nodes(
@@ -448,13 +609,13 @@ async def get_dimensions_dag(
     graph_branches = (
         (
             select(
-                NodeColumns.node_id.label("node_revision_id"),
+                Column.node_revision_id,
                 Column.dimension_id,
                 Column.name,
                 Column.dimension_column,
             )
-            .select_from(NodeColumns)
-            .join(Column, NodeColumns.column_id == Column.id)
+            .select_from(Column)
+            .where(Column.dimension_id.isnot(None))
         )
         .union_all(
             select(
@@ -601,17 +762,7 @@ async def get_dimensions_dag(
             paths.c.join_path,
         )
         .select_from(paths)
-        .join(NodeColumns, NodeColumns.node_id == paths.c.node_revision_id)
-        .join(
-            column,
-            and_(
-                NodeColumns.column_id == column.id,
-                or_(
-                    is_(paths.c.dimension_column, None),
-                    paths.c.dimension_column == column.name,
-                ),
-            ),
-        )
+        .join(column, column.node_revision_id == paths.c.node_revision_id)
         .join(ColumnAttribute, column.id == ColumnAttribute.column_id, isouter=True)
         .join(
             AttributeType,
@@ -637,8 +788,7 @@ async def get_dimensions_dag(
                 literal("").label("join_path"),
             )
             .select_from(NodeRevision)
-            .join(NodeColumns, NodeColumns.node_id == NodeRevision.id)
-            .join(Column, NodeColumns.column_id == Column.id)
+            .join(Column, Column.node_revision_id == NodeRevision.id)
             .join(
                 ColumnAttribute,
                 Column.id == ColumnAttribute.column_id,
@@ -870,16 +1020,23 @@ async def get_nodes_with_dimension(
     session: AsyncSession,
     dimension_node: Node,
     node_types: Optional[List[NodeType]] = None,
+    level: int = -1,
 ) -> List[NodeRevision]:
     """
     Find all nodes that can be joined to a given dimension
     """
-    to_process = [dimension_node]
+    to_process: list[tuple[Node, int]] = [(dimension_node, 0)]  # (node, depth)
     processed: Set[str] = set()
     final_set: Set[NodeRevision] = set()
     while to_process:
-        current_node = to_process.pop()
+        current_node, depth = to_process.pop()
+        if current_node.name in processed:
+            continue
         processed.add(current_node.name)
+
+        # If we're past the allowed depth, stop traversing further
+        if level >= 0 and depth > level:
+            continue
 
         # Dimension nodes are used to expand the searchable graph by finding
         # the next layer of nodes that are linked to this dimension
@@ -894,12 +1051,8 @@ async def get_nodes_with_dimension(
                     ),
                 )
                 .join(
-                    NodeColumns,
-                    onclause=(NodeRevision.id == NodeColumns.node_id),
-                )
-                .join(
                     Column,
-                    onclause=(NodeColumns.column_id == Column.id),
+                    onclause=(NodeRevision.id == Column.node_revision_id),
                 )
                 .where(
                     Column.dimension_id.in_(  # type: ignore
@@ -946,7 +1099,7 @@ async def get_nodes_with_dimension(
             )
             for node_rev in node_revisions + nodes_via_dimension_link:
                 if node_rev.name not in processed:  # pragma: no cover
-                    to_process.append(node_rev.node)
+                    to_process.append((node_rev.node, depth + 1))
         else:
             # All other nodes are added to the result set
             current_node = await Node.get_by_name(  # type: ignore
@@ -961,13 +1114,12 @@ async def get_nodes_with_dimension(
                     ),
                 ],
             )
-            if current_node:
-                final_set.add(current_node.current)
+            if current_node:  # pragma: no cover
+                if not node_types or current_node.type in node_types:
+                    final_set.add(current_node.current)
                 for child in current_node.children:
                     if child.name not in processed:
-                        to_process.append(child.node)
-    if node_types:
-        return [node for node in final_set if node.type in node_types]
+                        to_process.append((child.node, depth + 1))
     return list(final_set)
 
 
@@ -1010,9 +1162,19 @@ def topological_sort(nodes: List[Node]) -> List[Node]:
             parent for parent in node.current.parents if parent.name in all_nodes
         ]
         in_degrees[node.name] = 0
-    for parents in adjacency_list.values():
+
+    # Build reverse mapping: parent -> children, and set in-degrees
+    children_to_parents = adjacency_list.copy()  # Save for in-degree calc
+    adjacency_list = {}  # Reset to build parent->children mapping
+
+    for node in nodes:
+        adjacency_list[node.name] = []
+        in_degrees[node.name] = len(children_to_parents[node.name])
+
+    # Populate parent->children mapping
+    for node_name, parents in children_to_parents.items():
         for parent in parents:
-            in_degrees[parent.name] += 1
+            adjacency_list[parent.name].append(all_nodes[node_name])
 
     # Initialize queue with nodes having in-degree 0
     queue: List[Node] = [
@@ -1033,7 +1195,7 @@ def topological_sort(nodes: List[Node]) -> List[Node]:
     if len(sorted_nodes) != len(in_degrees):
         raise DJGraphCycleException("Graph has at least one cycle")
 
-    return sorted_nodes[::-1]
+    return sorted_nodes
 
 
 async def get_dimension_dag_indegree(session, node_names: List[str]) -> Dict[str, int]:
@@ -1050,9 +1212,76 @@ async def get_dimension_dag_indegree(session, node_names: List[str]) -> Dict[str
             func.count(DimensionLink.id),
         )
         .where(DimensionLink.dimension_id.in_(dimension_ids))
+        .join(NodeRevision, DimensionLink.node_revision_id == NodeRevision.id)
+        .join(
+            Node,
+            and_(
+                Node.id == NodeRevision.node_id,
+                Node.current_version == NodeRevision.version,
+            ),
+        )
         .group_by(DimensionLink.dimension_id)
     )
     result = await session.execute(statement)
     link_counts = {link[0]: link[1] for link in result.unique().all()}
     dimension_dag_indegree = {node.name: link_counts.get(node.id, 0) for node in nodes}
     return dimension_dag_indegree
+
+
+async def get_cubes_using_dimensions(
+    session: AsyncSession,
+    dimension_names: list[str],
+) -> dict[str, int]:
+    """
+    Find cube revisions that use all the specified dimension node
+    """
+    cubes_subquery = (
+        select(NodeRevision.id, Node.name)
+        .select_from(Node)
+        .join(
+            NodeRevision,
+            and_(
+                NodeRevision.node_id == Node.id,
+                Node.current_version == NodeRevision.version,
+            ),
+        )
+        .where(
+            Node.type == NodeType.CUBE,
+            Node.deactivated_at.is_(None),
+        )
+        .subquery()
+    )
+
+    dimensions_subquery = (
+        select(NodeRevision.id, Node.name)
+        .select_from(Node)
+        .join(
+            NodeRevision,
+            and_(
+                NodeRevision.node_id == Node.id,
+                Node.current_version == NodeRevision.version,
+            ),
+        )
+        .where(
+            Node.type == NodeType.DIMENSION,
+            Node.deactivated_at.is_(None),
+        )
+        .subquery()
+    )
+
+    find_statement = (
+        select(
+            dimensions_subquery.c.name,
+            func.count(func.distinct(CubeRelationship.cube_id)).label(
+                "cubes_using_dim",
+            ),
+        )
+        .select_from(cubes_subquery)
+        .join(CubeRelationship, cubes_subquery.c.id == CubeRelationship.cube_id)
+        .join(Column, CubeRelationship.cube_element_id == Column.id)
+        .join(dimensions_subquery, Column.node_revision_id == dimensions_subquery.c.id)
+        .where(dimensions_subquery.c.name.in_(dimension_names))
+        .group_by(dimensions_subquery.c.name)
+    )
+    result = await session.execute(find_statement)
+    return {res[0]: res[1] for res in result.fetchall()}

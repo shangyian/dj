@@ -4,16 +4,19 @@ Node namespace related APIs.
 
 import logging
 from http import HTTPStatus
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, cast
 
-from fastapi import Depends, Query
+from fastapi import Depends, Query, BackgroundTasks, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
-
+from datajunction_server.service_clients import QueryServiceClient
 from datajunction_server.api.helpers import get_node_namespace, get_save_history
 from datajunction_server.database.namespace import NodeNamespace
+from datajunction_server.database.node import Node
 from datajunction_server.database.user import User
 from datajunction_server.errors import DJAlreadyExistsException
+from datajunction_server.models.deployment import CubeSpec, DeploymentSpec
+from datajunction_server.models.dimensionlink import LinkType
 from datajunction_server.internal.access.authentication.http import SecureAPIRouter
 from datajunction_server.internal.access.authorization import (
     validate_access,
@@ -27,14 +30,16 @@ from datajunction_server.internal.namespaces import (
     hard_delete_namespace,
     mark_namespace_deactivated,
     mark_namespace_restored,
-    validate_namespace,
 )
 from datajunction_server.internal.nodes import activate_node, deactivate_node
 from datajunction_server.models import access
 from datajunction_server.models.node import NamespaceOutput, NodeMinimumDetail
 from datajunction_server.models.node_type import NodeType
 from datajunction_server.utils import (
+    SEPARATOR,
     get_and_update_current_user,
+    get_current_user,
+    get_query_service_client,
     get_session,
     get_settings,
 )
@@ -80,7 +85,6 @@ async def create_node_namespace(
                 "message": f"Node namespace `{namespace}` already exists",
             },
         )
-    validate_namespace(namespace)
     created_namespaces = await create_namespace(
         session=session,
         namespace=namespace,
@@ -106,7 +110,7 @@ async def create_node_namespace(
 )
 async def list_namespaces(
     session: AsyncSession = Depends(get_session),
-    current_user: User = Depends(get_and_update_current_user),
+    current_user: User = Depends(get_current_user),
     validate_access: access.ValidateAccessFn = Depends(
         validate_access,
     ),
@@ -172,9 +176,13 @@ async def deactivate_a_namespace(
         default=False,
         description="Cascade the deletion down to the nodes in the namespace",
     ),
+    *,
     session: AsyncSession = Depends(get_session),
     current_user: User = Depends(get_and_update_current_user),
     save_history: Callable = Depends(get_save_history),
+    query_service_client: QueryServiceClient = Depends(get_query_service_client),
+    background_tasks: BackgroundTasks,
+    request: Request,
 ) -> JSONResponse:
     """
     Deactivates a node namespace
@@ -217,6 +225,9 @@ async def deactivate_a_namespace(
                 message=f"Cascaded from deactivating namespace `{namespace}`",
                 current_user=current_user,
                 save_history=save_history,
+                query_service_client=query_service_client,
+                background_tasks=background_tasks,
+                request_headers=dict(request.headers),
             )
         message = (
             f"Namespace `{namespace}` has been deactivated. The following nodes"
@@ -348,7 +359,7 @@ async def hard_delete_node_namespace(
         status_code=HTTPStatus.OK,
         content={
             "message": f"The namespace `{namespace}` has been completely removed.",
-            "impact": impacts,
+            "impact": impacts.model_dump(),
         },
     )
 
@@ -370,4 +381,68 @@ async def export_a_namespace(
         session=session,
         nodes=await get_nodes_in_namespace_detailed(session, namespace),
         namespace_requested=namespace,
+    )
+
+
+def inject_prefixes(unparameterized_string: str, prefix: str) -> str:
+    """
+    Replaces a namespace in a string with ${prefix}
+    users.yshang.blah -> ${prefix}.blah
+    users.yshang.blah.foo -> ${prefix}.blah.foo
+    """
+    return unparameterized_string.replace(f"{prefix}" + SEPARATOR, "${prefix}")
+
+
+@router.get(
+    "/namespaces/{namespace}/export/spec",
+    name="Export namespace as a deployment specification",
+)
+async def export_namespace_spec(
+    namespace: str,
+    *,
+    session: AsyncSession = Depends(get_session),
+) -> DeploymentSpec:
+    """
+    Generates a deployment spec for a namespace
+    """
+    nodes = await NodeNamespace.list_all_nodes(
+        session,
+        namespace,
+        options=Node.cube_load_options(),
+    )
+    node_specs = [await node.to_spec(session) for node in nodes]
+    for node_spec in node_specs:
+        node_spec.name = inject_prefixes(node_spec.rendered_name, namespace)
+        if node_spec.node_type in (
+            NodeType.TRANSFORM,
+            NodeType.DIMENSION,
+            NodeType.METRIC,
+        ):
+            node_spec.query = inject_prefixes(node_spec.query, namespace)
+        if node_spec.node_type in (
+            NodeType.SOURCE,
+            NodeType.TRANSFORM,
+            NodeType.DIMENSION,
+        ):
+            for link in node_spec.dimension_links:
+                if link.type == LinkType.JOIN:
+                    link.dimension_node = inject_prefixes(
+                        link.dimension_node,
+                        namespace,
+                    )
+                    link.join_on = inject_prefixes(link.join_on, namespace)
+                else:  # pragma: no cover
+                    link.dimension = inject_prefixes(link.dimension, namespace)
+        if node_spec.node_type == NodeType.CUBE:
+            cube_spec = cast(CubeSpec, node_spec)
+            cube_spec.metrics = [
+                inject_prefixes(metric, namespace) for metric in node_spec.metrics
+            ]
+            cube_spec.dimensions = [
+                inject_prefixes(dimension, namespace)
+                for dimension in node_spec.dimensions
+            ]
+    return DeploymentSpec(
+        namespace=namespace,
+        nodes=node_specs,
     )

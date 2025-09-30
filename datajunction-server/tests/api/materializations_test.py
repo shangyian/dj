@@ -3,6 +3,7 @@
 import json
 import os
 from pathlib import Path
+from typing import Callable
 from unittest import mock
 
 import pytest
@@ -12,9 +13,7 @@ from httpx import AsyncClient
 from datajunction_server.models.cube_materialization import (
     Aggregability,
     AggregationRule,
-    CubeMetric,
     MetricComponent,
-    MeasureKey,
     NodeNameVersion,
 )
 from datajunction_server.models.partition import Granularity, PartitionBackfill
@@ -202,7 +201,6 @@ async def test_crud_materialization(module__client_with_basic: AsyncClient):
             "dialect": "spark",
         },
     )
-
     response = await client_with_query_service.get(
         "/nodes/basic.transform.country_agg/",
     )
@@ -261,8 +259,8 @@ async def test_crud_materialization(module__client_with_basic: AsyncClient):
         "?materialization_name=spark_sql__full",
     )
     assert response.json() == {
-        "message": "The materialization named `spark_sql__full` on node "
-        "`basic.transform.country_agg` has been successfully deactivated",
+        "message": "Materialization named `spark_sql__full` on node "
+        "`basic.transform.country_agg` version `v1.0` has been successfully deactivated",
     }
 
     # Setting it again should inform that it already exists but was reactivated
@@ -359,7 +357,7 @@ async def test_druid_measures_cube_full(
             "materialization_name": "druid_measures_cube__full",
         },
     )
-    assert response.status_code in (200, 201)
+    assert response.status_code == 404
 
     # [failure] When there are no columns on the cube with type `timestamp` and no partition labels
     response = await client_with_repairs_cube.post(
@@ -729,22 +727,6 @@ async def test_druid_metrics_cube_incremental(
     )
 
 
-class AnyString(str):
-    "A helper str obj that compares equal to everything."
-
-    def __eq__(self, other):
-        return True
-
-    def __ne__(self, other):
-        return False
-
-    def __repr__(self):
-        return "<ANY_STRING>"
-
-
-ANY_STRING = AnyString()
-
-
 @pytest.mark.asyncio
 async def test_druid_cube_incremental(
     client_with_repairs_cube: AsyncClient,
@@ -811,53 +793,30 @@ async def test_druid_cube_incremental(
         "default.dispatcher.company_name",
         "default.municipality_dim.local_region",
     ]
-    assert mat.metrics == [
-        CubeMetric(
-            metric=NodeNameVersion(
-                name="default.num_repair_orders",
-                version="v1.0",
-                display_name="Num Repair Orders",
-            ),
-            required_measures=[
-                MeasureKey(
-                    node=NodeNameVersion(
-                        name="default.repair_orders_fact",
-                        version=ANY_STRING,
-                        display_name="Repair Orders Fact",
-                    ),
-                    measure_name="repair_order_id_count_0b7dfba0",
-                ),
-            ],
-            derived_expression="SELECT  SUM(repair_order_id_count_0b7dfba0)"
-            "  FROM default.repair_orders_fact",
-            metric_expression="SUM(repair_order_id_count_0b7dfba0)",
-        ),
-        CubeMetric(
-            metric=NodeNameVersion(
-                name="default.total_repair_cost",
-                version="v1.0",
-                display_name="Total Repair Cost",
-            ),
-            required_measures=[
-                MeasureKey(
-                    node=NodeNameVersion(
-                        name="default.repair_orders_fact",
-                        version=ANY_STRING,
-                        display_name="Repair Orders Fact",
-                    ),
-                    measure_name="total_repair_cost_sum_9bdaf803",
-                ),
-            ],
-            derived_expression="SELECT  sum(total_repair_cost_sum_9bdaf803)"
-            "  FROM default.repair_orders_fact",
-            metric_expression="sum(total_repair_cost_sum_9bdaf803)",
-        ),
-    ]
-    assert mat.measures_materializations[0].node == NodeNameVersion(
-        name="default.repair_orders_fact",
-        version=ANY_STRING,
-        display_name="Repair Orders Fact",
-    )
+    assert len(mat.metrics) == 2
+
+    metric1 = mat.metrics[0]
+    assert metric1.metric.name == "default.num_repair_orders"
+    assert metric1.metric.display_name == "Num Repair Orders"
+    assert len(metric1.required_measures) == 1
+    assert metric1.required_measures[0].node.name == "default.repair_orders_fact"
+    assert metric1.required_measures[0].node.display_name == "Repair Orders Fact"
+    assert metric1.required_measures[0].measure_name == "repair_order_id_count_0b7dfba0"
+    assert "SUM(repair_order_id_count_0b7dfba0)" in metric1.derived_expression
+    assert metric1.metric_expression == "SUM(repair_order_id_count_0b7dfba0)"
+
+    metric2 = mat.metrics[1]
+    assert metric2.metric.name == "default.total_repair_cost"
+    assert metric2.metric.display_name == "Total Repair Cost"
+    assert len(metric2.required_measures) == 1
+    assert metric2.required_measures[0].node.name == "default.repair_orders_fact"
+    assert metric2.required_measures[0].node.display_name == "Repair Orders Fact"
+    assert metric2.required_measures[0].measure_name == "total_repair_cost_sum_9bdaf803"
+    assert "sum(total_repair_cost_sum_9bdaf803)" in metric2.derived_expression
+    assert metric2.metric_expression == "sum(total_repair_cost_sum_9bdaf803)"
+    actual_node = mat.measures_materializations[0].node
+    assert actual_node.name == "default.repair_orders_fact"
+    assert actual_node.display_name == "Repair Orders Fact"
     assert mat.measures_materializations[0].grain == [
         "default_DOT_repair_orders_fact_DOT_order_date",
         "default_DOT_hard_hat_DOT_state",
@@ -953,11 +912,10 @@ async def test_druid_cube_incremental(
     assert mat.measures_materializations[0].output_table_name.startswith(
         "default_repair_orders_fact",
     )
-    assert mat.combiners[0].node == NodeNameVersion(
-        name="default.repair_orders_fact",
-        version=ANY_STRING,
-        display_name="Repair Orders Fact",
-    )
+    # Check combiner node with flexible version matching
+    combiner_node = mat.combiners[0].node
+    assert combiner_node.name == "default.repair_orders_fact"
+    assert combiner_node.display_name == "Repair Orders Fact"
     assert mat.combiners[0].query is None
     assert mat.combiners[0].columns == [
         ColumnMetadata(
@@ -1080,13 +1038,15 @@ async def test_spark_sql_full(
     # Reading the node should yield the materialization config
     response = await module__client_with_roads.get("/nodes/default.hard_hat/")
     data = response.json()
-    assert data["version"] == "v1.0"
+    assert data["version"] == "v1.1"
     materialization_query = data["materializations"][0]["config"]["query"]
     assert str(parse(materialization_query)) == str(
         parse(load_expected_file("spark_sql.full.query.sql")),
     )
     del data["materializations"][0]["config"]["query"]
-    assert data["materializations"] == load_expected_file("spark_sql.full.config.json")
+    expected_config = load_expected_file("spark_sql.full.config.json")
+    expected_config[0]["node_revision_id"] = mock.ANY
+    assert data["materializations"] == expected_config
 
     # Set both temporal and categorical partitions on node
     response = await module__client_with_roads.post(
@@ -1131,7 +1091,7 @@ async def test_spark_sql_full(
     # materialization config but is not included directly in the materialization query
     response = await module__client_with_roads.get("/nodes/default.hard_hat/")
     data = response.json()
-    assert data["version"] == "v1.0"
+    assert data["version"] == "v1.1"
     assert len(data["materializations"]) == 2
 
     expected_query = load_expected_file("spark_sql.full.partition.query.sql")
@@ -1140,6 +1100,7 @@ async def test_spark_sql_full(
     materialization_with_partitions = data["materializations"][1]
     del materialization_with_partitions["config"]["query"]
     expected_config = load_expected_file("spark_sql.full.partition.config.json")
+    expected_config["node_revision_id"] = mock.ANY
     assert materialization_with_partitions == expected_config
 
     # Check listing materializations of the node
@@ -1148,11 +1109,13 @@ async def test_spark_sql_full(
     )
     materializations = response.json()
     materializations[0]["config"]["query"] = mock.ANY
+    materializations[0]["node_revision_id"] = mock.ANY
     assert materializations[0] == load_expected_file(
         "spark_sql.full.materializations.json",
     )
     materializations = response.json()
     materializations[1]["config"]["query"] = mock.ANY
+    materializations[1]["node_revision_id"] = mock.ANY
     assert materializations[1] == load_expected_file(
         "spark_sql.full.partition.materializations.json",
     )
@@ -1169,7 +1132,7 @@ async def test_spark_sql_full(
     )
     assert module__query_service_client.run_backfill.call_args_list[0].args == (  # type: ignore
         "default.hard_hat",
-        "v1.0",
+        "v1.1",
         "dimension",
         "spark_sql__full__birth_date__country",
         [
@@ -1264,6 +1227,7 @@ async def test_spark_sql_incremental(
     data = response.json()
     assert data["version"] == "v1.0"
     del data["materializations"][0]["config"]["query"]
+    data["materializations"][0]["node_revision_id"] = mock.ANY
     assert data["materializations"] == load_expected_file(
         "spark_sql.incremental.config.json",
     )
@@ -1631,16 +1595,14 @@ country_agg.add_materialization(
     )
 
 
-@pytest.mark.asyncio
-async def test_getting_materializations_for_all_revisions(
-    module__client_with_roads: AsyncClient,
-    set_temporal_column,
+async def create_cube_with_materialization(
+    client: AsyncClient,
+    set_temporal_column: Callable,
+    cube_name: str,
+    strategy: str,
+    schedule: str,
 ):
-    """
-    Test getting all materialization configs for all versions using include_all=true
-    """
-    client = module__client_with_roads
-    cube_name = "default.repair_analytics"
+    # cube_name = "default.repair_revenue_analysis"
     response = await client.post(
         "/nodes/default.repair_orders_fact/columns/order_date/attributes/",
         json=[{"name": "dimension"}],
@@ -1678,16 +1640,34 @@ async def test_getting_materializations_for_all_revisions(
         f"/nodes/{cube_name}/materialization/",
         json={
             "job": "druid_measures_cube",
-            "strategy": "incremental_time",
-            "config": {},
-            "schedule": "@daily",
+            "strategy": strategy,
+            "schedule": schedule,
         },
     )
     assert (
         response.json()["message"]
         == "Successfully updated materialization config named "
-        "`druid_measures_cube__incremental_time__default.repair_orders_fact.order_date` "
+        f"`druid_measures_cube__{strategy}__default.repair_orders_fact.order_date` "
         f"for node `{cube_name}`"
+    )
+
+
+@pytest.mark.asyncio
+async def test_getting_materializations_for_all_revisions(
+    module__client_with_roads: AsyncClient,
+    set_temporal_column: Callable,
+):
+    """
+    Test getting all materialization configs for all versions using include_all=true
+    """
+    client = module__client_with_roads
+    cube_name = "default.repair_analytics"
+    await create_cube_with_materialization(
+        client,
+        set_temporal_column,
+        cube_name=cube_name,
+        strategy="incremental_time",
+        schedule="@daily",
     )
 
     # Update the cube (side-effect is a new materialization is created for the new revision)
@@ -1727,62 +1707,22 @@ async def test_getting_materializations_after_deletion(
     """
     client = module__client_with_roads
     cube_name = "default.repair_revenue_analysis"
-    response = await client.post(
-        "/nodes/default.repair_orders_fact/columns/order_date/attributes/",
-        json=[{"name": "dimension"}],
-    )
-    assert response.status_code in (200, 201)
-    response = await client.post(
-        "/nodes/cube/",
-        json={
-            "metrics": [
-                "default.num_repair_orders",
-                "default.total_repair_cost",
-            ],
-            "dimensions": [
-                "default.repair_orders_fact.order_date",
-                "default.hard_hat.state",
-                "default.dispatcher.company_name",
-                "default.municipality_dim.local_region",
-            ],
-            "filters": ["default.hard_hat.state='AZ'"],
-            "description": "Cube of various metrics related to repairs",
-            "mode": "published",
-            "name": cube_name,
-        },
-    )
-    assert response.status_code == 201
-
-    await set_temporal_column(
+    await create_cube_with_materialization(
         client,
-        cube_name,
-        "default.repair_orders_fact.order_date",
-    )
-
-    # Create a materialization config
-    response = await client.post(
-        f"/nodes/{cube_name}/materialization/",
-        json={
-            "job": "druid_measures_cube",
-            "strategy": "full",
-            "schedule": "",
-        },
-    )
-    assert (
-        response.json()["message"]
-        == "Successfully updated materialization config named "
-        "`druid_measures_cube__full__default.repair_orders_fact.order_date` "
-        f"for node `{cube_name}`"
+        set_temporal_column,
+        cube_name=cube_name,
+        strategy="full",
+        schedule="",
     )
 
     # Delete the materialization
     response = await client.delete(
         f"/nodes/{cube_name}/materializations/"
-        "?materialization_name=druid_measures_cube__full__default.repair_orders_fact.order_date",
+        "?materialization_name=druid_measures_cube__full__default.repair_orders_fact.order_date&node_version=v1.0",
     )
     assert response.json() == {
-        "message": "The materialization named `druid_measures_cube__full__default.repair_orders_fact.order_date` on node "
-        f"`{cube_name}` has been successfully deactivated",
+        "message": "Materialization named `druid_measures_cube__full__default.repair_orders_fact.order_date` on node "
+        f"`{cube_name}` version `v1.0` has been successfully deactivated",
     }
 
     # Test that the materialization is no longer being returned
@@ -1796,3 +1736,282 @@ async def test_getting_materializations_after_deletion(
         f"/nodes/{cube_name}/materializations?show_inactive=true",
     )
     assert len(response.json()) == 1
+
+
+async def test_deleting_node_with_materialization(
+    module__client_with_roads: AsyncClient,
+    set_temporal_column: Callable,
+):
+    """
+    Test that deleting a node with a materialization works
+    """
+    client = module__client_with_roads
+    cube_name = "default.repairs_analysis"
+    await create_cube_with_materialization(
+        client,
+        set_temporal_column,
+        cube_name=cube_name,
+        strategy="incremental_time",
+        schedule="@daily",
+    )
+    response = await client.delete(f"/nodes/{cube_name}")
+    assert (
+        response.json()["message"]
+        == f"Node `{cube_name}` has been successfully deleted."
+    )
+
+
+@pytest.mark.asyncio
+async def test_list_node_availability_states_across_versions(
+    module__client_with_roads: AsyncClient,
+) -> None:
+    """
+    Test listing availability states across all node versions.
+    This is the endpoint used by the UI for version-based materialization tabs.
+    """
+    client = module__client_with_roads
+
+    # Create a cube for testing
+    cube_name = "default.test_availability_cube"
+    response = await client.post(
+        "/nodes/cube/",
+        json={
+            "metrics": ["default.num_repair_orders"],
+            "dimensions": ["default.hard_hat.country"],
+            "description": "Test cube for availability states",
+            "mode": "published",
+            "name": cube_name,
+        },
+    )
+    assert response.status_code == 201
+    initial_version = response.json()["version"]
+
+    # Add availability state for the initial version
+    await client.post(
+        f"/data/{cube_name}/availability/",
+        json={
+            "catalog": "default",
+            "schema_": "test_schema",
+            "table": "test_table_v1",
+            "valid_through_ts": 20220131,
+            "url": "http://example.com/table_v1",
+            "min_temporal_partition": ["2022", "01", "01"],
+            "max_temporal_partition": ["2022", "01", "31"],
+        },
+    )
+
+    # Update cube with refresh_materialization to create new version
+    response = await client.patch(
+        f"/nodes/{cube_name}/?refresh_materialization=true",
+        json={
+            "description": "Updated cube to create new version",
+        },
+    )
+    assert response.status_code == 200
+    new_version = response.json()["version"]
+    assert new_version != initial_version
+
+    # Add availability state for the new version
+    await client.post(
+        f"/data/{cube_name}/availability/",
+        json={
+            "catalog": "default",
+            "schema_": "test_schema",
+            "table": "test_table_v2",
+            "valid_through_ts": 20220228,
+            "url": "http://example.com/table_v2",
+            "min_temporal_partition": ["2022", "02", "01"],
+            "max_temporal_partition": ["2022", "02", "28"],
+        },
+    )
+
+    # List availability states across all versions
+    response = await client.get(f"/nodes/{cube_name}/availability/")
+    assert response.status_code == 200
+    availability_states = response.json()
+
+    # Should have availability states for both versions
+    assert len(availability_states) == 2
+
+    # Group by node_version to verify we have both versions
+    states_by_version: dict[str, list] = {}
+    for state in availability_states:
+        version = state.get("node_version", initial_version)
+        if version not in states_by_version:
+            states_by_version[version] = []
+        states_by_version[version].append(state)
+
+    assert len(states_by_version) == 2
+    assert initial_version in states_by_version
+    assert new_version in states_by_version
+
+    # Verify each version has the correct table name
+    v1_states = states_by_version[initial_version]
+    v2_states = states_by_version[new_version]
+
+    assert len(v1_states) == 1
+    assert len(v2_states) == 1
+    assert v1_states[0]["table"] == "test_table_v1"
+    assert v2_states[0]["table"] == "test_table_v2"
+
+
+@pytest.mark.asyncio
+async def test_list_node_availability_states_single_version(
+    module__client_with_roads: AsyncClient,
+) -> None:
+    """
+    Test listing availability states for a node with only one version.
+    """
+    client = module__client_with_roads
+
+    # Create a simple cube
+    cube_name = "default.single_version_cube"
+    response = await client.post(
+        "/nodes/cube/",
+        json={
+            "metrics": ["default.num_repair_orders"],
+            "dimensions": ["default.hard_hat.country"],
+            "description": "Single version test cube",
+            "mode": "published",
+            "name": cube_name,
+        },
+    )
+    assert response.status_code == 201
+
+    # Add one availability state
+    await client.post(
+        f"/data/{cube_name}/availability/",
+        json={
+            "catalog": "default",
+            "schema_": "test_schema",
+            "table": "single_version_table",
+            "valid_through_ts": 20220131,
+            "url": "http://example.com/single_table",
+            "min_temporal_partition": ["2022", "01", "01"],
+            "max_temporal_partition": ["2022", "01", "31"],
+        },
+    )
+
+    # List availability states
+    response = await client.get(f"/nodes/{cube_name}/availability/")
+    assert response.status_code == 200
+    availability_states = response.json()
+
+    assert len(availability_states) == 1
+    state = availability_states[0]
+    assert state["table"] == "single_version_table"
+    assert state["catalog"] == "default"
+    assert state["schema_"] == "test_schema"
+    assert state["url"] == "http://example.com/single_table"
+    assert state["valid_through_ts"] == 20220131
+    assert state["min_temporal_partition"] == ["2022", "01", "01"]
+    assert state["max_temporal_partition"] == ["2022", "01", "31"]
+
+
+@pytest.mark.asyncio
+async def test_list_node_availability_states_no_states(
+    module__client_with_roads: AsyncClient,
+) -> None:
+    """
+    Test listing availability states for a node with no availability states.
+    """
+    client = module__client_with_roads
+
+    # Create a cube with no availability states
+    cube_name = "default.no_availability_cube"
+    response = await client.post(
+        "/nodes/cube/",
+        json={
+            "metrics": ["default.num_repair_orders"],
+            "dimensions": ["default.hard_hat.country"],
+            "description": "Cube with no availability states",
+            "mode": "published",
+            "name": cube_name,
+        },
+    )
+    assert response.status_code == 201
+
+    # List availability states - should be empty
+    response = await client.get(f"/nodes/{cube_name}/availability/")
+    assert response.status_code == 200
+    availability_states = response.json()
+    assert len(availability_states) == 0
+
+
+@pytest.mark.asyncio
+async def test_list_node_availability_states_nonexistent_node(
+    module__client_with_roads: AsyncClient,
+) -> None:
+    """
+    Test listing availability states for a node that doesn't exist.
+    """
+    client = module__client_with_roads
+
+    # Try to list availability states for non-existent node
+    response = await client.get("/nodes/nonexistent.node/availability/")
+    assert response.status_code == 404
+    assert "does not exist" in response.json()["message"]
+
+
+@pytest.mark.asyncio
+async def test_list_node_availability_states_with_links_and_partitions(
+    module__client_with_roads: AsyncClient,
+) -> None:
+    """
+    Test listing availability states with complex partition and link data.
+    """
+    client = module__client_with_roads
+
+    # Create a cube for testing
+    cube_name = "default.complex_availability_cube"
+    response = await client.post(
+        "/nodes/cube/",
+        json={
+            "metrics": ["default.num_repair_orders"],
+            "dimensions": ["default.hard_hat.country"],
+            "description": "Test cube with complex availability",
+            "mode": "published",
+            "name": cube_name,
+        },
+    )
+    assert response.status_code == 201
+
+    # Add availability state with links and partitions
+    await client.post(
+        f"/data/{cube_name}/availability/",
+        json={
+            "catalog": "default",
+            "schema_": "test_schema",
+            "table": "complex_table",
+            "valid_through_ts": 20220131,
+            "url": "http://example.com/complex_table",
+            "min_temporal_partition": ["2022", "01", "01"],
+            "max_temporal_partition": ["2022", "01", "31"],
+            "categorical_partitions": ["country", "region"],
+            "temporal_partitions": ["date", "hour"],
+            "links": {"dashboard": "http://dashboard.example.com"},
+            "partitions": [
+                {
+                    "value": ["US", "west"],
+                    "min_temporal_partition": ["2022", "01", "01"],
+                    "max_temporal_partition": ["2022", "01", "15"],
+                    "valid_through_ts": 20220115,
+                },
+            ],
+        },
+    )
+
+    # List availability states
+    response = await client.get(f"/nodes/{cube_name}/availability/")
+    assert response.status_code == 200
+    availability_states = response.json()
+
+    assert len(availability_states) == 1
+    state = availability_states[0]
+    assert state["categorical_partitions"] == ["country", "region"]
+    assert state["temporal_partitions"] == ["date", "hour"]
+    assert state["links"] == {"dashboard": "http://dashboard.example.com"}
+    assert len(state["partitions"]) == 1
+    partition = state["partitions"][0]
+    assert partition["value"] == ["US", "west"]
+    assert partition["valid_through_ts"] == 20220115

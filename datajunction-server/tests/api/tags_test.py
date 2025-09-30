@@ -26,7 +26,8 @@ class TestTags:
         yield  # Testing happens
         # Teardown: remove any data from database (even data not created by this session)
         for table in Base.metadata.tables.keys():
-            await module__session.execute(text(f'TRUNCATE TABLE "{table}" CASCADE'))
+            if table != "users":
+                await module__session.execute(text(f'TRUNCATE TABLE "{table}" CASCADE'))
         await module__session.commit()
 
     async def create_tag(self, module__client: AsyncClient):
@@ -134,6 +135,16 @@ class TestTags:
         """
         response = await self.create_tag(module__client)
         assert response.status_code == 201
+        response = await module__client.post(
+            "/tags/",
+            json={
+                "name": "sales_report",
+                "display_name": "Sales Report",
+                "description": "All metrics for sales",
+                "tag_type": "group",
+                "tag_metadata": {},
+            },
+        )
 
         # Trying updating the tag
         response = await module__client.patch(
@@ -292,8 +303,8 @@ class TestTags:
                 "mode": "published",
                 "name": "default.items_sold_count",
                 "description": "Total units sold",
-                "edited_by": None,
-                "tags": None,
+                "edited_by": [],
+                "tags": [],
                 "status": "valid",
                 "type": "metric",
                 "updated_at": mock.ANY,
@@ -338,8 +349,8 @@ class TestTags:
                 "name": "default.items_sold_count",
                 "description": "Total units sold",
                 "status": "valid",
-                "edited_by": None,
-                "tags": None,
+                "edited_by": [],
+                "tags": [],
                 "type": "metric",
                 "updated_at": mock.ANY,
                 "version": "v1.0",
@@ -350,8 +361,8 @@ class TestTags:
                 "name": "default.total_profit",
                 "description": "Total profit",
                 "status": "valid",
-                "edited_by": None,
-                "tags": None,
+                "edited_by": [],
+                "tags": [],
                 "type": "metric",
                 "updated_at": mock.ANY,
                 "version": "v1.0",

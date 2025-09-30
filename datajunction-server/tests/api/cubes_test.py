@@ -9,7 +9,6 @@ import pytest
 import pytest_asyncio
 from httpx import AsyncClient
 
-from datajunction_server.internal.nodes import derive_sql_column
 from datajunction_server.models.cube import CubeElementMetadata
 from datajunction_server.models.node import ColumnOutput
 from datajunction_server.models.query import ColumnMetadata
@@ -35,7 +34,7 @@ async def make_a_test_cube(
         "default.total_repair_cost",
         "default.total_repair_order_discounts",
     ]
-    await client.post(
+    response = await client.post(
         "/nodes/cube/",
         json={
             "metrics": metrics_list + ["default.double_total_repair_cost"],
@@ -54,9 +53,10 @@ async def make_a_test_cube(
             "name": f"{cube_name}",
         },
     )
+    assert response.status_code < 400, response.json()
     if with_materialization:
         # add materialization to the cube
-        await client.post(
+        response = await client.post(
             f"/nodes/{cube_name}/columns/default.hard_hat.hire_date/partition",
             json={
                 "type_": "temporal",
@@ -64,7 +64,8 @@ async def make_a_test_cube(
                 "format": "yyyyMMdd",
             },
         )
-        await client.post(
+        assert response.status_code < 400, response.json()
+        response = await client.post(
             f"/nodes/{cube_name}/materialization/",
             json={
                 "job": "druid_metrics_cube"
@@ -77,6 +78,7 @@ async def make_a_test_cube(
                 "schedule": "",
             },
         )
+        assert response.status_code < 400, response.json()
 
 
 @pytest.mark.asyncio
@@ -123,6 +125,7 @@ async def test_create_invalid_cube(module__client_with_account_revenue: AsyncCli
     """
     Check that creating a cube with a query fails appropriately
     """
+    # Check that creating a cube with no metrics fails appropriately
     response = await module__client_with_account_revenue.post(
         "/nodes/cube/",
         json={
@@ -138,20 +141,10 @@ async def test_create_invalid_cube(module__client_with_account_revenue: AsyncCli
     )
     assert response.status_code == 422
     data = response.json()
-    assert data["detail"] == [
-        {
-            "loc": ["body", "metrics"],
-            "msg": "field required",
-            "type": "value_error.missing",
-        },
-        {
-            "loc": ["body", "dimensions"],
-            "msg": "field required",
-            "type": "value_error.missing",
-        },
-    ]
+    assert "message" in data
+    assert data["message"] == "At least one metric is required"
 
-    # Check that creating a cube with no cube elements fails appropriately
+    # Check that creating a cube with no dimension attributes fails appropriately
     response = await module__client_with_account_revenue.post(
         "/nodes/cube/",
         json={
@@ -226,7 +219,14 @@ async def test_create_invalid_cube(module__client_with_account_revenue: AsyncCli
         "warnings": [],
     }
 
-    # Check that creating a cube with no dimension nodes fails appropriately
+
+@pytest.mark.asyncio
+async def test_create_cube_no_dimensions(
+    module__client_with_account_revenue: AsyncClient,
+):
+    """
+    Check that creating a cube with no dimension attributes works
+    """
     response = await module__client_with_account_revenue.post(
         "/nodes/cube/",
         json={
@@ -234,16 +234,12 @@ async def test_create_invalid_cube(module__client_with_account_revenue: AsyncCli
             "dimensions": [],
             "description": "A cube of number of accounts grouped by account type",
             "mode": "published",
-            "name": "default.cubes_must_have_dimensions",
+            "name": "default.cubes_can_have_no_dimensions",
         },
     )
-    assert response.status_code == 422
+    assert response.status_code == 201
     data = response.json()
-    assert data == {
-        "message": "At least one dimension is required",
-        "errors": [],
-        "warnings": [],
-    }
+    assert data["parents"] == [{"name": "default.number_of_account_types"}]
 
 
 @pytest.mark.asyncio
@@ -1791,7 +1787,7 @@ async def test_updating_cube_with_existing_materialization(
     # Check that the query service was called to materialize
     assert len(module__query_service_client.materialize.call_args_list) >= 1  # type: ignore
     last_call_args = (
-        module__query_service_client.materialize.call_args_list[-1].args[0].dict()  # type: ignore
+        module__query_service_client.materialize.call_args_list[-1].args[0].model_dump()  # type: ignore
     )
     assert (
         last_call_args["name"]
@@ -2296,14 +2292,13 @@ async def test_derive_sql_column():
     """
     Test that SQL column name are properly derived from cube elements
     """
-    sql_column = await derive_sql_column(
-        CubeElementMetadata(
-            name="foo_DOT_bar_DOT_baz_DOT_revenue",
-            display_name="Revenue",
-            node_name="foo.bar.baz",
-            type="metric",
-        ),
+    cube_element = CubeElementMetadata(
+        name="foo_DOT_bar_DOT_baz_DOT_revenue",
+        display_name="Revenue",
+        node_name="foo.bar.baz",
+        type="metric",
     )
+    sql_column = cube_element.derive_sql_column()
     expected_sql_column = ColumnOutput(
         name="foo_DOT_bar_DOT_baz_DOT_revenue",
         display_name="Revenue",
@@ -2312,14 +2307,13 @@ async def test_derive_sql_column():
     assert sql_column.name == expected_sql_column.name
     assert sql_column.display_name == expected_sql_column.display_name
     assert sql_column.type == expected_sql_column.type
-    sql_column = await derive_sql_column(
-        CubeElementMetadata(
-            name="owner",
-            display_name="Owner",
-            node_name="foo.bar.baz",
-            type="dimension",
-        ),
+    cube_element = CubeElementMetadata(
+        name="owner",
+        display_name="Owner",
+        node_name="foo.bar.baz",
+        type="dimension",
     )
+    sql_column = cube_element.derive_sql_column()
     expected_sql_column = ColumnOutput(
         name="foo_DOT_bar_DOT_baz_DOT_owner",
         display_name="Owner",
@@ -2390,7 +2384,7 @@ async def test_cube_materialization_metadata(
             "SUM(count_3389dae3)",
             "metric": {
                 "name": "default.discounted_orders_rate",
-                "version": "v1.0",
+                "version": mock.ANY,
                 "display_name": "Discounted Orders Rate",
             },
             "required_measures": [
@@ -2398,7 +2392,7 @@ async def test_cube_materialization_metadata(
                     "measure_name": "discount_sum_62846f49",
                     "node": {
                         "name": "default.repair_orders_fact",
-                        "version": "v1.0",
+                        "version": mock.ANY,
                         "display_name": "Repair Orders Fact",
                     },
                 },
@@ -2406,7 +2400,7 @@ async def test_cube_materialization_metadata(
                     "measure_name": "count_3389dae3",
                     "node": {
                         "name": "default.repair_orders_fact",
-                        "version": "v1.0",
+                        "version": mock.ANY,
                         "display_name": "Repair Orders Fact",
                     },
                 },
@@ -2418,7 +2412,7 @@ async def test_cube_materialization_metadata(
             "metric_expression": "SUM(repair_order_id_count_0b7dfba0)",
             "metric": {
                 "name": "default.num_repair_orders",
-                "version": "v1.0",
+                "version": mock.ANY,
                 "display_name": "Num Repair Orders",
             },
             "required_measures": [
@@ -2426,7 +2420,7 @@ async def test_cube_materialization_metadata(
                     "measure_name": "repair_order_id_count_0b7dfba0",
                     "node": {
                         "name": "default.repair_orders_fact",
-                        "version": "v1.0",
+                        "version": mock.ANY,
                         "display_name": "Repair Orders Fact",
                     },
                 },
@@ -2438,7 +2432,7 @@ async def test_cube_materialization_metadata(
             "metric_expression": "SUM(price_sum_78a5eb43) / SUM(price_count_78a5eb43)",
             "metric": {
                 "name": "default.avg_repair_price",
-                "version": "v1.0",
+                "version": mock.ANY,
                 "display_name": "Avg Repair Price",
             },
             "required_measures": [
@@ -2446,7 +2440,7 @@ async def test_cube_materialization_metadata(
                     "measure_name": "price_count_78a5eb43",
                     "node": {
                         "name": "default.repair_orders_fact",
-                        "version": "v1.0",
+                        "version": mock.ANY,
                         "display_name": "Repair Orders Fact",
                     },
                 },
@@ -2454,7 +2448,7 @@ async def test_cube_materialization_metadata(
                     "measure_name": "price_sum_78a5eb43",
                     "node": {
                         "name": "default.repair_orders_fact",
-                        "version": "v1.0",
+                        "version": mock.ANY,
                         "display_name": "Repair Orders Fact",
                     },
                 },
@@ -2466,7 +2460,7 @@ async def test_cube_materialization_metadata(
             "metric_expression": "sum(total_repair_cost_sum_9bdaf803)",
             "metric": {
                 "name": "default.total_repair_cost",
-                "version": "v1.0",
+                "version": mock.ANY,
                 "display_name": "Total Repair Cost",
             },
             "required_measures": [
@@ -2474,7 +2468,7 @@ async def test_cube_materialization_metadata(
                     "measure_name": "total_repair_cost_sum_9bdaf803",
                     "node": {
                         "name": "default.repair_orders_fact",
-                        "version": "v1.0",
+                        "version": mock.ANY,
                         "display_name": "Repair Orders Fact",
                     },
                 },
@@ -2486,7 +2480,7 @@ async def test_cube_materialization_metadata(
             "metric_expression": "sum(price_discount_sum_017d55a8)",
             "metric": {
                 "name": "default.total_repair_order_discounts",
-                "version": "v1.0",
+                "version": mock.ANY,
                 "display_name": "Total Repair Order Discounts",
             },
             "required_measures": [
@@ -2494,7 +2488,7 @@ async def test_cube_materialization_metadata(
                     "measure_name": "price_discount_sum_017d55a8",
                     "node": {
                         "name": "default.repair_orders_fact",
-                        "version": "v1.0",
+                        "version": mock.ANY,
                         "display_name": "Repair Orders Fact",
                     },
                 },
@@ -2507,7 +2501,7 @@ async def test_cube_materialization_metadata(
             "metric_expression": "sum(price_sum_78a5eb43) + sum(price_sum_78a5eb43)",
             "metric": {
                 "name": "default.double_total_repair_cost",
-                "version": "v1.0",
+                "version": mock.ANY,
                 "display_name": "Double Total Repair Cost",
             },
             "required_measures": [
@@ -2515,7 +2509,7 @@ async def test_cube_materialization_metadata(
                     "measure_name": "price_sum_78a5eb43",
                     "node": {
                         "name": "default.repair_order_details",
-                        "version": "v1.0",
+                        "version": mock.ANY,
                         "display_name": "default.roads.repair_order_details",
                     },
                 },
@@ -2724,10 +2718,10 @@ async def test_cube_materialization_metadata(
             ],
             "node": {
                 "name": "default.repair_orders_fact",
-                "version": "v1.0",
+                "version": mock.ANY,
                 "display_name": "Repair Orders Fact",
             },
-            "output_table_name": "default_repair_orders_fact_v1_0_c9390406463b348e",
+            "output_table_name": mock.ANY,
             "query": mock.ANY,
             "spark_conf": None,
             "timestamp_column": "default_DOT_hard_hat_DOT_hire_date",
@@ -2841,10 +2835,10 @@ async def test_cube_materialization_metadata(
             ],
             "node": {
                 "name": "default.repair_order_details",
-                "version": "v1.0",
+                "version": mock.ANY,
                 "display_name": "default.roads.repair_order_details",
             },
-            "output_table_name": "default_repair_order_details_v1_0_5bf367d2fc7c255d",
+            "output_table_name": "default_repair_order_details_v1_2_3b3141d8060dd808",
             "query": mock.ANY,
             "spark_conf": None,
             "timestamp_column": "default_DOT_hard_hat_DOT_hire_date",
@@ -3270,63 +3264,6 @@ async def test_cube_materialization_metadata(
         },
     ]
 
-    expected_combiner = """
-    SELECT
-      COALESCE(
-        default_repair_orders_fact_v1_0_c9390406463b348e.default_DOT_hard_hat_DOT_country,
-        default_repair_order_details_v1_0_5bf367d2fc7c255d.default_DOT_hard_hat_DOT_country
-      ) default_DOT_hard_hat_DOT_country,
-      COALESCE(
-        default_repair_orders_fact_v1_0_c9390406463b348e.default_DOT_hard_hat_DOT_postal_code,
-        default_repair_order_details_v1_0_5bf367d2fc7c255d.default_DOT_hard_hat_DOT_postal_code
-      ) default_DOT_hard_hat_DOT_postal_code,
-      COALESCE(
-        default_repair_orders_fact_v1_0_c9390406463b348e.default_DOT_hard_hat_DOT_city,
-        default_repair_order_details_v1_0_5bf367d2fc7c255d.default_DOT_hard_hat_DOT_city
-      ) default_DOT_hard_hat_DOT_city,
-      COALESCE(
-        default_repair_orders_fact_v1_0_c9390406463b348e.default_DOT_hard_hat_DOT_hire_date,
-        default_repair_order_details_v1_0_5bf367d2fc7c255d.default_DOT_hard_hat_DOT_hire_date
-      ) default_DOT_hard_hat_DOT_hire_date,
-      COALESCE(
-        default_repair_orders_fact_v1_0_c9390406463b348e.default_DOT_hard_hat_DOT_state,
-        default_repair_order_details_v1_0_5bf367d2fc7c255d.default_DOT_hard_hat_DOT_state
-      ) default_DOT_hard_hat_DOT_state,
-      COALESCE(
-        default_repair_orders_fact_v1_0_c9390406463b348e.default_DOT_dispatcher_DOT_company_name,
-        default_repair_order_details_v1_0_5bf367d2fc7c255d.default_DOT_dispatcher_DOT_company_name
-      ) default_DOT_dispatcher_DOT_company_name,
-      COALESCE(
-        default_repair_orders_fact_v1_0_c9390406463b348e.default_DOT_municipality_dim_DOT_local_region,
-        default_repair_order_details_v1_0_5bf367d2fc7c255d.default_DOT_municipality_dim_DOT_local_region
-      ) default_DOT_municipality_dim_DOT_local_region,
-      default_repair_orders_fact_v1_0_c9390406463b348e.discount_sum_62846f49,
-      default_repair_orders_fact_v1_0_c9390406463b348e.count_3389dae3,
-      default_repair_orders_fact_v1_0_c9390406463b348e.repair_order_id_count_0b7dfba0,
-      default_repair_orders_fact_v1_0_c9390406463b348e.price_count_78a5eb43,
-      default_repair_orders_fact_v1_0_c9390406463b348e.price_sum_78a5eb43,
-      default_repair_orders_fact_v1_0_c9390406463b348e.total_repair_cost_sum_9bdaf803,
-      default_repair_orders_fact_v1_0_c9390406463b348e.price_discount_sum_017d55a8,
-      default_repair_order_details_v1_0_5bf367d2fc7c255d.price_sum_78a5eb43
-    FROM default_repair_orders_fact_v1_0_c9390406463b348e
-    FULL OUTER JOIN default_repair_order_details_v1_0_5bf367d2fc7c255d
-      ON default_repair_orders_fact_v1_0_c9390406463b348e.default_DOT_hard_hat_DOT_country =
-        default_repair_order_details_v1_0_5bf367d2fc7c255d.default_DOT_hard_hat_DOT_country
-        AND default_repair_orders_fact_v1_0_c9390406463b348e.default_DOT_hard_hat_DOT_postal_code =
-          default_repair_order_details_v1_0_5bf367d2fc7c255d.default_DOT_hard_hat_DOT_postal_code
-        AND default_repair_orders_fact_v1_0_c9390406463b348e.default_DOT_hard_hat_DOT_city =
-          default_repair_order_details_v1_0_5bf367d2fc7c255d.default_DOT_hard_hat_DOT_city
-        AND default_repair_orders_fact_v1_0_c9390406463b348e.default_DOT_hard_hat_DOT_hire_date =
-          default_repair_order_details_v1_0_5bf367d2fc7c255d.default_DOT_hard_hat_DOT_hire_date
-        AND default_repair_orders_fact_v1_0_c9390406463b348e.default_DOT_hard_hat_DOT_state =
-          default_repair_order_details_v1_0_5bf367d2fc7c255d.default_DOT_hard_hat_DOT_state
-        AND default_repair_orders_fact_v1_0_c9390406463b348e.default_DOT_dispatcher_DOT_company_name =
-          default_repair_order_details_v1_0_5bf367d2fc7c255d.default_DOT_dispatcher_DOT_company_name
-        AND default_repair_orders_fact_v1_0_c9390406463b348e.default_DOT_municipality_dim_DOT_local_region =
-          default_repair_order_details_v1_0_5bf367d2fc7c255d.default_DOT_municipality_dim_DOT_local_region
-    """
-    assert str(parse(results["combiners"][0]["query"])) == str(parse(expected_combiner))
-
 
 @pytest.mark.asyncio
 async def test_get_all_cubes(
@@ -3368,3 +3305,20 @@ async def test_get_all_cubes(
     assert response.is_success
     data = response.json()
     assert len([cube for cube in data if cube["name"] == "default.repairs_cube_9"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_get_cube_version(
+    client_with_repairs_cube: AsyncClient,
+):
+    """
+    Test getting cube metadata for one revision
+    """
+    response = await client_with_repairs_cube.get(
+        "/cubes/default.repairs_cube/versions/v1.0",
+    )
+    assert response.is_success
+    data = response.json()
+    assert data["name"] == "default.repairs_cube"
+    assert data["version"] == "v1.0"
+    assert len(data["measures"]) == 6

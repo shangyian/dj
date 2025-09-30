@@ -2,6 +2,8 @@
 Tests for ``datajunction_server.sql.dag``.
 """
 
+import datetime
+from unittest.mock import MagicMock, patch
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -9,9 +11,15 @@ from datajunction_server.database.column import Column
 from datajunction_server.database.database import Database
 from datajunction_server.database.node import Node, NodeRevision
 from datajunction_server.database.user import User
+from datajunction_server.database.dimensionlink import DimensionLink
 from datajunction_server.errors import DJException
 from datajunction_server.models.node import DimensionAttributeOutput, NodeType
-from datajunction_server.sql.dag import get_dimensions, topological_sort
+from datajunction_server.sql.dag import (
+    get_dimensions,
+    get_downstream_nodes,
+    topological_sort,
+    get_dimension_dag_indegree,
+)
 from datajunction_server.sql.parsing.types import IntegerType, StringType
 
 
@@ -180,11 +188,298 @@ async def test_topological_sort(session: AsyncSession) -> None:
     ordering = topological_sort([node_a, node_b, node_c, node_d, node_e])
     assert [node.name for node in ordering] == [
         node_a.name,
-        node_d.name,
         node_b.name,
+        node_d.name,
         node_c.name,
         node_e.name,
     ]
     with pytest.raises(DJException) as exc_info:
         topological_sort([node_a, node_b, node_c, node_d, node_e, node_f])
     assert "Graph has at least one cycle" in str(exc_info)
+
+
+@pytest.mark.asyncio
+class TestGetDimensionDagIndegree:
+    """
+    Tests for ``get_dimension_dag_indegree``.
+    """
+
+    @pytest.fixture(autouse=True)
+    async def dimension_test_graph(self, session: AsyncSession, current_user: User):
+        """
+        Creates a reusable test graph with dimensions and facts.
+        """
+        dim1 = Node(
+            name="default.dim1",
+            type=NodeType.DIMENSION,
+            created_by_id=current_user.id,
+        )
+        dim1_rev = NodeRevision(
+            node=dim1,
+            type=dim1.type,
+            name=dim1.name,
+            created_by_id=current_user.id,
+            columns=[
+                Column(name="id", type=IntegerType(), order=0),
+                Column(name="attribute1", type=StringType(), order=1),
+            ],
+        )
+
+        dim2 = Node(
+            name="default.dim2",
+            type=NodeType.DIMENSION,
+            created_by_id=current_user.id,
+        )
+        dim2_rev = NodeRevision(
+            node=dim2,
+            type=dim2.type,
+            name=dim2.name,
+            created_by_id=current_user.id,
+            columns=[
+                Column(name="id", type=IntegerType(), order=0),
+                Column(name="attribute2", type=StringType(), order=1),
+            ],
+        )
+        dim3 = Node(
+            name="default.dim3",
+            type=NodeType.DIMENSION,
+            created_by_id=current_user.id,
+        )
+        dim3_rev = NodeRevision(
+            node=dim3,
+            type=dim3.type,
+            name=dim3.name,
+            created_by_id=current_user.id,
+            columns=[
+                Column(name="id", type=IntegerType(), order=0),
+            ],
+        )
+        session.add_all([dim1, dim1_rev, dim2, dim2_rev, dim3, dim3_rev])
+        await session.flush()
+
+        fact = Node(
+            name="default.fact1",
+            type=NodeType.TRANSFORM,
+            created_by_id=current_user.id,
+        )
+        fact_rev = NodeRevision(
+            node=fact,
+            type=fact.type,
+            name=fact.name,
+            created_by_id=current_user.id,
+            columns=[
+                Column(name="id", type=IntegerType(), order=0),
+                Column(name="dim1_id", type=IntegerType(), order=1),
+                Column(name="dim2_id", type=IntegerType(), order=2),
+            ],
+        )
+
+        fact2 = Node(
+            name="default.fact2",
+            type=NodeType.TRANSFORM,
+            created_by_id=current_user.id,
+        )
+        fact2_rev = NodeRevision(
+            node=fact2,
+            type=fact2.type,
+            name=fact2.name,
+            created_by_id=current_user.id,
+            columns=[
+                Column(name="id", type=IntegerType(), order=0),
+                Column(name="dim1_id", type=IntegerType(), order=1),
+            ],
+        )
+        session.add_all([fact, fact_rev, fact2, fact2_rev])
+        await session.flush()
+
+        link1 = DimensionLink(
+            dimension_id=dim1.id,
+            node_revision_id=fact_rev.id,
+            join_sql="default.fact1.dim1_id = default.dim1.id",
+        )
+        link2 = DimensionLink(
+            dimension_id=dim2.id,
+            node_revision_id=fact_rev.id,
+            join_sql="default.fact1.dim1_id = default.dim2.id",
+        )
+        link3 = DimensionLink(
+            dimension_id=dim2.id,
+            node_revision_id=fact2_rev.id,
+            join_sql="default.fact2.dim1_id = default.dim2.id",
+        )
+
+        session.add_all([link1, link2, link3])
+        await session.commit()
+
+        dim4 = Node(
+            name="default.deactivated_dim",
+            type=NodeType.DIMENSION,
+            created_by_id=current_user.id,
+            deactivated_at=datetime.datetime.now(datetime.timezone.utc),
+        )
+        session.add(dim4)
+        await session.commit()
+
+    @pytest.mark.parametrize(
+        "node_names, expected",
+        [
+            # dim1 linked once, dim2 linked twice
+            (["default.dim1", "default.dim2"], {"default.dim1": 1, "default.dim2": 2}),
+            # dim3 not linked
+            (["default.dim3"], {"default.dim3": 0}),
+            # Non-dimension node: should return 0
+            (["default.fact1"], {"default.fact1": 0}),
+            # Nonexistent node: should skip
+            (["nonexistent.dim"], {}),
+            # Deactivated dimension should not be included
+            (
+                ["default.dim1", "default.fact1", "default.deactivated_dim"],
+                {"default.dim1": 1, "default.fact1": 0},
+            ),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_get_dimension_dag_indegree(
+        self,
+        session: AsyncSession,
+        dimension_test_graph,
+        node_names: list[str],
+        expected: dict[str, int],
+    ):
+        """
+        Check that ``get_dimension_dag_indegree`` returns the correct indegree
+        counts for dimension nodes.
+        """
+        result = await get_dimension_dag_indegree(session, node_names)
+        assert result == expected
+
+    @pytest.mark.asyncio
+    async def test_node_downstreams_with_fanout(
+        self,
+        module__session: AsyncSession,
+        module__client_with_roads,
+    ):
+        """
+        Test getting downstream nodes with the BFS and recursive CTE approaches yield the same results.
+        """
+        expected_nodes = set(
+            [
+                "default.regional_level_agg",
+                "default.repair_orders_fact",
+                "default.repair_order",
+                "default.discounted_orders_rate",
+                "default.total_repair_order_discounts",
+                "default.avg_repair_order_discounts",
+                "default.avg_time_to_dispatch",
+                "default.regional_repair_efficiency",
+                "default.num_repair_orders",
+                "default.avg_repair_price",
+                "default.total_repair_cost",
+            ],
+        )
+
+        # BFS
+        min_fanout_settings = MagicMock()
+        min_fanout_settings.fanout_threshold = 1
+        min_fanout_settings.reader_db.pool_size = 20
+        min_fanout_settings.max_concurrency = 5
+        min_fanout_settings.node_list_max = 10000
+        with patch("datajunction_server.sql.dag.settings", min_fanout_settings):
+            downstreams = await get_downstream_nodes(
+                module__session,
+                "default.repair_orders",
+            )
+            assert {ds.name for ds in downstreams} == expected_nodes
+
+            # Only look for downstreams up to depth 1
+            downstreams = await get_downstream_nodes(
+                module__session,
+                "default.repair_orders",
+                depth=1,
+            )
+            assert {ds.name for ds in downstreams} == {
+                "default.regional_level_agg",
+                "default.repair_order",
+                "default.repair_orders_fact",
+            }
+
+        # Recursive CTE
+        max_fanout_settings = MagicMock()
+        max_fanout_settings.fanout_threshold = 100
+        max_fanout_settings.reader_db.pool_size = 20
+        max_fanout_settings.max_concurrency = 5
+        max_fanout_settings.node_list_max = 10000
+        with patch("datajunction_server.sql.dag.settings", max_fanout_settings):
+            downstreams = await get_downstream_nodes(
+                module__session,
+                "default.repair_orders",
+            )
+            assert {ds.name for ds in downstreams} == expected_nodes
+
+        # Maximum number of downstream nodes returned
+        max_node_list_settings = MagicMock()
+        max_node_list_settings.fanout_threshold = 1
+        max_node_list_settings.reader_db.pool_size = 20
+        max_node_list_settings.max_concurrency = 5
+        max_node_list_settings.node_list_max = 5
+        with patch("datajunction_server.sql.dag.settings", max_node_list_settings):
+            downstreams = await get_downstream_nodes(
+                module__session,
+                "default.repair_orders",
+            )
+            assert (
+                len({ds.name for ds in downstreams})
+                == max_node_list_settings.node_list_max
+            )
+
+        # Test deactivated
+        await module__client_with_roads.delete(
+            "/nodes/default.regional_repair_efficiency",
+        )
+        with patch("datajunction_server.sql.dag.settings", min_fanout_settings):
+            downstreams = await get_downstream_nodes(
+                module__session,
+                "default.repair_orders",
+                include_deactivated=True,
+            )
+            assert {ds.name for ds in downstreams} == expected_nodes
+
+        # Test cubes
+        await module__client_with_roads.post(
+            "/nodes/cube/",
+            json={
+                "metrics": ["default.num_repair_orders", "default.avg_repair_price"],
+                "dimensions": ["default.hard_hat.country"],
+                "filters": ["default.hard_hat.state='AZ'"],
+                "description": "Cube of various metrics related to repairs",
+                "mode": "published",
+                "name": "default.repairs_cube",
+            },
+        )
+        with patch("datajunction_server.sql.dag.settings", min_fanout_settings):
+            downstreams = await get_downstream_nodes(
+                module__session,
+                "default.repair_orders",
+                include_cubes=False,
+                include_deactivated=False,
+            )
+            assert {ds.name for ds in downstreams} == expected_nodes - {
+                "default.regional_repair_efficiency",
+            }
+
+        with patch("datajunction_server.sql.dag.settings", min_fanout_settings):
+            downstreams = await get_downstream_nodes(
+                module__session,
+                "default.repair_orders",
+                node_type=NodeType.METRIC,
+            )
+            assert {ds.name for ds in downstreams} == {
+                "default.avg_repair_order_discounts",
+                "default.avg_repair_price",
+                "default.avg_time_to_dispatch",
+                "default.discounted_orders_rate",
+                "default.num_repair_orders",
+                "default.regional_repair_efficiency",
+                "default.total_repair_cost",
+                "default.total_repair_order_discounts",
+            }

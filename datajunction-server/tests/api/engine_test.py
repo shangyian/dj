@@ -168,11 +168,35 @@ async def test_dialects_list(
             "plugin_class": "SQLTranspilationPlugin",
         },
         {
+            "name": "trino",
+            "plugin_class": "SQLTranspilationPlugin",
+        },
+        {
+            "name": "sqlite",
+            "plugin_class": "SQLGlotTranspilationPlugin",
+        },
+        {
+            "name": "snowflake",
+            "plugin_class": "SQLGlotTranspilationPlugin",
+        },
+        {
+            "name": "redshift",
+            "plugin_class": "SQLGlotTranspilationPlugin",
+        },
+        {
+            "name": "postgres",
+            "plugin_class": "SQLGlotTranspilationPlugin",
+        },
+        {
+            "name": "duckdb",
+            "plugin_class": "SQLGlotTranspilationPlugin",
+        },
+        {
             "name": "druid",
             "plugin_class": "SQLTranspilationPlugin",
         },
         {
-            "name": "trino",
-            "plugin_class": "SQLTranspilationPlugin",
+            "name": "clickhouse",
+            "plugin_class": "SQLGlotTranspilationPlugin",
         },
     ]

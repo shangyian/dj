@@ -63,6 +63,12 @@ def rename_columns(
     projection = []
     node_columns = {col.name for col in node.columns}
     for expression in built_ast.select.projection:
+        if hasattr(expression, "semantic_entity") and expression.semantic_entity:  # type: ignore
+            # If the expression already has a semantic entity, we assume it is already
+            # fully qualified and skip renaming.
+            projection.append(expression)
+            expression.set_alias(ast.Name(amenable_name(expression.semantic_entity)))  # type: ignore
+            continue
         if (
             not isinstance(expression, ast.Alias)
             and not isinstance(
@@ -238,7 +244,7 @@ def build_materialized_cube_node(
         ctes=[],
     )
     materialization_config = cube.materializations[0]
-    cube_config = GenericCubeConfig.parse_obj(materialization_config.config)
+    cube_config = GenericCubeConfig.model_validate(materialization_config.config)
 
     if materialization_config.name == "default":
         # TODO: remove after we migrate old Druid materializations
@@ -247,7 +253,7 @@ def build_materialized_cube_node(
         ]  # pragma: no cover
     else:
         selected_metric_keys = [
-            col.node_revision().name  # type: ignore
+            col.node_revision.name  # type: ignore
             for col in selected_metrics
         ]
 
@@ -295,7 +301,7 @@ def build_materialized_cube_node(
         dimension_column = ast.Column(
             name=ast.Name(
                 (
-                    selected_dim.node_revision().name  # type: ignore
+                    selected_dim.node_revision.name  # type: ignore
                     + SEPARATOR
                     + selected_dim.name
                 ).replace(SEPARATOR, f"_{LOOKUP_CHARS.get(SEPARATOR)}_"),

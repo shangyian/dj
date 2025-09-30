@@ -17,8 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from datajunction_server.database import Catalog
 from datajunction_server.database.column import Column
 from datajunction_server.database.node import Node, NodeRelationship, NodeRevision
-from datajunction_server.database.queryrequest import QueryBuildType, QueryRequest
-from datajunction_server.database.user import OAuthProvider, User
+from datajunction_server.database.user import User
 from datajunction_server.errors import DJDoesNotExistException
 from datajunction_server.internal.materializations import decompose_expression
 from datajunction_server.models.node import NodeStatus
@@ -53,9 +52,9 @@ async def test_read_node(client_with_roads: AsyncClient) -> None:
     data = response.json()
 
     assert response.status_code == 200
-    assert data["version"] == "v1.0"
+    assert data["version"] == "v1.2"
     assert data["node_id"] == 1
-    assert data["node_revision_id"] == 1
+    assert data["node_revision_id"] > 1
     assert data["type"] == "source"
 
     response = await client_with_roads.get("/nodes/default.nothing/")
@@ -343,29 +342,6 @@ class TestNodeCRUD:
         session.add(catalog)
         await session.commit()
         return catalog
-
-    @pytest_asyncio.fixture
-    async def current_user(self, session: AsyncSession) -> User:
-        """
-        A user fixture.
-        """
-
-        new_user = User(
-            username="datajunction",
-            password="datajunction",
-            email="dj@datajunction.io",
-            name="DJ",
-            oauth_provider=OAuthProvider.BASIC,
-            is_admin=False,
-        )
-        existing_user = await session.get(User, new_user.id)
-        if not existing_user:
-            session.add(new_user)
-            await session.commit()
-            user = new_user
-        else:
-            user = existing_user
-        return user
 
     @pytest_asyncio.fixture
     async def source_node(self, session: AsyncSession, current_user: User) -> Node:
@@ -1595,6 +1571,7 @@ class TestNodeCRUD:
         """
         Registering a view with a query service set up should succeed.
         """
+        await module__client_with_basic.get("/catalogs")
         response = await module__client_with_basic.post(
             "/register/view/public/main/view_foo?query=SELECT+1+AS+one+,+'two'+AS+two",
         )
@@ -1652,6 +1629,7 @@ class TestNodeCRUD:
         assert data["catalog"]["name"] == "public"
         assert data["schema_"] == "basic"
         assert data["table"] == "comments"
+        assert data["owners"] == [{"username": "dj"}]
         assert data["columns"] == [
             {
                 "name": "id",
@@ -2209,6 +2187,13 @@ class TestNodeCRUD:
         )
         assert response.status_code == 200
 
+        # Check upstreams for a downstream metric
+        response = await client_with_roads.get(
+            "/nodes/default.num_repair_orders/upstream",
+        )
+        upstream_names = [upstream["name"] for upstream in response.json()]
+        assert "default.repair_orders_fact" in upstream_names
+
         response = await client_with_roads.patch(
             "/nodes/default.repair_orders_fact",
             json={
@@ -2220,6 +2205,13 @@ class TestNodeCRUD:
             },
         )
         assert response.status_code == 200
+
+        # Check upstreams for a downstream metric
+        response = await client_with_roads.get(
+            "/nodes/default.num_repair_orders/upstream",
+        )
+        upstream_names = [upstream["name"] for upstream in response.json()]
+        assert "default.repair_orders_fact" in upstream_names
 
         # Test updating a transform with a deactivated downstream metric
         response = await client_with_roads.delete(
@@ -2263,26 +2255,20 @@ class TestNodeCRUD:
                 "mode": "published",
             },
         )
-        assert response.status_code >= 400
-        assert response.json() == {
-            "detail": [
-                {
-                    "loc": ["body", "catalog"],
-                    "msg": "field required",
-                    "type": "value_error.missing",
-                },
-                {
-                    "loc": ["body", "schema_"],
-                    "msg": "field required",
-                    "type": "value_error.missing",
-                },
-                {
-                    "loc": ["body", "table"],
-                    "msg": "field required",
-                    "type": "value_error.missing",
-                },
-            ],
-        }
+        assert response.status_code == 422
+        response_data = response.json()
+        assert "detail" in response_data
+
+        # Check that all required fields are mentioned in validation errors
+        error_fields = set()
+        for error in response_data["detail"]:
+            if "loc" in error and len(error["loc"]) >= 2:
+                error_fields.add(error["loc"][1])
+
+        required_fields = {"catalog", "schema_", "table"}
+        assert required_fields.issubset(error_fields), (
+            f"Missing required field errors: {required_fields - error_fields}"
+        )
 
     @pytest.mark.asyncio
     async def test_create_invalid_transform_node(
@@ -2378,6 +2364,7 @@ class TestNodeCRUD:
             == "SELECT country, COUNT(DISTINCT id) AS num_users FROM basic.source.users"
         )
         assert data["status"] == "valid"
+        assert data["owners"] == [{"username": "dj"}]
         assert data["columns"] == [
             {
                 "attributes": [],
@@ -2600,11 +2587,11 @@ class TestNodeCRUD:
         assert metric_data["metric_metadata"] == {
             "direction": "higher_is_better",
             "unit": {
-                "abbreviation": None,
-                "category": None,
+                "abbreviation": "$",
+                "category": "currency",
                 "description": None,
                 "label": "Dollar",
-                "name": "DOLLAR",
+                "name": "dollar",
             },
             "significant_digits": 6,
             "min_decimal_exponent": 2,
@@ -2962,12 +2949,7 @@ class TestNodeCRUD:
                 "schedule": "0 * * * *",
             },
         )
-        assert response.status_code == 404
-        data = response.json()
-        assert data["message"] == (
-            "Materialization job type `SOMETHING` not found. Available job "
-            "types: ['SPARK_SQL', 'DRUID_MEASURES_CUBE', 'DRUID_METRICS_CUBE', 'DRUID_CUBE']"
-        )
+        assert response.status_code == 422
 
     @pytest.mark.asyncio
     async def test_node_with_struct(
@@ -3090,18 +3072,6 @@ GROUP BY
           FROM default_DOT_total_amount_in_region_from_struct_transform
         """
         assert str(parse(response.json()["sql"])) == str(parse(expected))
-
-        # Check that this query request has been saved
-        query_request = (await session.execute(select(QueryRequest))).scalars().all()
-        assert len(query_request) == 1
-        assert query_request[0].nodes == [
-            "default.total_amount_in_region_from_struct_transform@v1.0",
-        ]
-        assert query_request[0].dimensions == ["location_hierarchy@v1.0"]
-        assert query_request[0].filters == []
-        assert query_request[0].orderby == []
-        assert query_request[0].limit is None
-        assert query_request[0].query_type == QueryBuildType.NODE
 
     @pytest.mark.asyncio
     async def test_node_with_incremental_time_materialization(
@@ -3301,7 +3271,6 @@ GROUP BY
         format_regex = r"\${(?P<capture>[^}]+)}"
 
         result_sql = response.json()["sql"]
-
         match = re.search(format_regex, result_sql)
         assert match and match.group("capture") == "dj_logical_timestamp"
         query = re.sub(format_regex, "FORMATTED", result_sql)
@@ -3466,10 +3435,12 @@ SELECT  m0_default_DOT_num_repair_orders_partitioned.default_DOT_num_repair_orde
                     "spark": {},
                     "upstream_tables": ["public.basic.dim_users"],
                 },
+                "deactivated_at": None,
                 "strategy": "full",
                 "job": "SparkSqlMaterializationJob",
                 "name": "spark_sql__full",
                 "schedule": "0 * * * *",
+                "node_revision_id": mock.ANY,
             },
         ]
 
@@ -4268,7 +4239,7 @@ class TestValidateNodes:
         )
         data = response.json()
         assert data["message"] == (
-            "Cannot link dimension to node, because catalogs do not match: default, public"
+            "Cannot link dimension to node, because catalogs do not match: basic, public"
         )
 
     @pytest.mark.asyncio
@@ -4312,7 +4283,6 @@ class TestValidateNodes:
         ] == [
             ("update", "node"),
             ("create", "link"),
-            ("set_attribute", "column_attribute"),
             ("create", "node"),
         ]
 
@@ -4359,7 +4329,6 @@ class TestValidateNodes:
         ] == [
             ("update", "node"),
             ("create", "link"),
-            ("set_attribute", "column_attribute"),
             ("create", "node"),
         ]
 
@@ -4382,6 +4351,7 @@ class TestValidateNodes:
         }
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("client", [False], indirect=True)
     async def test_propagate_update_downstream(
         self,
         client_with_roads: AsyncClient,
@@ -4535,6 +4505,15 @@ class TestValidateNodes:
         """
         Test getting upstream nodes of different node types.
         """
+        response = await client_with_event.get(
+            "/nodes/default.long_events_distinct_countries/upstream/",
+        )
+        data = response.json()
+        assert {node["name"] for node in data} == {
+            "default.event_source",
+            "default.long_events",
+        }
+        # Uses cached response
         response = await client_with_event.get(
             "/nodes/default.long_events_distinct_countries/upstream/",
         )
@@ -5721,12 +5700,12 @@ ON s.state_region = r.us_region_id""",
     )
     node_data = response.json()
     assert node_data["version"] == "v2.0"
+    assert node_data["owners"] == [{"username": "dj"}]
     response = await client_with_roads.get("/history?node=default.us_state")
     assert [activity["activity_type"] for activity in response.json()] == [
         "restore",
         "update",
         "delete",
-        "set_attribute",
         "create",
     ]
 
@@ -5825,7 +5804,14 @@ class TestCopyNode:
         )
         copied = (await client_with_roads.get("/nodes/default.contractor")).json()
         original = (await client_with_roads.get("/nodes/default.repair_order")).json()
-        for field in ["name", "node_id", "node_revision_id", "updated_at"]:
+        for field in [
+            "name",
+            "node_id",
+            "node_revision_id",
+            "updated_at",
+            "version",
+            "current_version",
+        ]:
             copied[field] = mock.ANY
         copied_dimension_links = sorted(
             copied["dimension_links"],
@@ -6096,7 +6082,14 @@ class TestCopyNode:
                 copied["dimension_links"],
                 key=lambda link: link["dimension"]["name"],
             )
+            assert sorted(original["parents"], key=lambda node: node["name"]) == sorted(
+                copied["parents"],
+                key=lambda node: node["name"],
+            )
             copied["dimension_links"] = mock.ANY
+            copied["parents"] = mock.ANY
+            copied["current_version"] = mock.ANY
+            copied["version"] = mock.ANY
             original["dimension_links"] = sorted(
                 original["dimension_links"],
                 key=lambda link: link["dimension"]["name"],

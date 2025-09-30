@@ -2,6 +2,7 @@
 Tests for the namespaces API.
 """
 
+from http import HTTPStatus
 from unittest import mock
 
 import pytest
@@ -292,22 +293,51 @@ async def test_deactivate_namespaces(client_with_namespaced_roads: AsyncClient) 
     response = await client_with_namespaced_roads.get(
         "/history?node=foo.bar.avg_length_of_employment",
     )
-    assert [
-        (activity["activity_type"], activity["details"]) for activity in response.json()
-    ] == [
-        ("restore", {"message": "Cascaded from restoring namespace `foo.bar`"}),
-        ("status_change", {"upstream_node": "foo.bar.hard_hats"}),
-        ("status_change", {"upstream_node": "foo.bar.hard_hats"}),
-        ("delete", {"message": "Cascaded from deactivating namespace `foo.bar`"}),
-        ("create", {}),
-    ]
+    assert sorted(
+        [
+            (activity["activity_type"], activity["details"])
+            for activity in response.json()
+        ],
+    ) == sorted(
+        [
+            ("restore", {"message": "Cascaded from restoring namespace `foo.bar`"}),
+            ("status_change", {"upstream_node": "foo.bar.hard_hats"}),
+            ("status_change", {"upstream_node": "foo.bar.hard_hats"}),
+            ("delete", {"message": "Cascaded from deactivating namespace `foo.bar`"}),
+            ("create", {}),
+        ],
+    )
 
 
 @pytest.mark.asyncio
-async def test_hard_delete_namespace(client_with_namespaced_roads: AsyncClient):
+async def test_hard_delete_namespace(client_example_loader: AsyncClient):
     """
     Test hard deleting a namespace
     """
+    client_with_namespaced_roads = await client_example_loader(
+        ["NAMESPACED_ROADS", "ROADS"],
+    )
+
+    response = await client_with_namespaced_roads.post(
+        "/nodes/default.hard_hat/link",
+        json={
+            "dimension_node": "foo.bar.hard_hat",
+            "join_on": "foo.bar.hard_hat.hard_hat_id = default.hard_hat.hard_hat_id",
+            "join_type": "left",
+        },
+    )
+
+    response = await client_with_namespaced_roads.post(
+        "/nodes/transform",
+        json={
+            "description": "Hard hat dimension #2",
+            "query": "SELECT hard_hat_id FROM foo.bar.hard_hat",
+            "mode": "published",
+            "name": "default.hard_hat0",
+            "primary_key": ["hard_hat_id"],
+        },
+    )
+
     response = await client_with_namespaced_roads.delete("/namespaces/foo/hard/")
     assert response.json()["message"] == (
         "Cannot hard delete namespace `foo` as there are still the following nodes "
@@ -345,176 +375,59 @@ async def test_hard_delete_namespace(client_with_namespaced_roads: AsyncClient):
     )
     assert hard_delete_response.json() == {
         "impact": {
-            "foo.bar": {"namespace": "foo.bar", "status": "deleted"},
-            "foo.bar.avg_length_of_employment": [],
-            "foo.bar.avg_repair_order_discounts": [],
-            "foo.bar.avg_repair_price": [],
-            "foo.bar.avg_time_to_dispatch": [],
-            "foo.bar.baf": {"namespace": "foo.bar.baf", "status": "deleted"},
-            "foo.bar.baz": {"namespace": "foo.bar.baz", "status": "deleted"},
-            "foo.bar.bif.d": {"namespace": "foo.bar.bif.d", "status": "deleted"},
-            "foo.bar.contractor": [
-                {
-                    "effect": "broken link",
-                    "name": "foo.bar.repair_type",
-                    "status": "valid",
-                },
+            "deleted_namespaces": [
+                "foo.bar",
+                "foo.bar.baz",
+                "foo.bar.baf",
+                "foo.bar.bif.d",
             ],
-            "foo.bar.contractors": [],
-            "foo.bar.dispatcher": [
-                {
-                    "effect": "broken link",
-                    "name": "foo.bar.repair_orders",
-                    "status": "valid",
-                },
-                {
-                    "effect": "broken link",
-                    "name": "foo.bar.repair_order_details",
-                    "status": "valid",
-                },
-                {
-                    "effect": "broken link",
-                    "name": "foo.bar.num_repair_orders",
-                    "status": "valid",
-                },
-                {
-                    "effect": "broken link",
-                    "name": "foo.bar.total_repair_cost",
-                    "status": "valid",
-                },
-                {
-                    "effect": "broken link",
-                    "name": "foo.bar.total_repair_order_discounts",
-                    "status": "valid",
-                },
+            "deleted_nodes": [
+                "foo.bar.avg_length_of_employment",
+                "foo.bar.avg_repair_order_discounts",
+                "foo.bar.avg_repair_price",
+                "foo.bar.avg_time_to_dispatch",
+                "foo.bar.contractor",
+                "foo.bar.contractors",
+                "foo.bar.dispatcher",
+                "foo.bar.dispatchers",
+                "foo.bar.hard_hat",
+                "foo.bar.hard_hats",
+                "foo.bar.hard_hat_state",
+                "foo.bar.local_hard_hats",
+                "foo.bar.municipality",
+                "foo.bar.municipality_dim",
+                "foo.bar.municipality_municipality_type",
+                "foo.bar.municipality_type",
+                "foo.bar.num_repair_orders",
+                "foo.bar.repair_order",
+                "foo.bar.repair_order_details",
+                "foo.bar.repair_orders",
+                "foo.bar.repair_type",
+                "foo.bar.total_repair_cost",
+                "foo.bar.total_repair_order_discounts",
+                "foo.bar.us_region",
+                "foo.bar.us_state",
+                "foo.bar.us_states",
             ],
-            "foo.bar.dispatchers": [],
-            "foo.bar.hard_hat": [
-                {
-                    "effect": "broken link",
-                    "name": "foo.bar.repair_orders",
-                    "status": "valid",
-                },
-                {
-                    "effect": "broken link",
-                    "name": "foo.bar.repair_order_details",
-                    "status": "valid",
-                },
-                {
-                    "effect": "broken link",
-                    "name": "foo.bar.num_repair_orders",
-                    "status": "valid",
-                },
-                {
-                    "effect": "broken link",
-                    "name": "foo.bar.total_repair_cost",
-                    "status": "valid",
-                },
-                {
-                    "effect": "broken link",
-                    "name": "foo.bar.total_repair_order_discounts",
-                    "status": "valid",
-                },
-            ],
-            "foo.bar.hard_hat_state": [
-                {
-                    "effect": "downstream node is now invalid",
-                    "name": "foo.bar.local_hard_hats",
-                    "status": "invalid",
-                },
-            ],
-            "foo.bar.hard_hats": [
-                {
-                    "effect": "downstream node is now invalid",
-                    "name": "foo.bar.local_hard_hats",
-                    "status": "invalid",
-                },
-            ],
-            "foo.bar.local_hard_hats": [],
-            "foo.bar.municipality": [
-                {
-                    "effect": "downstream node is now invalid",
-                    "name": "foo.bar.municipality_dim",
-                    "status": "invalid",
-                },
-            ],
-            "foo.bar.municipality_dim": [
-                {
-                    "effect": "broken link",
-                    "name": "foo.bar.repair_orders",
-                    "status": "valid",
-                },
-                {
-                    "effect": "broken link",
-                    "name": "foo.bar.repair_order_details",
-                    "status": "valid",
-                },
-                {
-                    "effect": "broken link",
-                    "name": "foo.bar.num_repair_orders",
-                    "status": "valid",
-                },
-                {
-                    "effect": "broken link",
-                    "name": "foo.bar.total_repair_cost",
-                    "status": "valid",
-                },
-                {
-                    "effect": "broken link",
-                    "name": "foo.bar.total_repair_order_discounts",
-                    "status": "valid",
-                },
-            ],
-            "foo.bar.municipality_municipality_type": [],
-            "foo.bar.municipality_type": [],
-            "foo.bar.num_repair_orders": [],
-            "foo.bar.repair_order": [
-                {
-                    "effect": "broken link",
-                    "name": "foo.bar.total_repair_order_discounts",
-                    "status": "valid",
-                },
-                {
-                    "effect": "broken link",
-                    "name": "foo.bar.repair_orders",
-                    "status": "valid",
-                },
-                {
-                    "effect": "broken link",
-                    "name": "foo.bar.repair_order_details",
-                    "status": "valid",
-                },
-                {
-                    "effect": "broken link",
-                    "name": "foo.bar.total_repair_cost",
-                    "status": "valid",
-                },
-            ],
-            "foo.bar.repair_order_details": [
-                {
-                    "effect": "downstream node is now invalid",
-                    "name": "foo.bar.total_repair_cost",
-                    "status": "invalid",
-                },
-                {
-                    "effect": "downstream node is now invalid",
-                    "name": "foo.bar.total_repair_order_discounts",
-                    "status": "invalid",
-                },
-            ],
-            "foo.bar.repair_orders": [],
-            "foo.bar.repair_type": [],
-            "foo.bar.total_repair_cost": [],
-            "foo.bar.total_repair_order_discounts": [],
-            "foo.bar.us_region": [
-                {
-                    "effect": "downstream node is now invalid",
-                    "name": "foo.bar.us_state",
-                    "status": "invalid",
-                },
-            ],
-            "foo.bar.us_state": [],
-            "foo.bar.us_states": [],
+            "impacted": {
+                "downstreams": [
+                    {
+                        "caused_by": [
+                            "foo.bar.hard_hat",
+                            "foo.bar.hard_hats",
+                        ],
+                        "name": "default.hard_hat0",
+                    },
+                ],
+                "links": [
+                    {
+                        "caused_by": [
+                            "foo.bar.hard_hat",
+                        ],
+                        "name": "default.repair_orders_fact",
+                    },
+                ],
+            },
         },
         "message": "The namespace `foo.bar` has been completely removed.",
     }
@@ -523,7 +436,7 @@ async def test_hard_delete_namespace(client_with_namespaced_roads: AsyncClient):
     )
     assert list_namespaces_response.json() == [
         {"namespace": "basic", "num_nodes": 0},
-        {"namespace": "default", "num_nodes": 0},
+        {"namespace": "default", "num_nodes": mock.ANY},
         {"namespace": "foo", "num_nodes": 0},
     ]
 
@@ -640,6 +553,12 @@ async def test_export_namespaces(client_with_roads: AsyncClient):
         },
     )
 
+    # Deactivate one node so that it is not included in the export
+    response = await client_with_roads.delete(
+        "/nodes/default.hard_hat_to_delete",
+    )
+    assert response.status_code == HTTPStatus.OK
+
     response = await client_with_roads.get(
         "/namespaces/default/export/",
     )
@@ -714,7 +633,7 @@ async def test_export_namespaces(client_with_roads: AsyncClient):
         "hard_hat.dimension.yaml",
         "hard_hat_2.dimension.yaml",
         "hard_hat_state.source.yaml",
-        "hard_hat_to_delete.dimension.yaml",
+        # "hard_hat_to_delete.dimension.yaml", <-- this node has been deactivated
         "hard_hats.source.yaml",
         "local_hard_hats.dimension.yaml",
         "local_hard_hats_1.dimension.yaml",
@@ -740,6 +659,177 @@ async def test_export_namespaces(client_with_roads: AsyncClient):
         "repair_orders_view.source.yaml",
     }
     assert {d["directory"] for d in project_definition} == {""}
+
+
+@pytest.mark.asyncio
+async def test_export_namespaces_deployment(client_with_roads: AsyncClient):
+    # Create a cube so that the cube definition export path is tested
+    response = await client_with_roads.post(
+        "/nodes/cube/",
+        json={
+            "name": "default.example_cube",
+            "display_name": "Example Cube",
+            "description": "An example cube so that the export path is tested",
+            "metrics": ["default.num_repair_orders"],
+            "dimensions": ["default.hard_hat.city", "default.hard_hat.hire_date"],
+            "mode": "published",
+        },
+    )
+    assert response.status_code in (200, 201)
+
+    # Mark a column as a dimension attribute
+    response = await client_with_roads.post(
+        "/nodes/default.regional_level_agg/columns/location_hierarchy/attributes",
+        json=[
+            {
+                "name": "dimension",
+                "namespace": "system",
+            },
+        ],
+    )
+    assert response.status_code in (200, 201)
+
+    # Mark a column as a partition
+    await client_with_roads.post(
+        "/nodes/default.example_cube/columns/default.hard_hat.hire_date/partition",
+        json={
+            "type_": "temporal",
+            "granularity": "day",
+            "format": "yyyyMMdd",
+        },
+    )
+
+    # Deactivate one node so that it is not included in the export
+    response = await client_with_roads.delete(
+        "/nodes/default.hard_hat_to_delete",
+    )
+    assert response.status_code == HTTPStatus.OK
+
+    response = await client_with_roads.get("/namespaces/default/export/spec")
+    assert response.status_code in (200, 201)
+    data = response.json()
+    assert data["namespace"] == "default"
+    assert len(data["nodes"]) == 36
+    assert {node["name"] for node in data["nodes"]} == {
+        "${prefix}repair_orders_view",
+        "${prefix}municipality_municipality_type",
+        "${prefix}municipality_type",
+        "${prefix}municipality",
+        "${prefix}dispatchers",
+        "${prefix}example_cube",
+        "${prefix}hard_hats",
+        "${prefix}hard_hat_state",
+        "${prefix}us_states",
+        "${prefix}us_region",
+        "${prefix}contractor",
+        "${prefix}hard_hat_2",
+        # '${prefix}hard_hat_to_delete',
+        "${prefix}local_hard_hats",
+        "${prefix}local_hard_hats_1",
+        "${prefix}local_hard_hats_2",
+        "${prefix}us_state",
+        "${prefix}dispatcher",
+        "${prefix}municipality_dim",
+        "${prefix}regional_level_agg",
+        "${prefix}national_level_agg",
+        "${prefix}regional_repair_efficiency",
+        "${prefix}num_repair_orders",
+        "${prefix}avg_repair_price",
+        "${prefix}total_repair_cost",
+        "${prefix}avg_length_of_employment",
+        "${prefix}discounted_orders_rate",
+        "${prefix}total_repair_order_discounts",
+        "${prefix}avg_repair_order_discounts",
+        "${prefix}avg_time_to_dispatch",
+        "${prefix}repair_orders_fact",
+        "${prefix}repair_type",
+        "${prefix}repair_orders",
+        "${prefix}contractors",
+        "${prefix}hard_hat",
+        "${prefix}repair_order_details",
+        "${prefix}repair_order",
+    }
+
+    node_defs = {node["name"]: node for node in data["nodes"]}
+    assert node_defs["${prefix}example_cube"] == {
+        "custom_metadata": {},
+        "filters": None,
+        "owners": ["dj"],
+        "mode": "published",
+        "node_type": "cube",
+        "name": "${prefix}example_cube",
+        "columns": [
+            {
+                "attributes": [],
+                "description": None,
+                "display_name": "Num Repair Orders",
+                "name": "default.num_repair_orders",
+                "type": "bigint",
+                "partition": None,
+            },
+            {
+                "attributes": [],
+                "description": None,
+                "display_name": "City",
+                "name": "default.hard_hat.city",
+                "type": "string",
+                "partition": None,
+            },
+            {
+                "attributes": [],
+                "description": None,
+                "display_name": "Hire Date",
+                "name": "default.hard_hat.hire_date",
+                "type": "timestamp",
+                "partition": {
+                    "format": "yyyyMMdd",
+                    "granularity": "day",
+                    "type": "temporal",
+                },
+            },
+        ],
+        "description": "An example cube so that the export path is tested",
+        "dimensions": ["${prefix}hard_hat.city", "${prefix}hard_hat.hire_date"],
+        "display_name": "Example Cube",
+        "metrics": ["${prefix}num_repair_orders"],
+        "tags": [],
+    }
+    assert node_defs["${prefix}repair_orders_fact"]["dimension_links"] == [
+        {
+            "dimension_node": "${prefix}municipality_dim",
+            "join_on": "${prefix}repair_orders_fact.municipality_id = "
+            "${prefix}municipality_dim.municipality_id",
+            "join_type": "inner",
+            "type": "join",
+            "node_column": None,
+            "role": None,
+        },
+        {
+            "dimension_node": "${prefix}hard_hat",
+            "join_on": "${prefix}repair_orders_fact.hard_hat_id = ${prefix}hard_hat.hard_hat_id",
+            "join_type": "inner",
+            "type": "join",
+            "node_column": None,
+            "role": None,
+        },
+        {
+            "dimension_node": "${prefix}hard_hat_to_delete",
+            "join_on": "${prefix}repair_orders_fact.hard_hat_id = "
+            "${prefix}hard_hat_to_delete.hard_hat_id",
+            "join_type": "left",
+            "type": "join",
+            "node_column": None,
+            "role": None,
+        },
+        {
+            "dimension_node": "${prefix}dispatcher",
+            "join_on": "${prefix}repair_orders_fact.dispatcher_id = ${prefix}dispatcher.dispatcher_id",
+            "join_type": "inner",
+            "type": "join",
+            "node_column": None,
+            "role": None,
+        },
+    ]
 
 
 @pytest.mark.asyncio

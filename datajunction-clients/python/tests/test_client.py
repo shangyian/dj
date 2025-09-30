@@ -187,7 +187,10 @@ class TestDJClient:  # pylint: disable=too-many-public-methods
 
         # partial list
         nodes = client.list_transforms(namespace="foo.bar")
-        assert nodes == ["foo.bar.with_custom_metadata", "foo.bar.repair_orders_thin"]
+        assert set(nodes) == {
+            "foo.bar.with_custom_metadata",
+            "foo.bar.repair_orders_thin",
+        }
 
     def test_list_nodes(self, client):
         """
@@ -412,13 +415,12 @@ class TestDJClient:  # pylint: disable=too-many-public-methods
 
         # Retrieve sql for a node (error)
         result = client.node_sql(
-            node_name="default.repair_order_details",
-            dimensions=["default.repair_order.repair_order_id1"],
+            node_name="default.repair_order_details12",
+            dimensions=["default.repair_order.repair_order_id"],
             filters=["default.repair_order.repair_order_id = 1222"],
         )
         assert result["message"] == (
-            "default.repair_order.repair_order_id1 are not available dimensions"
-            " on default.repair_order_details"
+            "A node with name `default.repair_order_details12` does not exist."
         )
 
         # Retrieve measures sql for metrics
@@ -443,7 +445,7 @@ class TestDJClient:  # pylint: disable=too-many-public-methods
         Check that `client.list_catalogs()` works as expected.
         """
         result = client.list_catalogs()
-        assert set(result) == {"unknown", "draft", "default", "public"}
+        assert set(result) == {"dj_metadata", "draft", "default", "public"}
 
     def test_list_engines(self, client):
         """
@@ -451,6 +453,7 @@ class TestDJClient:  # pylint: disable=too-many-public-methods
         """
         result = client.list_engines()
         assert result == [
+            {"name": "dj_system", "version": ""},
             {"name": "spark", "version": "3.1.1"},
             {"name": "postgres", "version": "15.2"},
         ]
