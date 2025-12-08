@@ -10,6 +10,7 @@ from strawberry.types import Info
 
 from datajunction_server.internal.caching.cachelib_cache import get_cache
 from datajunction_server.api.graphql.queries.catalogs import list_catalogs
+from datajunction_server.api.graphql.queries.collections import list_collections
 from datajunction_server.api.graphql.queries.dag import (
     common_dimensions,
     downstream_nodes,
@@ -31,6 +32,7 @@ from datajunction_server.api.graphql.scalars.catalog_engine import (
     Engine,
     DialectInfo,
 )
+from datajunction_server.api.graphql.scalars.collection import Collection
 from datajunction_server.api.graphql.scalars.node import DimensionAttribute, Node
 from datajunction_server.api.graphql.scalars.sql import (
     GeneratedSQL,
@@ -157,6 +159,12 @@ class Query:
     list_tag_types: list[str] = strawberry.field(
         resolver=log_resolver(list_tag_types),
         description="List all DJ node tag types",
+    )
+
+    # Collections queries
+    list_collections: list[Collection] = strawberry.field(
+        resolver=log_resolver(list_collections),
+        description="List collections, optionally filtered by creator (for My Workspace).",
     )
 
 

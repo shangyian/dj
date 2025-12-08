@@ -22,7 +22,7 @@ type AvailabilityState {
   catalog: String!
   schema_: String
   table: String!
-  validThroughTs: Int!
+  validThroughTs: Union!
   url: String
   categoricalPartitions: [String!]
   temporalPartitions: [String!]
@@ -39,6 +39,16 @@ type Backfill {
 type Catalog {
   name: String!
   engines: [Engine!]
+}
+
+type Collection {
+  id: Int!
+  name: String!
+  description: String
+  createdAt: DateTime!
+  createdBy: User!
+  nodeCount: Int!
+  nodes: [Node!]!
 }
 
 type Column {
@@ -295,14 +305,14 @@ type NodeRevision {
   customMetadata: JSON
   query: String
   parents: [NodeNameVersion!]!
-  availability: AvailabilityState
-  materializations: [MaterializationConfig!]
   schema_: String
   table: String
   requiredDimensions: [Column!]
   catalog: Catalog
   columns(attributes: [String!] = null): [Column!]!
   dimensionLinks: [DimensionLink!]!
+  availability: AvailabilityState
+  materializations: [MaterializationConfig!]
   primaryKey: [String!]!
   metricMetadata: MetricMetadata
   extractedMeasures: DecomposedMetric
@@ -364,7 +374,7 @@ type PartitionAvailability {
   minTemporalPartition: [String!]
   maxTemporalPartition: [String!]
   value: [String]!
-  validThroughTs: Int
+  validThroughTs: Union
 }
 
 type PartitionBackfill {
@@ -435,6 +445,21 @@ type Query {
 
     """Filter to nodes with this mode (published or draft)"""
     mode: NodeMode = null
+
+    """Filter to nodes owned by this user"""
+    ownedBy: String = null
+
+    """Filter to nodes missing descriptions (for data quality checks)"""
+    missingDescription: Boolean! = false
+
+    """Filter to nodes without any owners (for data quality checks)"""
+    missingOwner: Boolean! = false
+
+    """Filter to nodes with these statuses (e.g., VALID, INVALID)"""
+    statuses: [NodeStatus!] = null
+
+    """Filter to nodes that have materializations configured"""
+    hasMaterialization: Boolean! = false
     after: String = null
     before: String = null
 
@@ -506,6 +531,15 @@ type Query {
 
   """List all DJ node tag types"""
   listTagTypes: [String!]!
+
+  """List collections, optionally filtered by creator (for My Workspace)."""
+  listCollections(
+    """Filter to collections created by this user"""
+    createdBy: String = null
+
+    """Limit collections"""
+    limit: Int = 100
+  ): [Collection!]!
 }
 
 type SemanticEntity {

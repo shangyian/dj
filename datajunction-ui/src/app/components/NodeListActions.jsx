@@ -36,30 +36,28 @@ export default function NodeListActions({ nodeName }) {
   };
 
   return (
-    <div>
-      <a href={`/nodes/${nodeName}/edit`} style={{ marginLeft: '0.5rem' }}>
+    <div style={{ display: 'flex', alignItems: 'flex-start', gap: '0' }}>
+      <a
+        href={`/nodes/${nodeName}/edit`}
+        className="btn-icon btn-edit"
+        title="Edit node"
+        style={{ margin: 0, padding: 0, boxShadow: 'none' }}
+      >
         {editButton}
       </a>
       <Formik initialValues={initialValues} onSubmit={deleteNode}>
         {function Render({ status, setFieldValue }) {
           return (
-            <Form className="deleteNode">
+            <Form className="deleteNode" style={{ display: 'flex', alignItems: 'flex-start' }}>
               {displayMessageAfterSubmit(status)}
-              {
-                <>
-                  <button
-                    type="submit"
-                    style={{
-                      marginLeft: 0,
-                      all: 'unset',
-                      color: '#005c72',
-                      cursor: 'pointer',
-                    }}
-                  >
-                    {deleteButton}
-                  </button>
-                </>
-              }
+              <button
+                type="submit"
+                  className="btn-icon btn-edit"
+                  title="Delete node"
+                  style={{ margin: 0, padding: 0, boxShadow: 'none' }}
+              >
+                {deleteButton}
+              </button>
             </Form>
           );
         }}

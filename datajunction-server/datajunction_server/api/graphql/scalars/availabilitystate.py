@@ -4,6 +4,8 @@ from typing import List, Optional
 
 import strawberry
 
+from datajunction_server.api.graphql.scalars import BigInt
+
 
 @strawberry.type
 class PartitionAvailability:
@@ -19,8 +21,8 @@ class PartitionAvailability:
     # a valid entry for `value` may be ["DE", null].
     value: List[Optional[str]]
 
-    # Valid through timestamp
-    valid_through_ts: Optional[int]
+    # Valid through timestamp (milliseconds, can exceed 32-bit int)
+    valid_through_ts: Optional[BigInt]
 
 
 @strawberry.type
@@ -32,7 +34,7 @@ class AvailabilityState:
     catalog: str
     schema_: Optional[str]
     table: str
-    valid_through_ts: int
+    valid_through_ts: BigInt  # Milliseconds timestamp, can exceed 32-bit int
     url: Optional[str]
 
     # An ordered list of categorical partitions like ["country", "group_id"]
