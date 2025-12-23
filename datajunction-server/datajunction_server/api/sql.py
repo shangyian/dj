@@ -164,6 +164,98 @@ async def get_sql(
     )
 
 
+@router.get(
+    "/sql/measures/v3/",
+    response_model=TranslatedSQL,
+    name="Get Measures SQL V3",
+    tags=["sql", "v3"],
+)
+async def get_measures_sql_v3(
+    metrics: List[str] = Query([]),
+    dimensions: List[str] = Query([]),
+    filters: List[str] = Query([]),
+    *,
+    session: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+) -> TranslatedSQL:
+    """
+    V3 Measures SQL generation (for testing/development).
+    
+    Returns SQL with metric expressions aggregated to the dimensional grain,
+    but without applying final metric expressions.
+    
+    This is the new Build V3 SQL generation system - see ARCHITECTURE.md
+    in datajunction_server/construction/build_v3/ for details.
+    """
+    from datajunction_server.construction.build_v3 import build_measures_sql
+    from datajunction_server.models.dialect import Dialect
+    from datajunction_server.models.query import ColumnMetadata
+    
+    result = await build_measures_sql(
+        session=session,
+        metrics=metrics,
+        dimensions=dimensions,
+        filters=filters,
+        dialect=Dialect.SPARK,
+    )
+    
+    return TranslatedSQL(
+        sql=result.sql,
+        columns=[
+            ColumnMetadata(name=col.name, type=col.type)
+            for col in result.columns
+        ],
+        dialect=result.dialect,
+    )
+
+
+@router.get(
+    "/sql/metrics/v3/",
+    response_model=TranslatedSQL,
+    name="Get Metrics SQL V3",
+    tags=["sql", "v3"],
+)
+async def get_metrics_sql_v3(
+    metrics: List[str] = Query([]),
+    dimensions: List[str] = Query([]),
+    filters: List[str] = Query([]),
+    *,
+    session: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+) -> TranslatedSQL:
+    """
+    V3 Metrics SQL generation (for testing/development).
+    
+    Returns SQL with final metric expressions applied, including
+    handling for derived metrics.
+    
+    This is the new Build V3 SQL generation system - see ARCHITECTURE.md
+    in datajunction_server/construction/build_v3/ for details.
+    
+    NOTE: Not yet implemented - will be available in Chunk 5.
+    """
+    from datajunction_server.construction.build_v3 import build_metrics_sql
+    from datajunction_server.models.dialect import Dialect
+    from datajunction_server.models.query import ColumnMetadata
+    
+    result = await build_metrics_sql(
+        session=session,
+        metrics=metrics,
+        dimensions=dimensions,
+        filters=filters,
+        dialect=Dialect.SPARK,
+    )
+    
+    return TranslatedSQL(
+        sql=result.sql,
+        columns=[
+            ColumnMetadata(name=col.name, type=col.type)
+            for col in result.columns
+        ],
+        dialect=result.dialect,
+    )
+
+
 @router.get("/sql/", response_model=TranslatedSQL, name="Get SQL For Metrics")
 async def get_sql_for_metrics(
     metrics: List[str] = Query([]),
