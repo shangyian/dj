@@ -11,7 +11,9 @@ See ARCHITECTURE.md for design documentation.
 from __future__ import annotations
 
 import logging
+from copy import deepcopy
 from dataclasses import dataclass, field
+from functools import reduce
 from typing import Optional, cast, Any
 
 from sqlalchemy import select, text, bindparam
@@ -150,15 +152,22 @@ class GrainGroupSQL:
     - FULL: aggregates to requested dimensions
     - LIMITED: aggregates to requested dimensions + level columns
     - NONE: stays at native grain (primary key)
+
+    The query is stored as an AST object. Use the `sql` property to render to string.
     """
 
-    sql: str
+    query: ast.Query  # AST object - only convert to string at API boundary
     columns: list[ColumnMetadata]
     grain: list[
         str
     ]  # Column names in GROUP BY (beyond requested dims for LIMITED/NONE)
     aggregability: Aggregability
     metrics: list[str]  # Metric names covered by this grain group
+
+    @property
+    def sql(self) -> str:
+        """Render the query AST to SQL string."""
+        return str(self.query)
 
 
 @dataclass
@@ -184,11 +193,18 @@ class GeneratedSQL:
 
     This is the final, executable SQL that combines all grain groups
     and applies final metric expressions.
+
+    The query is stored as an AST object. Use the `sql` property to render to string.
     """
 
-    sql: str
+    query: ast.Query  # AST object - only convert to string at API boundary
     columns: list[ColumnMetadata]
     dialect: Dialect
+
+    @property
+    def sql(self) -> str:
+        """Render the query AST to SQL string."""
+        return str(self.query)
 
 
 @dataclass
@@ -2236,8 +2252,6 @@ def build_grain_group_sql(
         grain_columns=effective_grain_columns,
     )
 
-    sql_str = str(query_ast)
-
     # Build column metadata
     columns_metadata = []
 
@@ -2327,7 +2341,7 @@ def build_grain_group_sql(
     full_grain.sort()
 
     return GrainGroupSQL(
-        sql=sql_str,
+        query=query_ast,
         columns=columns_metadata,
         grain=full_grain,
         aggregability=grain_group.aggregability,
@@ -2528,18 +2542,12 @@ async def build_metrics_sql(
     # Step 4: Build metric dependency DAG and compute layers
     metric_layers = compute_metric_layers(ctx, decomposed_metrics)
 
-    # Step 5: Generate the combined SQL
-    sql, columns = generate_metrics_sql(
+    # Step 5: Generate the combined SQL (returns GeneratedSQL with AST query)
+    return generate_metrics_sql(
         ctx,
         measures_result,
         decomposed_metrics,
         metric_layers,
-    )
-
-    return GeneratedSQL(
-        sql=sql,
-        columns=columns,
-        dialect=dialect,
     )
 
 
@@ -2602,61 +2610,75 @@ def generate_metrics_sql(
     measures_result: GeneratedMeasuresSQL,
     decomposed_metrics: dict[str, DecomposedMetricInfo],
     metric_layers: list[list[str]],
-) -> tuple[str, list[ColumnMetadata]]:
+) -> GeneratedSQL:
     """
     Generate the final metrics SQL query.
 
     This combines grain groups from measures SQL and applies
     combiner expressions for each metric. Works for both single
     and multiple grain groups (FULL OUTER JOINs them together).
+
+    Works entirely with AST objects - no string parsing needed.
+    Returns a GeneratedSQL with the query as an AST.
     """
     grain_groups = measures_result.grain_groups
     dimensions = measures_result.requested_dimensions
+
     # For cross-fact or cross-aggregability queries, we need to:
-    # 1. Extract CTEs from each grain group and flatten them
+    # 1. Extract CTEs from each grain group and flatten them (with prefixes)
     # 2. Create a final CTE for each grain group's main SELECT
     # 3. FULL OUTER JOIN them on the common dimensions
     # 4. Apply combiner expressions in the final SELECT
 
-    all_ctes: list[str] = []
+    all_cte_asts: list[ast.Query] = []
     cte_aliases: list[str] = []
 
     for i, gg in enumerate(grain_groups):
         alias = f"gg{i}"
         cte_aliases.append(alias)
-        gg_sql = gg.sql.strip()
 
-        # Parse the grain group SQL to extract any CTEs
-        gg_ast = parse(gg_sql)
+        # gg.query is already an AST - no need to parse!
+        gg_query = gg.query
 
-        if gg_ast.ctes:
+        if gg_query.ctes:
             # Extract existing CTEs with prefixed names to avoid collisions
-            for cte in gg_ast.ctes:
-                cte_name = str(cte.alias) if cte.alias else "unnamed_cte"
-                # Prefix with grain group alias to avoid name collisions
+            for inner_cte in gg_query.ctes:
+                cte_name = str(inner_cte.alias) if inner_cte.alias else "unnamed_cte"
                 prefixed_name = f"{alias}_{cte_name}"
-                # Get the CTE body
-                cte.alias = None
-                cte.parenthesized = False
-                cte_body = str(cte)
-                all_ctes.append(f"{prefixed_name} AS (\n{cte_body}\n)")
 
-            # Get the main SELECT (without CTEs) and update table references
-            gg_ast.ctes = []
-            main_select = str(gg_ast)
-            # Replace original CTE names with prefixed names
-            for cte in parse(gg_sql).ctes:
-                original_name = str(cte.alias) if cte.alias else "unnamed_cte"
+                # Clone the CTE and update its alias to the prefixed name
+                prefixed_cte = deepcopy(inner_cte)
+                prefixed_cte.alias = ast.Name(prefixed_name)
+                all_cte_asts.append(prefixed_cte)
+
+            # Build the grain group CTE (main SELECT with updated table refs)
+            # Clone the query and clear its CTEs
+            gg_main = deepcopy(gg_query)
+            gg_main.ctes = []
+
+            # Update table references in the main SELECT to use prefixed CTE names
+            for inner_cte in gg_query.ctes:
+                original_name = (
+                    str(inner_cte.alias) if inner_cte.alias else "unnamed_cte"
+                )
                 prefixed_name = f"{alias}_{original_name}"
-                main_select = main_select.replace(original_name, prefixed_name)
+                # Find and update table references
+                for table in gg_main.find_all(ast.Table):
+                    if hasattr(table, "name") and str(table.name) == original_name:
+                        table.name = ast.Name(prefixed_name)
 
-            all_ctes.append(f"{alias} AS (\n{main_select}\n)")
+            # Convert to CTE with the grain group alias
+            gg_main.to_cte(ast.Name(alias), None)
+            all_cte_asts.append(gg_main)
         else:
-            # No CTEs - just wrap the query directly
-            all_ctes.append(f"{alias} AS (\n{gg_sql}\n)")
+            # No inner CTEs - just convert the query to a CTE directly
+            gg_cte = deepcopy(gg_query)
+            gg_cte.to_cte(ast.Name(alias), None)
+            all_cte_asts.append(gg_cte)
 
-    # Build projection
-    projection: list[str] = []
+    # Build projection as AST expressions
+    # Use Any type since projection accepts Union[Aliasable, Expression, Column]
+    projection: list[Any] = []
     columns_metadata: list[ColumnMetadata] = []
 
     # Parse dimensions to get column names and preserve mapping to original refs
@@ -2669,8 +2691,16 @@ def generate_metrics_sql(
 
     # Add dimension columns using COALESCE across all grain groups
     for original_dim_ref, dim_col in dim_info:
-        coalesce_parts = [f"{alias}.{dim_col}" for alias in cte_aliases]
-        projection.append(f"COALESCE({', '.join(coalesce_parts)}) AS {dim_col}")
+        # Build COALESCE(gg0.col, gg1.col, ...) AS col
+        coalesce_args: list[ast.Expression] = [
+            ast.Column(name=ast.Name(dim_col), _table=ast.Table(ast.Name(alias)))
+            for alias in cte_aliases
+        ]
+        coalesce_func = ast.Function(ast.Name("COALESCE"), args=coalesce_args)
+        aliased_coalesce = coalesce_func.set_alias(ast.Name(dim_col))
+        aliased_coalesce.set_as(True)  # Include "AS" in output
+        projection.append(aliased_coalesce)
+
         columns_metadata.append(
             ColumnMetadata(
                 name=dim_col,
@@ -2683,7 +2713,7 @@ def generate_metrics_sql(
     # Build maps for resolving references in derived metric expressions:
     # 1. base_metric_columns: metric_name -> (gg_alias, output_col_name)
     # 2. component_columns: component_name -> (gg_alias, actual_col_name)
-    # 3. base_metric_exprs: metric_name -> SQL expression (for use in derived metrics)
+    # 3. base_metric_exprs: metric_name -> SQL expression string (for use in derived metrics)
     base_metric_columns: dict[str, tuple[str, str]] = {}
     component_columns: dict[str, tuple[str, str]] = {}
     base_metric_exprs: dict[str, str] = {}  # For building derived metric expressions
@@ -2719,7 +2749,11 @@ def generate_metrics_sql(
 
                 # Only add to projection if explicitly requested
                 if is_explicitly_requested:
-                    projection.append(f"{combiner_expr} AS {short_name}")
+                    # Parse the expression and add alias
+                    expr_ast = parse(f"SELECT {combiner_expr}").select.projection[0]
+                    aliased_expr = expr_ast.set_alias(ast.Name(short_name))
+                    aliased_expr.set_as(True)
+                    projection.append(aliased_expr)
                     columns_metadata.append(
                         ColumnMetadata(
                             name=short_name,
@@ -2760,9 +2794,15 @@ def generate_metrics_sql(
                     # Only add to projection if explicitly requested
                     if is_explicitly_requested:
                         if decomposed.aggregability == Aggregability.LIMITED:
-                            projection.append(f"{agg_expr} AS {short_name}")
+                            expr_ast = parse(f"SELECT {agg_expr}").select.projection[0]
                         else:
-                            projection.append(f"{alias}.{actual_col} AS {short_name}")
+                            expr_ast = ast.Column(
+                                name=ast.Name(actual_col),
+                                _table=ast.Table(ast.Name(alias)),
+                            )
+                        aliased_expr = expr_ast.set_alias(ast.Name(short_name))
+                        aliased_expr.set_as(True)
+                        projection.append(aliased_expr)
                         columns_metadata.append(
                             ColumnMetadata(
                                 name=short_name,
@@ -2780,7 +2820,13 @@ def generate_metrics_sql(
 
                     # Only add to projection if explicitly requested
                     if is_explicitly_requested:
-                        projection.append(f"{alias}.{col_name} AS {short_name}")
+                        expr_ast = ast.Column(
+                            name=ast.Name(col_name),
+                            _table=ast.Table(ast.Name(alias)),
+                        )
+                        aliased_expr = expr_ast.set_alias(ast.Name(short_name))
+                        aliased_expr.set_as(True)
+                        projection.append(aliased_expr)
                         columns_metadata.append(
                             ColumnMetadata(
                                 name=short_name,
@@ -2817,7 +2863,11 @@ def generate_metrics_sql(
         for comp_name, (gg_alias, col_name) in component_columns.items():
             combiner_expr = combiner_expr.replace(comp_name, f"{gg_alias}.{col_name}")
 
-        projection.append(f"{combiner_expr} AS {short_name}")
+        # Parse the expression and add alias
+        expr_ast = parse(f"SELECT {combiner_expr}").select.projection[0]
+        aliased_expr = expr_ast.set_alias(ast.Name(short_name))
+        aliased_expr.set_as(True)
+        projection.append(aliased_expr)
         columns_metadata.append(
             ColumnMetadata(
                 name=short_name,
@@ -2827,28 +2877,58 @@ def generate_metrics_sql(
             ),
         )
 
-    # Build JOIN clause
-    # Use FULL OUTER JOIN on dimension columns
+    # Build FROM clause with JOINs as AST
     dim_col_aliases = [col_alias for _, col_alias in dim_info]
-    from_clause = cte_aliases[0]
+
+    # Build JOIN extensions for the Relation
+    join_extensions: list[ast.Join] = []
     for i in range(1, len(cte_aliases)):
-        join_conditions = [
-            f"{cte_aliases[0]}.{dim_col} = {cte_aliases[i]}.{dim_col}"
-            for dim_col in dim_col_aliases
-        ]
-        from_clause += (
-            f"\nFULL OUTER JOIN {cte_aliases[i]} ON {' AND '.join(join_conditions)}"
+        # Build join condition: gg0.dim1 = ggN.dim1 AND gg0.dim2 = ggN.dim2 ...
+        conditions: list[ast.Expression] = []
+        for dim_col in dim_col_aliases:
+            left_col = ast.Column(
+                name=ast.Name(dim_col),
+                _table=ast.Table(ast.Name(cte_aliases[0])),
+            )
+            right_col = ast.Column(
+                name=ast.Name(dim_col),
+                _table=ast.Table(ast.Name(cte_aliases[i])),
+            )
+            conditions.append(ast.BinaryOp.Eq(left_col, right_col))
+
+        # Combine conditions with AND
+        if len(conditions) == 1:
+            on_clause = conditions[0]
+        else:
+            on_clause = reduce(lambda a, b: ast.BinaryOp.And(a, b), conditions)
+
+        # Build the JOIN with criteria
+        join_extensions.append(
+            ast.Join(
+                right=ast.Table(ast.Name(cte_aliases[i])),
+                criteria=ast.JoinCriteria(on=on_clause),
+                join_type="FULL OUTER",
+            ),
         )
 
-    # Build the SQL
-    cte_separator = ",\n"
-    ctes_joined = cte_separator.join(all_ctes)
-    projection_joined = ", ".join(projection)
-    sql = f"""
-WITH
-{ctes_joined}
-SELECT {projection_joined}
-FROM {from_clause}
-"""
+    # Build the FROM clause as a Relation with primary table and join extensions
+    from_clause = ast.From(
+        relations=[
+            ast.Relation(
+                primary=ast.Table(ast.Name(cte_aliases[0])),
+                extensions=join_extensions,
+            ),
+        ],
+    )
 
-    return sql.strip() + "\n", columns_metadata
+    # Build the final SELECT
+    select_ast = ast.Select(projection=projection, from_=from_clause)
+
+    # Build the final Query with all CTEs
+    final_query = ast.Query(select=select_ast, ctes=all_cte_asts)
+
+    return GeneratedSQL(
+        query=final_query,
+        columns=columns_metadata,
+        dialect=measures_result.dialect,
+    )
