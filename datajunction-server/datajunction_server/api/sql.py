@@ -7,6 +7,7 @@ from http import HTTPStatus
 from typing import List, Optional
 
 from fastapi import BackgroundTasks, Depends, Query, Request
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from datajunction_server.internal.caching.cachelib_cache import get_cache
@@ -26,6 +27,7 @@ from datajunction_server.internal.access.authorization import validate_access
 from datajunction_server.models import access
 from datajunction_server.models.metric import TranslatedSQL
 from datajunction_server.models.node_type import NodeType
+from datajunction_server.models.query import ColumnMetadata
 from datajunction_server.models.sql import GeneratedSQL
 from datajunction_server.utils import (
     get_current_user,
@@ -164,9 +166,27 @@ async def get_sql(
     )
 
 
+class GrainGroupResponse(BaseModel):
+    """Response model for a single grain group in measures SQL."""
+
+    sql: str
+    columns: List[ColumnMetadata]
+    grain: List[str]
+    aggregability: str
+    metrics: List[str]
+
+
+class MeasuresSQLResponse(BaseModel):
+    """Response model for V3 measures SQL with multiple grain groups."""
+
+    grain_groups: List[GrainGroupResponse]
+    dialect: Optional[str] = None
+    requested_dimensions: List[str]
+
+
 @router.get(
     "/sql/measures/v3/",
-    response_model=TranslatedSQL,
+    response_model=MeasuresSQLResponse,
     name="Get Measures SQL V3",
     tags=["sql", "v3"],
 )
@@ -177,19 +197,23 @@ async def get_measures_sql_v3(
     *,
     session: AsyncSession = Depends(get_session),
     current_user: User = Depends(get_current_user),
-) -> TranslatedSQL:
+) -> MeasuresSQLResponse:
     """
     V3 Measures SQL generation (for testing/development).
 
-    Returns SQL with metric expressions aggregated to the dimensional grain,
-    but without applying final metric expressions.
+    Returns SQL with metric expressions aggregated to dimensional grain,
+    with one SQL query per grain group. Different aggregability levels
+    (FULL, LIMITED, NONE) produce different grain groups.
+
+    Use cases:
+    - Materialization: Each grain group can be materialized separately
+    - Live queries: Pass to /sql/metrics/v3/ to get a single combined query
 
     This is the new Build V3 SQL generation system - see ARCHITECTURE.md
     in datajunction_server/construction/build_v3/ for details.
     """
     from datajunction_server.construction.build_v3 import build_measures_sql
     from datajunction_server.models.dialect import Dialect
-    from datajunction_server.models.query import ColumnMetadata
 
     result = await build_measures_sql(
         session=session,
@@ -199,18 +223,29 @@ async def get_measures_sql_v3(
         dialect=Dialect.SPARK,
     )
 
-    return TranslatedSQL(
-        sql=result.sql,
-        columns=[
-            ColumnMetadata(
-                name=col.name,
-                type=col.type,
-                semantic_entity=col.semantic_name,
-                semantic_type=col.semantic_type,
+    return MeasuresSQLResponse(
+        grain_groups=[
+            GrainGroupResponse(
+                sql=gg.sql,
+                columns=[
+                    ColumnMetadata(
+                        name=col.name,
+                        type=col.type,
+                        semantic_entity=col.semantic_name,
+                        semantic_type=col.semantic_type,
+                    )
+                    for col in gg.columns
+                ],
+                grain=gg.grain,
+                aggregability=gg.aggregability.value
+                if hasattr(gg.aggregability, "value")
+                else str(gg.aggregability),
+                metrics=gg.metrics,
             )
-            for col in result.columns
+            for gg in result.grain_groups
         ],
-        dialect=result.dialect,
+        dialect=str(result.dialect) if result.dialect else None,
+        requested_dimensions=result.requested_dimensions,
     )
 
 
@@ -241,9 +276,7 @@ async def get_metrics_sql_v3(
     """
     from datajunction_server.construction.build_v3 import build_metrics_sql
     from datajunction_server.models.dialect import Dialect
-    from datajunction_server.models.query import ColumnMetadata
     from datajunction_server.errors import DJException
-    from http import HTTPStatus
 
     try:
         result = await build_metrics_sql(

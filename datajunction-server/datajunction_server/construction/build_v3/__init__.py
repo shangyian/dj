@@ -35,6 +35,8 @@ from datajunction_server.construction.build_v3.builder import (
     build_metrics_sql,
     BuildContext,
     GeneratedSQL,
+    GeneratedMeasuresSQL,
+    GrainGroupSQL,
     ColumnMetadata,
 )
 from datajunction_server.construction.build_v3.alias_registry import (
@@ -49,6 +51,8 @@ __all__ = [
     # Context and types
     "BuildContext",
     "GeneratedSQL",
+    "GeneratedMeasuresSQL",
+    "GrainGroupSQL",
     "ColumnMetadata",
     # Alias registry
     "AliasRegistry",

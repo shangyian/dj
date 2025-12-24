@@ -3329,6 +3329,10 @@ BUILD_V3 = (  # type: ignore
             "mode": "published",
         },
     ),
+    # Note: NONE aggregability metrics (e.g., MEDIAN) cannot be added currently because
+    # the MEDIAN function class in DJ doesn't have is_aggregation = True, which causes
+    # metric validation to fail. This should be fixed in functions.py.
+    # TODO: Add NONE aggregability metric once MEDIAN is properly registered as aggregate.
     # =========================================================================
     # Base Metrics - On page_views_enriched
     # =========================================================================

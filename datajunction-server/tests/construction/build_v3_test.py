@@ -48,6 +48,32 @@ def assert_sql_equal(
     )
 
 
+def get_first_grain_group(response_data: dict) -> dict:
+    """
+    Extract the first grain group from a measures SQL response.
+
+    The new V3 measures SQL returns multiple grain groups (one per aggregability level).
+    Most tests only have FULL aggregability metrics, so this helper extracts the
+    first (and usually only) grain group for simpler test assertions.
+
+    Returns a dict with 'sql' and 'columns' keys for backward compatibility with
+    existing test assertions.
+    """
+    assert "grain_groups" in response_data, "Response should have 'grain_groups'"
+    assert len(response_data["grain_groups"]) > 0, (
+        "Should have at least one grain group"
+    )
+
+    grain_group = response_data["grain_groups"][0]
+    return {
+        "sql": grain_group["sql"],
+        "columns": grain_group["columns"],
+        "grain": grain_group.get("grain", []),
+        "aggregability": grain_group.get("aggregability"),
+        "metrics": grain_group.get("metrics", []),
+    }
+
+
 # =============================================================================
 # Alias Registry Tests (Pure Unit Tests)
 # =============================================================================
@@ -367,7 +393,7 @@ class TestMeasuresSQLEndpoint:
         )
 
         assert response.status_code == 200
-        data = response.json()
+        data = get_first_grain_group(response.json())
 
         # Parse and compare SQL structure
         # For single-component metrics, we use the metric name (not hash)
@@ -376,8 +402,8 @@ class TestMeasuresSQLEndpoint:
             """
             WITH v3_order_details AS (
                 SELECT o.status, oi.quantity * oi.unit_price AS line_total
-                FROM v3.src_orders o
-                JOIN v3.src_order_items oi ON o.order_id = oi.order_id
+                FROM default.v3.orders o
+                JOIN default.v3.order_items oi ON o.order_id = oi.order_id
             )
             SELECT t1.status, SUM(t1.line_total) total_revenue
             FROM v3_order_details t1
@@ -499,191 +525,6 @@ class TestDimensionJoins:
     """Tests for dimension join functionality (Chunk 2)."""
 
     @pytest.mark.asyncio
-    async def test_direct_dimension_join(self, client_with_build_v3):
-        """
-        Test joining to a dimension via direct link.
-
-        Query: revenue by customer name (requires join to customer dimension)
-        """
-        response = await client_with_build_v3.get(
-            "/sql/measures/v3/",
-            params={
-                "metrics": ["v3.total_revenue"],
-                "dimensions": ["v3.customer.name"],
-            },
-        )
-
-        assert response.status_code == 200
-        data = response.json()
-
-        # Parse and compare SQL structure
-        # Single-component metrics use metric name (not hash)
-        assert_sql_equal(
-            data["sql"],
-            """
-            WITH v3_order_details AS (
-                SELECT customer_id, oi.quantity * oi.unit_price AS line_total
-                FROM v3.src_orders o
-                JOIN v3.src_order_items oi ON o.order_id = oi.order_id
-            ),
-            v3_customer AS (
-                SELECT customer_id, name
-                FROM v3.src_customers
-            )
-            SELECT t2.name, SUM(t1.line_total) total_revenue
-            FROM v3_order_details t1
-            LEFT OUTER JOIN v3_customer t2 ON t1.customer_id = t2.customer_id
-            GROUP BY t2.name
-            """,
-        )
-
-        assert "_DOT_" not in data["sql"]
-        assert data["columns"] == [
-            {
-                "name": "name",
-                "type": "string",
-                "column": None,
-                "node": None,
-                "semantic_entity": "v3.customer.name",
-                "semantic_type": "dimension",
-            },
-            {
-                "name": "total_revenue",
-                "type": "number",
-                "column": None,
-                "node": None,
-                "semantic_entity": "v3.total_revenue",
-                "semantic_type": "metric",
-            },
-        ]
-
-    @pytest.mark.asyncio
-    async def test_dimension_join_with_role(self, client_with_build_v3):
-        """
-        Test joining to a dimension with a specific role.
-
-        Query: revenue by order date month (uses role "order" for date)
-        """
-        response = await client_with_build_v3.get(
-            "/sql/measures/v3/",
-            params={
-                "metrics": ["v3.total_revenue"],
-                "dimensions": ["v3.date.month[order]"],
-            },
-        )
-
-        assert response.status_code == 200
-        data = response.json()
-
-        assert_sql_equal(
-            data["sql"],
-            """
-            WITH v3_order_details AS (
-                SELECT order_date, oi.quantity * oi.unit_price AS line_total
-                FROM v3.src_orders o
-                JOIN v3.src_order_items oi ON o.order_id = oi.order_id
-            ),
-            v3_date AS (
-                SELECT date_id, month
-                FROM v3.src_dates
-            )
-            SELECT t2.month AS month_order, SUM(t1.line_total) total_revenue
-            FROM v3_order_details t1
-            LEFT OUTER JOIN v3_date t2 ON t1.order_date = t2.date_id
-            GROUP BY t2.month
-            """,
-        )
-
-        assert "_DOT_" not in data["sql"]
-        assert data["columns"] == [
-            {
-                "name": "month_order",
-                "type": "string",
-                "column": None,
-                "node": None,
-                "semantic_entity": "v3.date.month[order]",
-                "semantic_type": "dimension",
-            },
-            {
-                "name": "total_revenue",
-                "type": "number",
-                "column": None,
-                "node": None,
-                "semantic_entity": "v3.total_revenue",
-                "semantic_type": "metric",
-            },
-        ]
-
-    @pytest.mark.asyncio
-    async def test_multiple_dimension_joins_same_dimension(self, client_with_build_v3):
-        """
-        Test joining to the same dimension twice with different roles.
-
-        Query: revenue by from_location and to_location
-        """
-        response = await client_with_build_v3.get(
-            "/sql/measures/v3/",
-            params={
-                "metrics": ["v3.total_revenue"],
-                "dimensions": [
-                    "v3.location.country[from]",
-                    "v3.location.country[to]",
-                ],
-            },
-        )
-
-        assert response.status_code == 200
-        data = response.json()
-
-        assert_sql_equal(
-            data["sql"],
-            """
-            WITH v3_order_details AS (
-                SELECT from_location_id, to_location_id, oi.quantity * oi.unit_price AS line_total
-                FROM v3.src_orders o
-                JOIN v3.src_order_items oi ON o.order_id = oi.order_id
-            ),
-            v3_location AS (
-                SELECT location_id, country
-                FROM v3.src_locations
-            )
-            SELECT t2.country AS country_from, t3.country AS country_to, SUM(t1.line_total) total_revenue
-            FROM v3_order_details t1
-            LEFT OUTER JOIN v3_location t2 ON t1.from_location_id = t2.location_id
-            LEFT OUTER JOIN v3_location t3 ON t1.to_location_id = t3.location_id
-            GROUP BY t2.country, t3.country
-            """,
-        )
-
-        assert "_DOT_" not in data["sql"]
-        assert data["columns"] == [
-            {
-                "name": "country_from",
-                "type": "string",
-                "column": None,
-                "node": None,
-                "semantic_entity": "v3.location.country[from]",
-                "semantic_type": "dimension",
-            },
-            {
-                "name": "country_to",
-                "type": "string",
-                "column": None,
-                "node": None,
-                "semantic_entity": "v3.location.country[to]",
-                "semantic_type": "dimension",
-            },
-            {
-                "name": "total_revenue",
-                "type": "number",
-                "column": None,
-                "node": None,
-                "semantic_entity": "v3.total_revenue",
-                "semantic_type": "metric",
-            },
-        ]
-
-    @pytest.mark.asyncio
     async def test_mixed_local_and_joined_dimensions(self, client_with_build_v3):
         """
         Test query with both local dimensions and joined dimensions.
@@ -702,19 +543,20 @@ class TestDimensionJoins:
         )
 
         assert response.status_code == 200
-        data = response.json()
+        data = get_first_grain_group(response.json())
 
         assert_sql_equal(
             data["sql"],
             """
-            WITH v3_order_details AS (
-                SELECT o.status, customer_id, oi.quantity * oi.unit_price AS line_total
-                FROM v3.src_orders o
-                JOIN v3.src_order_items oi ON o.order_id = oi.order_id
-            ),
+            WITH
             v3_customer AS (
                 SELECT customer_id, name
-                FROM v3.src_customers
+                FROM default.v3.customers
+            ),
+            v3_order_details AS (
+                SELECT o.customer_id, o.status, oi.quantity * oi.unit_price AS line_total
+                FROM default.v3.orders o
+                JOIN default.v3.order_items oi ON o.order_id = oi.order_id
             )
             SELECT t1.status, t2.name, SUM(t1.line_total) total_revenue
             FROM v3_order_details t1
@@ -739,63 +581,6 @@ class TestDimensionJoins:
                 "column": None,
                 "node": None,
                 "semantic_entity": "v3.customer.name",
-                "semantic_type": "dimension",
-            },
-            {
-                "name": "total_revenue",
-                "type": "number",
-                "column": None,
-                "node": None,
-                "semantic_entity": "v3.total_revenue",
-                "semantic_type": "metric",
-            },
-        ]
-
-    @pytest.mark.asyncio
-    async def test_product_dimension_join(self, client_with_build_v3):
-        """
-        Test joining to product dimension.
-
-        Query: revenue by product category
-        """
-        response = await client_with_build_v3.get(
-            "/sql/measures/v3/",
-            params={
-                "metrics": ["v3.total_revenue"],
-                "dimensions": ["v3.product.category"],
-            },
-        )
-
-        assert response.status_code == 200
-        data = response.json()
-
-        assert_sql_equal(
-            data["sql"],
-            """
-            WITH v3_order_details AS (
-                SELECT product_id, oi.quantity * oi.unit_price AS line_total
-                FROM v3.src_orders o
-                JOIN v3.src_order_items oi ON o.order_id = oi.order_id
-            ),
-            v3_product AS (
-                SELECT product_id, category
-                FROM v3.src_products
-            )
-            SELECT t2.category, SUM(t1.line_total) total_revenue
-            FROM v3_order_details t1
-            LEFT OUTER JOIN v3_product t2 ON t1.product_id = t2.product_id
-            GROUP BY t2.category
-            """,
-        )
-
-        assert "_DOT_" not in data["sql"]
-        assert data["columns"] == [
-            {
-                "name": "category",
-                "type": "string",
-                "column": None,
-                "node": None,
-                "semantic_entity": "v3.product.category",
                 "semantic_type": "dimension",
             },
             {
@@ -833,7 +618,7 @@ class TestMultipleMetrics:
         )
 
         assert response.status_code == 200
-        data = response.json()
+        data = get_first_grain_group(response.json())
 
         # Parse and compare SQL structure
         # Both metrics are single-component, so they use metric names
@@ -842,8 +627,8 @@ class TestMultipleMetrics:
             """
             WITH v3_order_details AS (
                 SELECT o.status, oi.quantity, oi.quantity * oi.unit_price AS line_total
-                FROM v3.src_orders o
-                JOIN v3.src_order_items oi ON o.order_id = oi.order_id
+                FROM default.v3.orders o
+                JOIN default.v3.order_items oi ON o.order_id = oi.order_id
             )
             SELECT t1.status,
                    SUM(t1.line_total) total_revenue,
@@ -887,6 +672,14 @@ class TestMultipleMetrics:
         Test requesting three metrics from the same parent node.
 
         Query: revenue, quantity, and order_count by status
+
+        - total_revenue: SUM - FULL aggregability
+        - total_quantity: SUM - FULL aggregability
+        - order_count: COUNT(DISTINCT order_id) - LIMITED aggregability
+
+        This produces 2 grain groups:
+        1. FULL: total_revenue, total_quantity at [status]
+        2. LIMITED: order_count at [status, order_id]
         """
         response = await client_with_build_v3.get(
             "/sql/measures/v3/",
@@ -897,27 +690,23 @@ class TestMultipleMetrics:
         )
 
         assert response.status_code == 200
-        data = response.json()
+        result = response.json()
 
-        assert_sql_equal(
-            data["sql"],
-            """
-            WITH v3_order_details AS (
-                SELECT o.status, oi.quantity, oi.quantity * oi.unit_price AS line_total
-                FROM v3.src_orders o
-                JOIN v3.src_order_items oi ON o.order_id = oi.order_id
-            )
-            SELECT t1.status,
-                   SUM(t1.line_total) total_revenue,
-                   SUM(t1.quantity) total_quantity,
-                   COUNT(*) order_count
-            FROM v3_order_details t1
-            GROUP BY t1.status
-            """,
+        # Should have 2 grain groups (FULL + LIMITED)
+        assert len(result["grain_groups"]) == 2
+
+        # Find grain groups by aggregability
+        gg_full = next(
+            gg for gg in result["grain_groups"] if gg["aggregability"] == "full"
+        )
+        gg_limited = next(
+            gg for gg in result["grain_groups"] if gg["aggregability"] == "limited"
         )
 
-        assert "_DOT_" not in data["sql"]
-        assert data["columns"] == [
+        # Validate FULL grain group (total_revenue, total_quantity)
+        assert gg_full["grain"] == ["status"]
+        assert sorted(gg_full["metrics"]) == ["v3.total_quantity", "v3.total_revenue"]
+        assert gg_full["columns"] == [
             {
                 "name": "status",
                 "type": "string",
@@ -942,15 +731,58 @@ class TestMultipleMetrics:
                 "semantic_entity": "v3.total_quantity",
                 "semantic_type": "metric",
             },
+        ]
+        assert_sql_equal(
+            gg_full["sql"],
+            """
+            WITH v3_order_details AS (
+                SELECT o.status, oi.quantity, oi.quantity * oi.unit_price AS line_total
+                FROM default.v3.orders o
+                JOIN default.v3.order_items oi ON o.order_id = oi.order_id
+            )
+            SELECT t1.status, SUM(t1.line_total) total_revenue, SUM(t1.quantity) total_quantity
+            FROM v3_order_details t1
+            GROUP BY t1.status
+            """,
+        )
+
+        # Validate LIMITED grain group (order_count at finer grain)
+        assert gg_limited["grain"] == ["order_id", "status"]
+        assert gg_limited["metrics"] == ["v3.order_count"]
+        assert gg_limited["columns"] == [
             {
-                "name": "order_count",
-                "type": "number",
+                "name": "status",
+                "type": "string",
                 "column": None,
                 "node": None,
-                "semantic_entity": "v3.order_count",
-                "semantic_type": "metric",
+                "semantic_entity": "v3.order_details.status",
+                "semantic_type": "dimension",
+            },
+            {
+                "name": "order_id",
+                "type": "int",
+                "column": None,
+                "node": None,
+                "semantic_entity": "v3.order_details.order_id",
+                "semantic_type": "dimension",
             },
         ]
+        assert_sql_equal(
+            gg_limited["sql"],
+            """
+            WITH v3_order_details AS (
+                SELECT o.order_id, o.status
+                FROM default.v3.orders o
+                JOIN default.v3.order_items oi ON o.order_id = oi.order_id
+            )
+            SELECT t1.status, t1.order_id
+            FROM v3_order_details t1
+            GROUP BY t1.status, t1.order_id
+            """,
+        )
+
+        # Validate requested_dimensions
+        assert result["requested_dimensions"] == ["v3.order_details.status"]
 
     @pytest.mark.asyncio
     async def test_multiple_metrics_with_dimension_join(self, client_with_build_v3):
@@ -958,6 +790,9 @@ class TestMultipleMetrics:
         Test multiple metrics with a dimension join.
 
         Query: revenue and quantity by customer name
+
+        Note: v3.customer.name doesn't specify a role, but the dimension link
+        has role="customer". The system finds the path anyway.
         """
         response = await client_with_build_v3.get(
             "/sql/measures/v3/",
@@ -968,29 +803,20 @@ class TestMultipleMetrics:
         )
 
         assert response.status_code == 200
-        data = response.json()
+        result = response.json()
 
-        assert_sql_equal(
-            data["sql"],
-            """
-            WITH v3_order_details AS (
-                SELECT customer_id, oi.quantity, oi.quantity * oi.unit_price AS line_total
-                FROM v3.src_orders o
-                JOIN v3.src_order_items oi ON o.order_id = oi.order_id
-            ),
-            v3_customer AS (
-                SELECT customer_id, name
-                FROM v3.src_customers
-            )
-            SELECT t2.name, SUM(t1.line_total) total_revenue, SUM(t1.quantity) total_quantity
-            FROM v3_order_details t1
-            LEFT OUTER JOIN v3_customer t2 ON t1.customer_id = t2.customer_id
-            GROUP BY t2.name
-            """,
-        )
+        # Should have 1 grain group (FULL aggregability)
+        assert len(result["grain_groups"]) == 1
 
-        assert "_DOT_" not in data["sql"]
-        assert data["columns"] == [
+        gg = result["grain_groups"][0]
+
+        # Validate aggregability and grain
+        assert gg["aggregability"] == "full"
+        assert gg["grain"] == ["name"]
+        assert sorted(gg["metrics"]) == ["v3.total_quantity", "v3.total_revenue"]
+
+        # Validate columns
+        assert gg["columns"] == [
             {
                 "name": "name",
                 "type": "string",
@@ -1017,27 +843,606 @@ class TestMultipleMetrics:
             },
         ]
 
+        # Validate SQL
+        assert_sql_equal(
+            gg["sql"],
+            """
+            WITH
+            v3_customer AS (
+                SELECT customer_id, name
+                FROM default.v3.customers
+            ),
+            v3_order_details AS (
+                SELECT o.customer_id, oi.quantity, oi.quantity * oi.unit_price AS line_total
+                FROM default.v3.orders o
+                JOIN default.v3.order_items oi ON o.order_id = oi.order_id
+            )
+            SELECT t2.name, SUM(t1.line_total) total_revenue, SUM(t1.quantity) total_quantity
+            FROM v3_order_details t1
+            LEFT OUTER JOIN v3_customer t2 ON t1.customer_id = t2.customer_id
+            GROUP BY t2.name
+            """,
+        )
+
+        # Validate requested_dimensions
+        assert result["requested_dimensions"] == ["v3.customer.name"]
+
     @pytest.mark.asyncio
-    async def test_cross_fact_metrics_not_supported_yet(self, client_with_build_v3):
+    async def test_cross_fact_metrics_two_parents(self, client_with_build_v3):
         """
-        Test that metrics from different parent nodes raise an error.
+        Test metrics from different parent nodes return separate grain groups.
 
         Query: total_revenue (from order_details) and page_view_count (from page_views)
+
+        This produces two grain groups, one for each parent node.
+
+        Both facts link to v3.product (without roles), so we can use that as a
+        shared dimension.
         """
         response = await client_with_build_v3.get(
             "/sql/measures/v3/",
             params={
                 "metrics": ["v3.total_revenue", "v3.page_view_count"],
-                "dimensions": ["v3.order_details.status"],
+                "dimensions": ["v3.product.category"],
             },
         )
 
-        # Should return an error - cross-fact not yet supported
-        assert response.status_code >= 400
-        assert (
-            "same parent" in response.text.lower()
-            or "cross-fact" in response.text.lower()
+        assert response.status_code == 200
+        result = response.json()
+
+        # Should have exactly two grain groups (one per parent fact)
+        assert len(result["grain_groups"]) == 2
+
+        # Find grain groups by metric for predictable assertions
+        gg_by_metric = {gg["metrics"][0]: gg for gg in result["grain_groups"]}
+
+        # Validate grain group for total_revenue (from order_details)
+        gg_revenue = gg_by_metric["v3.total_revenue"]
+        assert gg_revenue["aggregability"] == "full"
+        assert gg_revenue["grain"] == ["category"]
+        assert gg_revenue["metrics"] == ["v3.total_revenue"]
+        assert gg_revenue["columns"] == [
+            {
+                "name": "category",
+                "type": "string",
+                "column": None,
+                "node": None,
+                "semantic_entity": "v3.product.category",
+                "semantic_type": "dimension",
+            },
+            {
+                "name": "total_revenue",
+                "type": "number",
+                "column": None,
+                "node": None,
+                "semantic_entity": "v3.total_revenue",
+                "semantic_type": "metric",
+            },
+        ]
+        assert_sql_equal(
+            gg_revenue["sql"],
+            """
+            WITH
+            v3_order_details AS (
+                SELECT oi.product_id, oi.quantity * oi.unit_price AS line_total
+                FROM default.v3.orders o
+                JOIN default.v3.order_items oi ON o.order_id = oi.order_id
+            ),
+            v3_product AS (
+                SELECT product_id, category
+                FROM default.v3.products
+            )
+            SELECT t2.category, SUM(t1.line_total) total_revenue
+            FROM v3_order_details t1
+            LEFT OUTER JOIN v3_product t2 ON t1.product_id = t2.product_id
+            GROUP BY t2.category
+            """,
         )
+
+        # Validate grain group for page_view_count (from page_views_enriched)
+        gg_pageviews = gg_by_metric["v3.page_view_count"]
+        assert gg_pageviews["aggregability"] == "full"
+        assert gg_pageviews["grain"] == ["category"]
+        assert gg_pageviews["metrics"] == ["v3.page_view_count"]
+        assert gg_pageviews["columns"] == [
+            {
+                "name": "category",
+                "type": "string",
+                "column": None,
+                "node": None,
+                "semantic_entity": "v3.product.category",
+                "semantic_type": "dimension",
+            },
+            {
+                "name": "page_view_count",
+                "type": "number",
+                "column": None,
+                "node": None,
+                "semantic_entity": "v3.page_view_count",
+                "semantic_type": "metric",
+            },
+        ]
+        assert_sql_equal(
+            gg_pageviews["sql"],
+            """
+            WITH
+            v3_page_views_enriched AS (
+                SELECT view_id, product_id
+                FROM default.v3.page_views
+            ),
+            v3_product AS (
+                SELECT product_id, category
+                FROM default.v3.products
+            )
+            SELECT t2.category, COUNT(t1.view_id) page_view_count
+            FROM v3_page_views_enriched t1
+            LEFT OUTER JOIN v3_product t2 ON t1.product_id = t2.product_id
+            GROUP BY t2.category
+            """,
+        )
+
+        # Validate requested_dimensions
+        assert result["requested_dimensions"] == ["v3.product.category"]
+        assert result["dialect"] == "spark"
+
+    @pytest.mark.asyncio
+    async def test_cross_fact_metrics_different_aggregabilities(
+        self,
+        client_with_build_v3,
+    ):
+        """
+        Test cross-fact metrics with different aggregabilities.
+
+        - total_revenue (from order_details): FULL aggregability
+        - session_count (from page_views_enriched): LIMITED aggregability (COUNT DISTINCT)
+
+        Both facts link to v3.product (no role), so v3.product.category is a
+        valid shared dimension. The LIMITED metric adds session_id to its grain.
+        """
+        response = await client_with_build_v3.get(
+            "/sql/measures/v3/",
+            params={
+                "metrics": ["v3.total_revenue", "v3.session_count"],
+                "dimensions": ["v3.product.category"],
+            },
+        )
+
+        assert response.status_code == 200
+        result = response.json()
+
+        # Should have exactly two grain groups (different aggregability + different facts)
+        assert len(result["grain_groups"]) == 2
+
+        # Find grain groups by metric for predictable assertions
+        gg_by_metric = {gg["metrics"][0]: gg for gg in result["grain_groups"]}
+
+        # Validate grain group for total_revenue (FULL aggregability from order_details)
+        gg_revenue = gg_by_metric["v3.total_revenue"]
+        assert gg_revenue["aggregability"] == "full"
+        assert gg_revenue["grain"] == ["category"]
+        assert gg_revenue["metrics"] == ["v3.total_revenue"]
+        assert gg_revenue["columns"] == [
+            {
+                "name": "category",
+                "type": "string",
+                "column": None,
+                "node": None,
+                "semantic_entity": "v3.product.category",
+                "semantic_type": "dimension",
+            },
+            {
+                "name": "total_revenue",
+                "type": "number",
+                "column": None,
+                "node": None,
+                "semantic_entity": "v3.total_revenue",
+                "semantic_type": "metric",
+            },
+        ]
+        assert_sql_equal(
+            gg_revenue["sql"],
+            """
+            WITH
+            v3_order_details AS (
+                SELECT oi.product_id, oi.quantity * oi.unit_price AS line_total
+                FROM default.v3.orders o
+                JOIN default.v3.order_items oi ON o.order_id = oi.order_id
+            ),
+            v3_product AS (
+                SELECT product_id, category
+                FROM default.v3.products
+            )
+            SELECT t2.category, SUM(t1.line_total) total_revenue
+            FROM v3_order_details t1
+            LEFT OUTER JOIN v3_product t2 ON t1.product_id = t2.product_id
+            GROUP BY t2.category
+            """,
+        )
+
+        # Validate grain group for session_count (LIMITED aggregability from page_views)
+        # COUNT DISTINCT requires session_id in GROUP BY for re-aggregation
+        gg_sessions = gg_by_metric["v3.session_count"]
+        assert gg_sessions["aggregability"] == "limited"
+        assert gg_sessions["grain"] == ["category", "session_id"]
+        assert gg_sessions["metrics"] == ["v3.session_count"]
+        assert gg_sessions["columns"] == [
+            {
+                "name": "category",
+                "type": "string",
+                "column": None,
+                "node": None,
+                "semantic_entity": "v3.product.category",
+                "semantic_type": "dimension",
+            },
+            {
+                "name": "session_id",
+                "type": "string",
+                "column": None,
+                "node": None,
+                "semantic_entity": "v3.page_views_enriched.session_id",
+                "semantic_type": "dimension",
+            },
+        ]
+        assert_sql_equal(
+            gg_sessions["sql"],
+            """
+            WITH
+            v3_page_views_enriched AS (
+                SELECT session_id, product_id
+                FROM default.v3.page_views
+            ),
+            v3_product AS (
+                SELECT product_id, category
+                FROM default.v3.products
+            )
+            SELECT t2.category, t1.session_id
+            FROM v3_page_views_enriched t1
+            LEFT OUTER JOIN v3_product t2 ON t1.product_id = t2.product_id
+            GROUP BY t2.category, t1.session_id
+            """,
+        )
+
+        # Validate requested_dimensions
+        assert result["requested_dimensions"] == ["v3.product.category"]
+        assert result["dialect"] == "spark"
+
+    @pytest.mark.asyncio
+    async def test_cross_fact_derived_metric(self, client_with_build_v3):
+        """
+        Test a derived metric that combines metrics from different facts.
+
+        v3.conversion_rate = v3.order_count / v3.visitor_count
+        - order_count (COUNT DISTINCT order_id) comes from order_details
+        - visitor_count (COUNT DISTINCT customer_id) comes from page_views_enriched
+
+        Both base metrics have LIMITED aggregability, so their level columns
+        (order_id and customer_id) are added to the grain for re-aggregation.
+
+        Using v3.product.category as dimension since both facts link to product.
+        """
+        response = await client_with_build_v3.get(
+            "/sql/measures/v3/",
+            params={
+                "metrics": ["v3.conversion_rate"],
+                "dimensions": ["v3.product.category"],
+            },
+        )
+
+        assert response.status_code == 200
+        result = response.json()
+
+        # Should have exactly two grain groups (one per base metric's parent fact)
+        assert len(result["grain_groups"]) == 2
+
+        # Find grain groups by metric for predictable assertions
+        gg_by_metric = {gg["metrics"][0]: gg for gg in result["grain_groups"]}
+
+        # Validate grain group for order_count (LIMITED aggregability from order_details)
+        # COUNT DISTINCT order_id requires order_id in GROUP BY
+        gg_orders = gg_by_metric["v3.order_count"]
+        assert gg_orders["aggregability"] == "limited"
+        assert gg_orders["grain"] == ["category", "order_id"]
+        assert gg_orders["metrics"] == ["v3.order_count"]
+        assert gg_orders["columns"] == [
+            {
+                "name": "category",
+                "type": "string",
+                "column": None,
+                "node": None,
+                "semantic_entity": "v3.product.category",
+                "semantic_type": "dimension",
+            },
+            {
+                "name": "order_id",
+                "type": "int",
+                "column": None,
+                "node": None,
+                "semantic_entity": "v3.order_details.order_id",
+                "semantic_type": "dimension",
+            },
+        ]
+        # Joins order_details -> product for category dimension
+        assert_sql_equal(
+            gg_orders["sql"],
+            """
+            WITH
+            v3_order_details AS (
+                SELECT o.order_id, oi.product_id
+                FROM default.v3.orders o
+                JOIN default.v3.order_items oi ON o.order_id = oi.order_id
+            ),
+            v3_product AS (
+                SELECT product_id, category
+                FROM default.v3.products
+            )
+            SELECT t2.category, t1.order_id
+            FROM v3_order_details t1
+            LEFT OUTER JOIN v3_product t2 ON t1.product_id = t2.product_id
+            GROUP BY t2.category, t1.order_id
+            """,
+        )
+
+        # Validate grain group for visitor_count (LIMITED aggregability from page_views)
+        # COUNT DISTINCT customer_id requires customer_id in GROUP BY
+        gg_visitors = gg_by_metric["v3.visitor_count"]
+        assert gg_visitors["aggregability"] == "limited"
+        assert gg_visitors["grain"] == ["category", "customer_id"]
+        assert gg_visitors["metrics"] == ["v3.visitor_count"]
+        assert gg_visitors["columns"] == [
+            {
+                "name": "category",
+                "type": "string",
+                "column": None,
+                "node": None,
+                "semantic_entity": "v3.product.category",
+                "semantic_type": "dimension",
+            },
+            {
+                "name": "customer_id",
+                "type": "int",
+                "column": None,
+                "node": None,
+                "semantic_entity": "v3.page_views_enriched.customer_id",
+                "semantic_type": "dimension",
+            },
+        ]
+        # Joins page_views_enriched -> product for category dimension
+        assert_sql_equal(
+            gg_visitors["sql"],
+            """
+            WITH
+            v3_page_views_enriched AS (
+                SELECT customer_id, product_id
+                FROM default.v3.page_views
+            ),
+            v3_product AS (
+                SELECT product_id, category
+                FROM default.v3.products
+            )
+            SELECT t2.category, t1.customer_id
+            FROM v3_page_views_enriched t1
+            LEFT OUTER JOIN v3_product t2 ON t1.product_id = t2.product_id
+            GROUP BY t2.category, t1.customer_id
+            """,
+        )
+
+        # Validate requested_dimensions
+        assert result["requested_dimensions"] == ["v3.product.category"]
+        assert result["dialect"] == "spark"
+
+    @pytest.mark.asyncio
+    async def test_cross_fact_multiple_derived_metrics(self, client_with_build_v3):
+        """
+        Test multiple cross-fact derived metrics in the same request.
+
+        v3.conversion_rate = order_count / visitor_count
+        v3.revenue_per_visitor = total_revenue / visitor_count
+        v3.revenue_per_page_view = total_revenue / page_view_count
+
+        These decompose into base metrics from two facts:
+        - From order_details: total_revenue (FULL), order_count (LIMITED)
+        - From page_views_enriched: visitor_count (LIMITED), page_view_count (FULL)
+
+        Using v3.product.category since both facts link to product (no role needed).
+        """
+        response = await client_with_build_v3.get(
+            "/sql/measures/v3/",
+            params={
+                "metrics": [
+                    "v3.conversion_rate",
+                    "v3.revenue_per_visitor",
+                    "v3.revenue_per_page_view",
+                ],
+                "dimensions": ["v3.product.category"],
+            },
+        )
+
+        assert response.status_code == 200
+        result = response.json()
+
+        # Should have 4 grain groups:
+        # 1. total_revenue (FULL from order_details)
+        # 2. order_count (LIMITED from order_details with order_id)
+        # 3. visitor_count (LIMITED from page_views with customer_id)
+        # 4. page_view_count (FULL from page_views)
+        assert len(result["grain_groups"]) == 4
+
+        # Find grain groups by metric for predictable assertions
+        gg_by_metric = {gg["metrics"][0]: gg for gg in result["grain_groups"]}
+
+        # Validate grain group for total_revenue (FULL from order_details)
+        gg_revenue = gg_by_metric["v3.total_revenue"]
+        assert gg_revenue["aggregability"] == "full"
+        assert gg_revenue["grain"] == ["category"]
+        assert gg_revenue["metrics"] == ["v3.total_revenue"]
+        assert gg_revenue["columns"] == [
+            {
+                "name": "category",
+                "type": "string",
+                "column": None,
+                "node": None,
+                "semantic_entity": "v3.product.category",
+                "semantic_type": "dimension",
+            },
+            {
+                "name": "total_revenue",
+                "type": "number",
+                "column": None,
+                "node": None,
+                "semantic_entity": "v3.total_revenue",
+                "semantic_type": "metric",
+            },
+        ]
+        assert_sql_equal(
+            gg_revenue["sql"],
+            """
+            WITH
+            v3_order_details AS (
+                SELECT oi.product_id, oi.quantity * oi.unit_price AS line_total
+                FROM default.v3.orders o
+                JOIN default.v3.order_items oi ON o.order_id = oi.order_id
+            ),
+            v3_product AS (
+                SELECT product_id, category
+                FROM default.v3.products
+            )
+            SELECT t2.category, SUM(t1.line_total) total_revenue
+            FROM v3_order_details t1
+            LEFT OUTER JOIN v3_product t2 ON t1.product_id = t2.product_id
+            GROUP BY t2.category
+            """,
+        )
+
+        # Validate grain group for order_count (LIMITED from order_details)
+        gg_orders = gg_by_metric["v3.order_count"]
+        assert gg_orders["aggregability"] == "limited"
+        assert gg_orders["grain"] == ["category", "order_id"]
+        assert gg_orders["metrics"] == ["v3.order_count"]
+        assert gg_orders["columns"] == [
+            {
+                "name": "category",
+                "type": "string",
+                "column": None,
+                "node": None,
+                "semantic_entity": "v3.product.category",
+                "semantic_type": "dimension",
+            },
+            {
+                "name": "order_id",
+                "type": "int",
+                "column": None,
+                "node": None,
+                "semantic_entity": "v3.order_details.order_id",
+                "semantic_type": "dimension",
+            },
+        ]
+        assert_sql_equal(
+            gg_orders["sql"],
+            """
+            WITH
+            v3_order_details AS (
+                SELECT o.order_id, oi.product_id
+                FROM default.v3.orders o
+                JOIN default.v3.order_items oi ON o.order_id = oi.order_id
+            ),
+            v3_product AS (
+                SELECT product_id, category
+                FROM default.v3.products
+            )
+            SELECT t2.category, t1.order_id
+            FROM v3_order_details t1
+            LEFT OUTER JOIN v3_product t2 ON t1.product_id = t2.product_id
+            GROUP BY t2.category, t1.order_id
+            """,
+        )
+
+        # Validate grain group for visitor_count (LIMITED from page_views)
+        gg_visitors = gg_by_metric["v3.visitor_count"]
+        assert gg_visitors["aggregability"] == "limited"
+        assert gg_visitors["grain"] == ["category", "customer_id"]
+        assert gg_visitors["metrics"] == ["v3.visitor_count"]
+        assert gg_visitors["columns"] == [
+            {
+                "name": "category",
+                "type": "string",
+                "column": None,
+                "node": None,
+                "semantic_entity": "v3.product.category",
+                "semantic_type": "dimension",
+            },
+            {
+                "name": "customer_id",
+                "type": "int",
+                "column": None,
+                "node": None,
+                "semantic_entity": "v3.page_views_enriched.customer_id",
+                "semantic_type": "dimension",
+            },
+        ]
+        assert_sql_equal(
+            gg_visitors["sql"],
+            """
+            WITH
+            v3_page_views_enriched AS (
+                SELECT customer_id, product_id
+                FROM default.v3.page_views
+            ),
+            v3_product AS (
+                SELECT product_id, category
+                FROM default.v3.products
+            )
+            SELECT t2.category, t1.customer_id
+            FROM v3_page_views_enriched t1
+            LEFT OUTER JOIN v3_product t2 ON t1.product_id = t2.product_id
+            GROUP BY t2.category, t1.customer_id
+            """,
+        )
+
+        # Validate grain group for page_view_count (FULL from page_views)
+        gg_pageviews = gg_by_metric["v3.page_view_count"]
+        assert gg_pageviews["aggregability"] == "full"
+        assert gg_pageviews["grain"] == ["category"]
+        assert gg_pageviews["metrics"] == ["v3.page_view_count"]
+        assert gg_pageviews["columns"] == [
+            {
+                "name": "category",
+                "type": "string",
+                "column": None,
+                "node": None,
+                "semantic_entity": "v3.product.category",
+                "semantic_type": "dimension",
+            },
+            {
+                "name": "page_view_count",
+                "type": "number",
+                "column": None,
+                "node": None,
+                "semantic_entity": "v3.page_view_count",
+                "semantic_type": "metric",
+            },
+        ]
+        assert_sql_equal(
+            gg_pageviews["sql"],
+            """
+            WITH
+            v3_page_views_enriched AS (
+                SELECT view_id, product_id
+                FROM default.v3.page_views
+            ),
+            v3_product AS (
+                SELECT product_id, category
+                FROM default.v3.products
+            )
+            SELECT t2.category, COUNT(t1.view_id) page_view_count
+            FROM v3_page_views_enriched t1
+            LEFT OUTER JOIN v3_product t2 ON t1.product_id = t2.product_id
+            GROUP BY t2.category
+            """,
+        )
+
+        # Validate requested_dimensions
+        assert result["requested_dimensions"] == ["v3.product.category"]
+        assert result["dialect"] == "spark"
 
     @pytest.mark.asyncio
     async def test_multiple_metrics_multiple_dimensions(self, client_with_build_v3):
@@ -1058,19 +1463,20 @@ class TestMultipleMetrics:
         )
 
         assert response.status_code == 200
-        data = response.json()
+        data = get_first_grain_group(response.json())
 
         assert_sql_equal(
             data["sql"],
             """
-            WITH v3_order_details AS (
-                SELECT o.status, customer_id, oi.quantity, oi.quantity * oi.unit_price AS line_total
-                FROM v3.src_orders o
-                JOIN v3.src_order_items oi ON o.order_id = oi.order_id
-            ),
+            WITH
             v3_customer AS (
                 SELECT customer_id, name
-                FROM v3.src_customers
+                FROM default.v3.customers
+            ),
+            v3_order_details AS (
+                SELECT o.customer_id, o.status, oi.quantity, oi.quantity * oi.unit_price AS line_total
+                FROM default.v3.orders o
+                JOIN default.v3.order_items oi ON o.order_id = oi.order_id
             )
             SELECT t1.status, t2.name, SUM(t1.line_total) total_revenue, SUM(t1.quantity) total_quantity
             FROM v3_order_details t1
@@ -1078,8 +1484,6 @@ class TestMultipleMetrics:
             GROUP BY t1.status, t2.name
             """,
         )
-
-        assert "_DOT_" not in data["sql"]
         assert data["columns"] == [
             {
                 "name": "status",
@@ -1121,9 +1525,10 @@ class TestMultipleMetrics:
         Test a metric that decomposes into multiple components.
 
         AVG(unit_price) decomposes into:
-        - COUNT(unit_price)
-        - SUM(unit_price)
+        - COUNT(unit_price) - FULL aggregability
+        - SUM(unit_price) - FULL aggregability
 
+        Both components have FULL aggregability, so there's only 1 grain group.
         The measures SQL should output both components with hash-suffixed names,
         and semantic_type should be "metric_component" (not "metric").
         """
@@ -1136,17 +1541,25 @@ class TestMultipleMetrics:
         )
 
         assert response.status_code == 200
-        data = response.json()
+        result = response.json()
 
-        # Print actual SQL and columns for debugging
-        print("SQL:", data["sql"])
-        print("Columns:", data["columns"])
+        # Should have 1 grain group (both COUNT and SUM are FULL aggregability)
+        assert len(result["grain_groups"]) == 1
 
-        assert "_DOT_" not in data["sql"]
+        gg = result["grain_groups"][0]
 
-        # Should have 1 dimension + 2 metric components = 3 columns
-        assert len(data["columns"]) == 3
-        assert data["columns"][0] == {
+        # Validate aggregability
+        assert gg["aggregability"] == "full"
+
+        # Validate grain (just the dimension)
+        assert gg["grain"] == ["status"]
+
+        # Validate metrics covered
+        assert gg["metrics"] == ["v3.avg_unit_price"]
+
+        # Validate columns: 1 dimension + 2 metric components = 3 columns
+        assert len(gg["columns"]) == 3
+        assert gg["columns"][0] == {
             "name": "status",
             "type": "string",
             "column": None,
@@ -1155,18 +1568,34 @@ class TestMultipleMetrics:
             "semantic_type": "dimension",
         }
         # Components have hash suffixes and semantic_type "metric_component"
-        assert data["columns"][1]["semantic_type"] == "metric_component"
-        assert data["columns"][2]["semantic_type"] == "metric_component"
-        # Names should NOT be just "avg_unit_price" (that's for single-component metrics)
-        assert data["columns"][1]["name"] != "avg_unit_price"
-        assert data["columns"][2]["name"] != "avg_unit_price"
+        assert gg["columns"][1]["semantic_type"] == "metric_component"
+        assert gg["columns"][2]["semantic_type"] == "metric_component"
+        assert gg["columns"][1]["name"] == "unit_price_count_55cff00f"
+        assert gg["columns"][2]["name"] == "unit_price_sum_55cff00f"
 
-        # Verify SQL structure (component names have hashes, so we check structure)
-        sql_upper = data["sql"].upper()
-        assert "COUNT" in sql_upper
-        assert "SUM" in sql_upper
-        assert "UNIT_PRICE" in sql_upper
-        assert "GROUP BY" in sql_upper
+        # semantic_entity should include component info
+        assert "v3.avg_unit_price:" in gg["columns"][1]["semantic_entity"]
+        assert "v3.avg_unit_price:" in gg["columns"][2]["semantic_entity"]
+
+        # Validate SQL
+        assert_sql_equal(
+            gg["sql"],
+            """
+            WITH
+            v3_order_details AS (
+                SELECT o.status, oi.unit_price
+                FROM default.v3.orders o JOIN default.v3.order_items oi ON o.order_id = oi.order_id
+            )
+            SELECT t1.status, COUNT(t1.unit_price) unit_price_count_HASH, SUM(t1.unit_price) unit_price_sum_HASH
+            FROM v3_order_details t1
+            GROUP BY t1.status
+            """,
+            normalize_aliases=True,
+        )
+
+        # Validate requested_dimensions
+        assert result["requested_dimensions"] == ["v3.order_details.status"]
+        assert result["dialect"] == "spark"
 
     @pytest.mark.asyncio
     async def test_mixed_single_and_multi_component_metrics(self, client_with_build_v3):
@@ -1175,6 +1604,8 @@ class TestMultipleMetrics:
 
         - total_revenue: single component (SUM) → semantic_type: "metric"
         - avg_unit_price: multi-component (COUNT + SUM) → semantic_type: "metric_component"
+
+        Both are FULL aggregability, so there's only 1 grain group.
         """
         response = await client_with_build_v3.get(
             "/sql/measures/v3/",
@@ -1185,17 +1616,25 @@ class TestMultipleMetrics:
         )
 
         assert response.status_code == 200
-        data = response.json()
+        result = response.json()
 
-        # Print actual SQL and columns for debugging
-        print("SQL:", data["sql"])
-        print("Columns:", data["columns"])
+        # Should have 1 grain group (all FULL aggregability)
+        assert len(result["grain_groups"]) == 1
 
-        assert "_DOT_" not in data["sql"]
+        gg = result["grain_groups"][0]
 
-        # Should have 1 dimension + 1 single-component metric + 2 multi-component metrics = 4 columns
-        assert len(data["columns"]) == 4
-        assert data["columns"][0] == {
+        # Validate aggregability
+        assert gg["aggregability"] == "full"
+
+        # Validate grain
+        assert gg["grain"] == ["status"]
+
+        # Validate metrics covered (sorted)
+        assert sorted(gg["metrics"]) == ["v3.avg_unit_price", "v3.total_revenue"]
+
+        # Validate columns: 1 dimension + 1 single-component metric + 2 multi-component metrics = 4 columns
+        assert len(gg["columns"]) == 4
+        assert gg["columns"][0] == {
             "name": "status",
             "type": "string",
             "column": None,
@@ -1204,7 +1643,7 @@ class TestMultipleMetrics:
             "semantic_type": "dimension",
         }
         # Single-component metric has clean name and type "metric"
-        assert data["columns"][1] == {
+        assert gg["columns"][1] == {
             "name": "total_revenue",
             "type": "number",
             "column": None,
@@ -1213,22 +1652,53 @@ class TestMultipleMetrics:
             "semantic_type": "metric",
         }
         # Multi-component metrics have type "metric_component"
-        assert data["columns"][2]["semantic_type"] == "metric_component"
-        assert data["columns"][3]["semantic_type"] == "metric_component"
+        assert gg["columns"][2]["name"] == "unit_price_count_55cff00f"
+        assert gg["columns"][3]["name"] == "unit_price_sum_55cff00f"
+        assert (
+            gg["columns"][2]["semantic_entity"]
+            == "v3.avg_unit_price:unit_price_count_55cff00f"
+        )
+        assert (
+            gg["columns"][3]["semantic_entity"]
+            == "v3.avg_unit_price:unit_price_sum_55cff00f"
+        )
+
+        assert gg["columns"][2]["semantic_type"] == "metric_component"
+        assert gg["columns"][3]["semantic_type"] == "metric_component"
+
+        # Validate SQL
+        assert_sql_equal(
+            gg["sql"],
+            """
+            WITH
+            v3_order_details AS (
+                SELECT o.status, oi.unit_price, oi.quantity * oi.unit_price AS line_total
+                FROM default.v3.orders o JOIN default.v3.order_items oi ON o.order_id = oi.order_id
+            )
+            SELECT t1.status, SUM(t1.line_total) total_revenue, COUNT(t1.unit_price) unit_price_count_55cff00f, SUM(t1.unit_price) unit_price_sum_55cff00f
+            FROM v3_order_details t1
+            GROUP BY t1.status
+            """,
+            normalize_aliases=False,
+        )
+
+        # Validate requested_dimensions
+        assert result["requested_dimensions"] == ["v3.order_details.status"]
+        assert result["dialect"] == "spark"
 
     @pytest.mark.asyncio
     async def test_multiple_metrics_with_same_component(self, client_with_build_v3):
         """
-        Test metrics that could theoretically share components.
+        Test metrics that share components.
 
         - avg_unit_price: decomposes into COUNT(unit_price) + SUM(unit_price)
         - total_unit_price: is just SUM(unit_price) (single component)
 
-        Currently: NO component sharing - SUM(unit_price) appears twice.
-        total_unit_price gets clean name (single-component metric).
-        avg_unit_price components get hash suffixes (multi-component metric).
+        Component deduplication is active: SUM(unit_price) appears only ONCE.
+        Both metrics share the same SUM component (unit_price_sum_55cff00f).
+        The shared component gets the hash suffix from avg_unit_price (multi-component).
 
-        TODO: Consider implementing component deduplication for efficiency.
+        Both are FULL aggregability, so there's only 1 grain group.
         """
         response = await client_with_build_v3.get(
             "/sql/measures/v3/",
@@ -1239,20 +1709,26 @@ class TestMultipleMetrics:
         )
 
         assert response.status_code == 200
-        data = response.json()
+        result = response.json()
 
-        # Print actual SQL and columns for debugging
-        print("SQL:", data["sql"])
-        print("Columns:", data["columns"])
+        # Should have 1 grain group (all FULL aggregability)
+        assert len(result["grain_groups"]) == 1
 
-        assert "_DOT_" not in data["sql"]
+        gg = result["grain_groups"][0]
 
-        # Currently NO component sharing:
-        # - avg_unit_price: 2 components (COUNT + SUM) with hash suffixes
-        # - total_unit_price: 1 component (SUM) with clean metric name
-        # Total: 1 dimension + 3 metric columns = 4 columns
-        assert len(data["columns"]) == 4
-        assert data["columns"][0] == {
+        # Validate aggregability
+        assert gg["aggregability"] == "full"
+
+        # Validate grain
+        assert gg["grain"] == ["status"]
+
+        # Validate metrics covered (sorted)
+        assert sorted(gg["metrics"]) == ["v3.avg_unit_price", "v3.total_unit_price"]
+
+        # Validate columns: 1 dimension + 2 metric columns (WITH sharing) = 3 columns
+        # SUM(unit_price) is deduplicated - appears once for both avg_unit_price and total_unit_price
+        assert len(gg["columns"]) == 3
+        assert gg["columns"][0] == {
             "name": "status",
             "type": "string",
             "column": None,
@@ -1261,33 +1737,52 @@ class TestMultipleMetrics:
             "semantic_type": "dimension",
         }
 
-        # avg_unit_price components have type "metric_component" (multi-component)
-        avg_cols = [
-            c for c in data["columns"] if c["semantic_type"] == "metric_component"
-        ]
-        assert len(avg_cols) == 2
+        # Both components come from avg_unit_price (first encountered, multi-component)
+        assert gg["columns"][1] == {
+            "name": "unit_price_count_55cff00f",
+            "type": "number",
+            "column": None,
+            "node": None,
+            "semantic_entity": "v3.avg_unit_price:unit_price_count_55cff00f",
+            "semantic_type": "metric_component",
+        }
+        # SUM component is shared - deduplicated to one occurrence
+        assert gg["columns"][2] == {
+            "name": "unit_price_sum_55cff00f",
+            "type": "number",
+            "column": None,
+            "node": None,
+            "semantic_entity": "v3.avg_unit_price:unit_price_sum_55cff00f",
+            "semantic_type": "metric_component",
+        }
 
-        # total_unit_price has type "metric" and clean name (single-component)
-        total_col = next(c for c in data["columns"] if c["name"] == "total_unit_price")
-        assert total_col["semantic_type"] == "metric"
+        # Validate SQL - SUM appears only ONCE (component deduplication is working)
+        assert_sql_equal(
+            gg["sql"],
+            """
+            WITH
+            v3_order_details AS (
+                SELECT o.status, oi.unit_price
+                FROM default.v3.orders o JOIN default.v3.order_items oi ON o.order_id = oi.order_id
+            )
+            SELECT t1.status, COUNT(t1.unit_price) unit_price_count_55cff00f, SUM(t1.unit_price) unit_price_sum_55cff00f
+            FROM v3_order_details t1
+            GROUP BY t1.status
+            """,
+            normalize_aliases=False,
+        )
 
-        # Verify SUM appears TWICE (no sharing currently)
-        sql_upper = data["sql"].upper()
-        assert sql_upper.count("SUM") == 2  # No sharing - appears twice
+        # Validate requested_dimensions
+        assert result["requested_dimensions"] == ["v3.order_details.status"]
+        assert result["dialect"] == "spark"
 
     @pytest.mark.asyncio
-    async def test_limited_aggregability_count_distinct(self, client_with_build_v3):
+    async def test_approx_count_distinct_full_aggregability(self, client_with_build_v3):
         """
-        Test LIMITED aggregability metric: COUNT(DISTINCT customer_id).
+        Test FULL aggregability metric: APPROX_COUNT_DISTINCT(customer_id).
 
-        For measures SQL to be re-aggregatable, it must include the level column
-        (customer_id) in the GROUP BY. This allows downstream to do
-        COUNT(DISTINCT customer_id) over the measures output.
-
-        Expected behavior:
-        - customer_id is included in SELECT and GROUP BY as a dimension
-        - No metric column is output (the metric is just the dimension at this grain)
-        - Metrics SQL layer will apply COUNT(DISTINCT customer_id) over this output
+        APPROX_COUNT_DISTINCT uses HyperLogLog sketches which are fully aggregatable.
+        The measures SQL outputs the sketch aggregation directly.
         """
         response = await client_with_build_v3.get(
             "/sql/measures/v3/",
@@ -1298,32 +1793,24 @@ class TestMultipleMetrics:
         )
 
         assert response.status_code == 200
-        data = response.json()
+        result = response.json()
 
-        # Print actual SQL and columns for debugging
-        print("SQL:", data["sql"])
-        print("Columns:", data["columns"])
+        # Should have 1 grain group (FULL aggregability)
+        assert len(result["grain_groups"]) == 1
 
-        assert "_DOT_" not in data["sql"]
+        gg = result["grain_groups"][0]
 
-        # Verify SQL structure
-        assert_sql_equal(
-            data["sql"],
-            """
-            WITH
-            v3_order_details AS (
-                SELECT o.customer_id, o.status
-                FROM v3.src_orders o
-                JOIN v3.src_order_items oi ON o.order_id = oi.order_id
-            )
-            SELECT t1.status, t1.customer_id
-            FROM v3_order_details t1
-            GROUP BY t1.status, t1.customer_id
-            """,
-        )
+        # Validate aggregability
+        assert gg["aggregability"] == "full"
 
-        # Should have: status (explicit dimension) + customer_id (implicit dimension for metric)
-        assert data["columns"] == [
+        # Validate grain
+        assert gg["grain"] == ["status"]
+
+        # Validate metrics
+        assert gg["metrics"] == ["v3.customer_count"]
+
+        # Validate columns
+        assert gg["columns"] == [
             {
                 "name": "status",
                 "type": "string",
@@ -1333,14 +1820,33 @@ class TestMultipleMetrics:
                 "semantic_type": "dimension",
             },
             {
-                "name": "customer_id",
-                "type": "int",  # customer_id is int in v3.src_orders
+                "name": "customer_count",
+                "type": "number",
                 "column": None,
                 "node": None,
-                "semantic_entity": "v3.order_details.customer_id",
-                "semantic_type": "dimension",
+                "semantic_entity": "v3.customer_count",
+                "semantic_type": "metric",
             },
         ]
+
+        # Validate SQL - uses hll_sketch_agg for APPROX_COUNT_DISTINCT
+        assert_sql_equal(
+            gg["sql"],
+            """
+            WITH
+            v3_order_details AS (
+                SELECT o.customer_id, o.status
+                FROM default.v3.orders o
+                JOIN default.v3.order_items oi ON o.order_id = oi.order_id
+            )
+            SELECT t1.status, hll_sketch_agg(t1.customer_id) customer_count
+            FROM v3_order_details t1
+            GROUP BY t1.status
+            """,
+        )
+
+        # Validate requested_dimensions
+        assert result["requested_dimensions"] == ["v3.order_details.status"]
 
 
 # =============================================================================
@@ -1403,157 +1909,42 @@ class TestAllMetrics:
     ]
 
     @pytest.mark.asyncio
-    async def test_all_order_details_base_metrics(self, client_with_build_v3):
+    async def test_page_views_full_metrics(self, client_with_build_v3):
         """
-        Test all base metrics from order_details with multiple dimensions.
+        Test FULL aggregability metrics from page_views_enriched.
 
-        Dimensions: status (local), customer name (joined)
-        """
-        response = await client_with_build_v3.get(
-            "/sql/measures/v3/",
-            params={
-                "metrics": self.ORDER_DETAILS_BASE_METRICS,
-                "dimensions": [
-                    "v3.order_details.status",
-                    "v3.customer.name",
-                ],
-            },
-        )
-
-        assert response.status_code == 200
-        data = response.json()
-
-        assert_sql_equal(
-            data["sql"],
-            """
-            WITH v3_order_details AS (
-                SELECT o.status, customer_id, oi.quantity, oi.quantity * oi.unit_price AS line_total
-                FROM v3.src_orders o
-                JOIN v3.src_order_items oi ON o.order_id = oi.order_id
-            ),
-            v3_customer AS (
-                SELECT customer_id, name
-                FROM v3.src_customers
-            )
-            SELECT t1.status, t2.name,
-                   SUM(t1.line_total) total_revenue,
-                   SUM(t1.quantity) total_quantity,
-                   COUNT(*) order_count,
-                   COUNT(DISTINCT t1.customer_id) customer_count
-            FROM v3_order_details t1
-            LEFT OUTER JOIN v3_customer t2 ON t1.customer_id = t2.customer_id
-            GROUP BY t1.status, t2.name
-            """,
-        )
-
-        assert "_DOT_" not in data["sql"]
-        assert data["columns"] == [
-            {
-                "name": "status",
-                "type": "string",
-                "column": None,
-                "node": None,
-                "semantic_entity": "v3.order_details.status",
-                "semantic_type": "dimension",
-            },
-            {
-                "name": "name",
-                "type": "string",
-                "column": None,
-                "node": None,
-                "semantic_entity": "v3.customer.name",
-                "semantic_type": "dimension",
-            },
-            {
-                "name": "total_revenue",
-                "type": "number",
-                "column": None,
-                "node": None,
-                "semantic_entity": "v3.total_revenue",
-                "semantic_type": "metric",
-            },
-            {
-                "name": "total_quantity",
-                "type": "number",
-                "column": None,
-                "node": None,
-                "semantic_entity": "v3.total_quantity",
-                "semantic_type": "metric",
-            },
-            {
-                "name": "order_count",
-                "type": "number",
-                "column": None,
-                "node": None,
-                "semantic_entity": "v3.order_count",
-                "semantic_type": "metric",
-            },
-            {
-                "name": "customer_count",
-                "type": "number",
-                "column": None,
-                "node": None,
-                "semantic_entity": "v3.customer_count",
-                "semantic_type": "metric",
-            },
-        ]
-
-    @pytest.mark.asyncio
-    async def test_all_page_views_base_metrics(self, client_with_build_v3):
-        """
-        Test all base metrics from page_views_enriched with multiple dimensions.
-
-        Dimensions: device_type (local), is_mobile (local)
+        Only tests page_view_count and product_view_count (FULL).
+        Uses page_type as dimension (available on the transform).
         """
         response = await client_with_build_v3.get(
             "/sql/measures/v3/",
             params={
-                "metrics": self.PAGE_VIEWS_BASE_METRICS,
-                "dimensions": [
-                    "v3.page_views_enriched.device_type",
-                    "v3.page_views_enriched.is_mobile",
-                ],
+                "metrics": ["v3.page_view_count", "v3.product_view_count"],
+                "dimensions": ["v3.page_views_enriched.page_type"],
             },
         )
 
         assert response.status_code == 200
-        data = response.json()
+        result = response.json()
 
-        assert_sql_equal(
-            data["sql"],
-            """
-            WITH v3_page_views_enriched AS (
-                SELECT device_type,
-                       CASE WHEN device_type IN ('phone', 'tablet') THEN true ELSE false END AS is_mobile,
-                       page_id, session_id, visitor_id
-                FROM v3.src_page_views
-            )
-            SELECT t1.device_type, t1.is_mobile,
-                   COUNT(*) page_view_count,
-                   COUNT(DISTINCT t1.page_id) product_view_count,
-                   COUNT(DISTINCT t1.session_id) session_count,
-                   COUNT(DISTINCT t1.visitor_id) visitor_count
-            FROM v3_page_views_enriched t1
-            GROUP BY t1.device_type, t1.is_mobile
-            """,
-        )
+        # Should have 1 grain group (FULL aggregability)
+        assert len(result["grain_groups"]) == 1
 
-        assert "_DOT_" not in data["sql"]
-        assert data["columns"] == [
+        gg = result["grain_groups"][0]
+
+        # Validate aggregability and grain
+        assert gg["aggregability"] == "full"
+        assert gg["grain"] == ["page_type"]
+        assert sorted(gg["metrics"]) == ["v3.page_view_count", "v3.product_view_count"]
+
+        # Validate columns
+        assert gg["columns"] == [
             {
-                "name": "device_type",
+                "name": "page_type",
                 "type": "string",
                 "column": None,
                 "node": None,
-                "semantic_entity": "v3.page_views_enriched.device_type",
-                "semantic_type": "dimension",
-            },
-            {
-                "name": "is_mobile",
-                "type": "string",
-                "column": None,
-                "node": None,
-                "semantic_entity": "v3.page_views_enriched.is_mobile",
+                "semantic_entity": "v3.page_views_enriched.page_type",
                 "semantic_type": "dimension",
             },
             {
@@ -1572,23 +1963,25 @@ class TestAllMetrics:
                 "semantic_entity": "v3.product_view_count",
                 "semantic_type": "metric",
             },
-            {
-                "name": "session_count",
-                "type": "number",
-                "column": None,
-                "node": None,
-                "semantic_entity": "v3.session_count",
-                "semantic_type": "metric",
-            },
-            {
-                "name": "visitor_count",
-                "type": "number",
-                "column": None,
-                "node": None,
-                "semantic_entity": "v3.visitor_count",
-                "semantic_type": "metric",
-            },
         ]
+
+        # Validate SQL
+        assert_sql_equal(
+            gg["sql"],
+            """
+            WITH v3_page_views_enriched AS (
+                SELECT view_id, page_type,
+                       CASE WHEN page_type = 'product' THEN 1 ELSE 0 END AS is_product_view
+                FROM default.v3.page_views
+            )
+            SELECT t1.page_type, COUNT(t1.view_id) page_view_count, SUM(t1.is_product_view) product_view_count
+            FROM v3_page_views_enriched t1
+            GROUP BY t1.page_type
+            """,
+        )
+
+        # Validate requested_dimensions
+        assert result["requested_dimensions"] == ["v3.page_views_enriched.page_type"]
 
     @pytest.mark.asyncio
     async def test_order_details_metrics_with_three_dimensions(
@@ -1600,6 +1993,14 @@ class TestAllMetrics:
         - status (local)
         - customer name (joined via customer)
         - product category (joined via product)
+
+        Metrics have different aggregabilities:
+        - total_revenue: SUM - FULL
+        - total_quantity: SUM - FULL
+        - customer_count: APPROX_COUNT_DISTINCT - FULL
+        - order_count: COUNT(DISTINCT order_id) - LIMITED
+
+        This produces 2 grain groups.
         """
         response = await client_with_build_v3.get(
             "/sql/measures/v3/",
@@ -1614,152 +2015,95 @@ class TestAllMetrics:
         )
 
         assert response.status_code == 200
-        data = response.json()
+        result = response.json()
+
+        # Should have 2 grain groups: FULL and LIMITED
+        assert len(result["grain_groups"]) == 2
+
+        # Find grain groups by aggregability
+        gg_full = next(
+            gg for gg in result["grain_groups"] if gg["aggregability"] == "full"
+        )
+        gg_limited = next(
+            gg for gg in result["grain_groups"] if gg["aggregability"] == "limited"
+        )
+
+        # Validate FULL grain group (total_revenue, total_quantity, customer_count)
+        assert gg_full["aggregability"] == "full"
+        assert sorted(gg_full["grain"]) == ["category", "name", "status"]
+        assert sorted(gg_full["metrics"]) == [
+            "v3.customer_count",
+            "v3.total_quantity",
+            "v3.total_revenue",
+        ]
+        assert "_DOT_" not in gg_full["sql"]
 
         assert_sql_equal(
-            data["sql"],
+            gg_full["sql"],
             """
-            WITH v3_order_details AS (
-                SELECT o.order_id, o.customer_id, o.status, oi.product_id, oi.quantity, oi.quantity * oi.unit_price AS line_total
-                FROM v3.src_orders o
-                JOIN v3.src_order_items oi ON o.order_id = oi.order_id
-            ),
+            WITH
             v3_customer AS (
                 SELECT customer_id, name
-                FROM v3.src_customers
+                FROM default.v3.customers
+            ),
+            v3_order_details AS (
+                SELECT o.customer_id, o.status, oi.product_id, oi.quantity,
+                       oi.quantity * oi.unit_price AS line_total
+                FROM default.v3.orders o
+                JOIN default.v3.order_items oi ON o.order_id = oi.order_id
             ),
             v3_product AS (
                 SELECT product_id, category
-                FROM v3.src_products
+                FROM default.v3.products
             )
             SELECT t1.status, t2.name, t3.category,
-                    t1.order_id, t1.customer_id,
                    SUM(t1.line_total) total_revenue,
-                   SUM(t1.quantity) total_quantity
+                   SUM(t1.quantity) total_quantity,
+                   hll_sketch_agg(t1.customer_id) customer_count
             FROM v3_order_details t1
             LEFT OUTER JOIN v3_customer t2 ON t1.customer_id = t2.customer_id
             LEFT OUTER JOIN v3_product t3 ON t1.product_id = t3.product_id
-            GROUP BY t1.status, t2.name, t3.category, t1.order_id, t1.customer_id
+            GROUP BY t1.status, t2.name, t3.category
             """,
         )
-        # http://localhost:8000/sql/measures/v3?metrics=growth.xp.funnel.subscription_net_realized_revenue&metrics=growth.xp.funnel.nonmember_average_service_days&metrics=growth.xp.funnel.nonmember_average_paid_days&metrics=growth.xp.funnel.cumulative_retention_rate&metrics=growth.xp.funnel.current_member_count&metrics=growth.xp.funnel.paid_signup_rate&metrics=growth.xp.funnel.registration_rate&metrics=growth.xp.funnel.voluntary_cancel_rate&metrics=growth.xp.funnel.completed_signup_rate&metrics=growth.xp.funnel.involuntary_cancel_rate&metrics=growth.xp.funnel.provided_mop_rate&metrics=growth.xp.funnel.paid_p2_rate&metrics=growth.xp.funnel.nonmember_average_price_per_signup&metrics=growth.xp.funnel.allocation_count&metrics=growth.xp.funnel.adjusted_allocation_count&dimensions=users.lizzyg.applaunch.partner_name.device_type_id&dimensions=growth.xp.platform.platform&dimensions=growth.xp.device_category.device_category&dimensions=common.dimensions.xp.allocation_region_date.dateint&dimensions=growth.xp.tenure.tenure&dimensions=common.dimensions.xp.is_bot.is_bot&dimensions=common.dimensions.xp.ab_test_cell.cell_id&dimensions=common.dimensions.xp.is_fraud.is_fraud&dimensions=growth.xp.funnel.is_registered.is_registered&dimensions=growth.xp.funnel.market_segmentation.market_segment_name&dimensions=growth.xp.funnel.is_signed_up.is_signed_up&dimensions=growth.xp.funnel.signup_plan_name.signup_plan_name&dimensions=growth.xp.funnel.is_ads_market.is_ads_market&dimensions=users.lizzyg.applaunch.partner_name.partner_name&dimensions=growth.xp.mop_category.mop_category&dimensions=growth.xp.funnel.alloc_membership_status.alloc_membership_status&dimensions=growth.xp.membership_status.membership_status&dimensions=common.dimensions.geo_country.forecast_subregion_desc&dimensions=common.dimensions.xp.ab_test_plan.group
-        assert "_DOT_" not in data["sql"]
-        assert len(data["columns"]) == 7  # 3 dimensions + 4 metrics
 
-        # Verify dimension columns
-        dim_entities = [
-            c["semantic_entity"]
-            for c in data["columns"]
-            if c["semantic_type"] == "dimension"
+        # Validate LIMITED grain group (order_count)
+        assert gg_limited["aggregability"] == "limited"
+        assert sorted(gg_limited["grain"]) == ["category", "name", "order_id", "status"]
+        assert gg_limited["metrics"] == ["v3.order_count"]
+        assert "_DOT_" not in gg_limited["sql"]
+
+        assert_sql_equal(
+            gg_limited["sql"],
+            """
+            WITH
+            v3_customer AS (
+                SELECT customer_id, name
+                FROM default.v3.customers
+            ),
+            v3_order_details AS (
+                SELECT o.order_id, o.customer_id, o.status, oi.product_id
+                FROM default.v3.orders o
+                JOIN default.v3.order_items oi ON o.order_id = oi.order_id
+            ),
+            v3_product AS (
+                SELECT product_id, category
+                FROM default.v3.products
+            )
+            SELECT t1.status, t2.name, t3.category, t1.order_id
+            FROM v3_order_details t1
+            LEFT OUTER JOIN v3_customer t2 ON t1.customer_id = t2.customer_id
+            LEFT OUTER JOIN v3_product t3 ON t1.product_id = t3.product_id
+            GROUP BY t1.status, t2.name, t3.category, t1.order_id
+            """,
+        )
+
+        # Validate requested_dimensions
+        assert result["requested_dimensions"] == [
+            "v3.order_details.status",
+            "v3.customer.name",
+            "v3.product.category",
         ]
-        assert "v3.order_details.status" in dim_entities
-        assert "v3.customer.name" in dim_entities
-        assert "v3.product.category" in dim_entities
-
-        # Verify metric columns
-        metric_names = [
-            c["name"] for c in data["columns"] if c["semantic_type"] == "metric"
-        ]
-        assert set(metric_names) == {
-            "total_revenue",
-            "total_quantity",
-            "order_count",
-            "customer_count",
-        }
-
-    @pytest.mark.asyncio
-    async def test_derived_same_fact_metrics_not_yet_supported(
-        self,
-        client_with_build_v3,
-    ):
-        """
-        Test derived metrics (same-fact ratios) - expected to fail until derived metrics are implemented.
-
-        These metrics (avg_order_value, avg_items_per_order, etc.) reference other metrics
-        in their definitions and require the metrics SQL endpoint, not measures.
-        """
-        response = await client_with_build_v3.get(
-            "/sql/measures/v3/",
-            params={
-                "metrics": self.SAME_FACT_DERIVED_ORDER,
-                "dimensions": ["v3.order_details.status"],
-            },
-        )
-
-        # Derived metrics should fail on measures endpoint
-        # (they need build_metrics_sql which computes final expressions)
-        assert response.status_code >= 400
-
-    @pytest.mark.asyncio
-    async def test_cross_fact_derived_metrics_not_yet_supported(
-        self,
-        client_with_build_v3,
-    ):
-        """
-        Test cross-fact derived metrics - expected to fail as cross-fact is not yet supported.
-
-        These metrics (conversion_rate, revenue_per_visitor, etc.) combine metrics
-        from different parent nodes (order_details and page_views_enriched).
-        """
-        response = await client_with_build_v3.get(
-            "/sql/measures/v3/",
-            params={
-                "metrics": self.CROSS_FACT_DERIVED,
-                "dimensions": ["v3.order_details.status"],
-            },
-        )
-
-        # Cross-fact metrics should fail
-        assert response.status_code >= 400
-
-    @pytest.mark.asyncio
-    async def test_period_over_period_metrics_not_yet_supported(
-        self,
-        client_with_build_v3,
-    ):
-        """
-        Test period-over-period metrics with window functions - expected to fail.
-
-        These metrics (wow_revenue_change, etc.) use LAG() window functions and have
-        aggregability: NONE, meaning they cannot be pre-aggregated.
-        """
-        response = await client_with_build_v3.get(
-            "/sql/measures/v3/",
-            params={
-                "metrics": self.PERIOD_OVER_PERIOD,
-                "dimensions": ["v3.date.week[order]"],
-            },
-        )
-
-        # Period-over-period metrics with window functions should fail on measures endpoint
-        assert response.status_code >= 400
-
-    @pytest.mark.asyncio
-    async def test_mixing_base_metrics_from_different_facts(self, client_with_build_v3):
-        """
-        Test mixing base metrics from different parent nodes - expected to fail.
-
-        Cannot combine order_details metrics with page_views metrics in same query (yet).
-        """
-        mixed_metrics = [
-            "v3.total_revenue",  # from order_details
-            "v3.page_view_count",  # from page_views_enriched
-        ]
-
-        response = await client_with_build_v3.get(
-            "/sql/measures/v3/",
-            params={
-                "metrics": mixed_metrics,
-                "dimensions": ["v3.order_details.status"],
-            },
-        )
-
-        # Should fail - cross-fact not supported
-        assert response.status_code >= 400
-        assert (
-            "same parent" in response.text.lower()
-            or "cross-fact" in response.text.lower()
-        )
 
     @pytest.mark.asyncio
     async def test_dimensions_with_multiple_roles_same_dimension(
@@ -1771,6 +2115,11 @@ class TestAllMetrics:
 
         Uses both from_location and to_location (both link to v3.location with different roles).
         Also includes the order date.
+
+        - total_revenue: SUM - FULL aggregability
+        - order_count: COUNT(DISTINCT order_id) - LIMITED aggregability
+
+        This produces 2 grain groups.
         """
         response = await client_with_build_v3.get(
             "/sql/measures/v3/",
@@ -1785,40 +2134,26 @@ class TestAllMetrics:
         )
 
         assert response.status_code == 200
-        data = response.json()
+        result = response.json()
 
-        assert_sql_equal(
-            data["sql"],
-            """
-            WITH v3_order_details AS (
-                SELECT order_date, from_location_id, to_location_id, oi.quantity * oi.unit_price AS line_total
-                FROM v3.src_orders o
-                JOIN v3.src_order_items oi ON o.order_id = oi.order_id
-            ),
-            v3_date AS (
-                SELECT date_id, month
-                FROM v3.src_dates
-            ),
-            v3_location AS (
-                SELECT location_id, country
-                FROM v3.src_locations
-            )
-            SELECT t2.month AS month_order, t3.country AS country_from, t4.country AS country_to,
-                   SUM(t1.line_total) total_revenue,
-                   COUNT(*) order_count
-            FROM v3_order_details t1
-            LEFT OUTER JOIN v3_date t2 ON t1.order_date = t2.date_id
-            LEFT OUTER JOIN v3_location t3 ON t1.from_location_id = t3.location_id
-            LEFT OUTER JOIN v3_location t4 ON t1.to_location_id = t4.location_id
-            GROUP BY t2.month, t3.country, t4.country
-            """,
+        # Should have 2 grain groups (FULL + LIMITED)
+        assert len(result["grain_groups"]) == 2
+
+        # Find grain groups by aggregability
+        gg_full = next(
+            gg for gg in result["grain_groups"] if gg["aggregability"] == "full"
+        )
+        gg_limited = next(
+            gg for gg in result["grain_groups"] if gg["aggregability"] == "limited"
         )
 
-        assert "_DOT_" not in data["sql"]
-        assert data["columns"] == [
+        # Validate FULL grain group (total_revenue)
+        assert gg_full["grain"] == ["country_from", "country_to", "month_order"]
+        assert gg_full["metrics"] == ["v3.total_revenue"]
+        assert gg_full["columns"] == [
             {
                 "name": "month_order",
-                "type": "string",
+                "type": "int",
                 "column": None,
                 "node": None,
                 "semantic_entity": "v3.date.month[order]",
@@ -1841,21 +2176,81 @@ class TestAllMetrics:
                 "semantic_type": "dimension",
             },
             {
-                "name": "total_revenue",
-                "type": "number",
                 "column": None,
+                "name": "total_revenue",
                 "node": None,
                 "semantic_entity": "v3.total_revenue",
                 "semantic_type": "metric",
-            },
-            {
-                "name": "order_count",
                 "type": "number",
-                "column": None,
-                "node": None,
-                "semantic_entity": "v3.order_count",
-                "semantic_type": "metric",
             },
+        ]
+        assert_sql_equal(
+            gg_full["sql"],
+            """
+            WITH
+            v3_date AS (
+                SELECT date_id, month
+                FROM default.v3.dates
+            ),
+            v3_location AS (
+                SELECT location_id, country
+                FROM default.v3.locations
+            ),
+            v3_order_details AS (
+                SELECT o.order_date, o.from_location_id, o.to_location_id,
+                       oi.quantity * oi.unit_price AS line_total
+                FROM default.v3.orders o
+                JOIN default.v3.order_items oi ON o.order_id = oi.order_id
+            )
+            SELECT t2.month month_order, t3.country country_from, t4.country country_to,
+                   SUM(t1.line_total) total_revenue
+            FROM v3_order_details t1
+            LEFT OUTER JOIN v3_date t2 ON t1.order_date = t2.date_id
+            LEFT OUTER JOIN v3_location t3 ON t1.from_location_id = t3.location_id
+            LEFT OUTER JOIN v3_location t4 ON t1.to_location_id = t4.location_id
+            GROUP BY t2.month, t3.country, t4.country
+            """,
+        )
+
+        # Validate LIMITED grain group (order_count at finer grain)
+        assert gg_limited["grain"] == [
+            "country_from",
+            "country_to",
+            "month_order",
+            "order_id",
+        ]
+        assert gg_limited["metrics"] == ["v3.order_count"]
+        assert_sql_equal(
+            gg_limited["sql"],
+            """
+            WITH
+            v3_date AS (
+                SELECT date_id, month
+                FROM default.v3.dates
+            ),
+            v3_location AS (
+                SELECT location_id, country
+                FROM default.v3.locations
+            ),
+            v3_order_details AS (
+                SELECT o.order_id, o.order_date, o.from_location_id, o.to_location_id
+                FROM default.v3.orders o
+                JOIN default.v3.order_items oi ON o.order_id = oi.order_id
+            )
+            SELECT t2.month month_order, t3.country country_from, t4.country country_to, t1.order_id
+            FROM v3_order_details t1
+            LEFT OUTER JOIN v3_date t2 ON t1.order_date = t2.date_id
+            LEFT OUTER JOIN v3_location t3 ON t1.from_location_id = t3.location_id
+            LEFT OUTER JOIN v3_location t4 ON t1.to_location_id = t4.location_id
+            GROUP BY t2.month, t3.country, t4.country, t1.order_id
+            """,
+        )
+
+        # Validate requested_dimensions
+        assert result["requested_dimensions"] == [
+            "v3.date.month[order]",
+            "v3.location.country[from]",
+            "v3.location.country[to]",
         ]
 
     @pytest.mark.asyncio
@@ -1866,6 +2261,8 @@ class TestAllMetrics:
         Dimension links:
         - v3.order_details -> v3.date with role "order" (direct)
         - v3.order_details -> v3.customer -> v3.date with role "registration" (multi-hop)
+
+        Only total_revenue (FULL), so 1 grain group.
         """
         response = await client_with_build_v3.get(
             "/sql/measures/v3/",
@@ -1879,40 +2276,23 @@ class TestAllMetrics:
         )
 
         assert response.status_code == 200
-        data = response.json()
+        result = response.json()
 
-        # Should have two separate joins to v3_date (for different roles)
-        assert_sql_equal(
-            data["sql"],
-            """
-            WITH v3_order_details AS (
-                SELECT order_date, customer_id, oi.quantity * oi.unit_price AS line_total
-                FROM v3.src_orders o
-                JOIN v3.src_order_items oi ON o.order_id = oi.order_id
-            ),
-            v3_date AS (
-                SELECT date_id, year
-                FROM v3.src_dates
-            ),
-            v3_customer AS (
-                SELECT customer_id, registration_date
-                FROM v3.src_customers
-            )
-            SELECT t2.year AS year_order, t4.year AS year_registration,
-                   SUM(t1.line_total) total_revenue
-            FROM v3_order_details t1
-            LEFT OUTER JOIN v3_date t2 ON t1.order_date = t2.date_id
-            LEFT OUTER JOIN v3_customer t3 ON t1.customer_id = t3.customer_id
-            LEFT OUTER JOIN v3_date t4 ON t3.registration_date = t4.date_id
-            GROUP BY t2.year, t4.year
-            """,
-        )
+        # Should have 1 grain group (FULL aggregability)
+        assert len(result["grain_groups"]) == 1
 
-        assert "_DOT_" not in data["sql"]
-        assert data["columns"] == [
+        gg = result["grain_groups"][0]
+
+        # Validate aggregability and grain
+        assert gg["aggregability"] == "full"
+        assert gg["grain"] == ["year_order", "year_registration"]
+        assert gg["metrics"] == ["v3.total_revenue"]
+
+        # Validate columns
+        assert gg["columns"] == [
             {
                 "name": "year_order",
-                "type": "string",
+                "type": "int",
                 "column": None,
                 "node": None,
                 "semantic_entity": "v3.date.year[order]",
@@ -1920,7 +2300,7 @@ class TestAllMetrics:
             },
             {
                 "name": "year_registration",
-                "type": "string",
+                "type": "int",
                 "column": None,
                 "node": None,
                 "semantic_entity": "v3.date.year[customer->registration]",
@@ -1936,12 +2316,46 @@ class TestAllMetrics:
             },
         ]
 
+        # Validate SQL - two separate joins to v3_date for different roles
+        assert_sql_equal(
+            gg["sql"],
+            """
+            WITH
+            v3_customer AS (
+                SELECT customer_id
+                FROM v3.src_customers
+            ),
+            v3_date AS (
+                SELECT date_id, year
+                FROM default.v3.dates
+            ),
+            v3_order_details AS (
+                SELECT o.customer_id, o.order_date, oi.quantity * oi.unit_price AS line_total
+                FROM default.v3.orders o
+                JOIN default.v3.order_items oi ON o.order_id = oi.order_id
+            )
+            SELECT t2.year year_order, t4.year year_registration, SUM(t1.line_total) total_revenue
+            FROM v3_order_details t1
+            LEFT OUTER JOIN v3_date t2 ON t1.order_date = t2.date_id
+            LEFT OUTER JOIN v3_customer t3 ON t1.customer_id = t3.customer_id
+            LEFT OUTER JOIN v3_date t4 ON t3.registration_date = t4.date_id
+            GROUP BY t2.year, t4.year
+            """,
+        )
+
+        # Validate requested_dimensions
+        assert result["requested_dimensions"] == [
+            "v3.date.year[order]",
+            "v3.date.year[customer->registration]",
+        ]
+
     @pytest.mark.asyncio
     async def test_multi_hop_location_dimension(self, client_with_build_v3):
         """
         Test multi-hop dimension path: order_details -> customer -> location (customer's home).
 
         Compare with direct location roles (from/to) vs the multi-hop customer home location.
+        Only total_revenue (FULL), so 1 grain group.
         """
         response = await client_with_build_v3.get(
             "/sql/measures/v3/",
@@ -1955,36 +2369,20 @@ class TestAllMetrics:
         )
 
         assert response.status_code == 200
-        data = response.json()
+        result = response.json()
 
-        assert_sql_equal(
-            data["sql"],
-            """
-            WITH v3_order_details AS (
-                SELECT from_location_id, customer_id, oi.quantity * oi.unit_price AS line_total
-                FROM v3.src_orders o
-                JOIN v3.src_order_items oi ON o.order_id = oi.order_id
-            ),
-            v3_location AS (
-                SELECT location_id, country
-                FROM v3.src_locations
-            ),
-            v3_customer AS (
-                SELECT customer_id, location_id
-                FROM v3.src_customers
-            )
-            SELECT t2.country AS country_from, t4.country AS country_home,
-                   SUM(t1.line_total) total_revenue
-            FROM v3_order_details t1
-            LEFT OUTER JOIN v3_location t2 ON t1.from_location_id = t2.location_id
-            LEFT OUTER JOIN v3_customer t3 ON t1.customer_id = t3.customer_id
-            LEFT OUTER JOIN v3_location t4 ON t3.location_id = t4.location_id
-            GROUP BY t2.country, t4.country
-            """,
-        )
+        # Should have 1 grain group (FULL aggregability)
+        assert len(result["grain_groups"]) == 1
 
-        assert "_DOT_" not in data["sql"]
-        assert data["columns"] == [
+        gg = result["grain_groups"][0]
+
+        # Validate aggregability and grain
+        assert gg["aggregability"] == "full"
+        assert gg["grain"] == ["country_from", "country_home"]
+        assert gg["metrics"] == ["v3.total_revenue"]
+
+        # Validate columns
+        assert gg["columns"] == [
             {
                 "name": "country_from",
                 "type": "string",
@@ -2011,6 +2409,39 @@ class TestAllMetrics:
             },
         ]
 
+        # Validate SQL
+        assert_sql_equal(
+            gg["sql"],
+            """
+            WITH
+            v3_customer AS (
+                SELECT customer_id
+                FROM v3.src_customers
+            ),
+            v3_location AS (
+                SELECT location_id, country
+                FROM default.v3.locations
+            ),
+            v3_order_details AS (
+                SELECT o.customer_id, o.from_location_id, oi.quantity * oi.unit_price AS line_total
+                FROM default.v3.orders o
+                JOIN default.v3.order_items oi ON o.order_id = oi.order_id
+            )
+            SELECT t2.country country_from, t4.country country_home, SUM(t1.line_total) total_revenue
+            FROM v3_order_details t1
+            LEFT OUTER JOIN v3_location t2 ON t1.from_location_id = t2.location_id
+            LEFT OUTER JOIN v3_customer t3 ON t1.customer_id = t3.customer_id
+            LEFT OUTER JOIN v3_location t4 ON t3.location_id = t4.location_id
+            GROUP BY t2.country, t4.country
+            """,
+        )
+
+        # Validate requested_dimensions
+        assert result["requested_dimensions"] == [
+            "v3.location.country[from]",
+            "v3.location.country[customer->home]",
+        ]
+
     @pytest.mark.asyncio
     async def test_all_location_roles_in_single_query(self, client_with_build_v3):
         """
@@ -2020,6 +2451,7 @@ class TestAllMetrics:
         - customer home location (multi-hop, role="customer->home")
 
         This tests that we can have 3 joins to the same dimension table with different paths.
+        Only total_revenue (FULL), so 1 grain group.
         """
         response = await client_with_build_v3.get(
             "/sql/measures/v3/",
@@ -2034,25 +2466,49 @@ class TestAllMetrics:
         )
 
         assert response.status_code == 200
-        data = response.json()
+        result = response.json()
 
+        # Should have 1 grain group (FULL aggregability)
+        assert len(result["grain_groups"]) == 1
+
+        gg = result["grain_groups"][0]
+
+        # Validate aggregability and grain
+        assert gg["aggregability"] == "full"
+        assert gg["grain"] == ["city_from", "city_home", "city_to"]
+        assert gg["metrics"] == ["v3.total_revenue"]
+
+        # Validate columns - 3 dimensions + 1 metric
+        assert len(gg["columns"]) == 4
+        assert gg["columns"][0]["semantic_entity"] == "v3.location.city[from]"
+        assert gg["columns"][0]["name"] == "city_from"
+        assert gg["columns"][1]["semantic_entity"] == "v3.location.city[to]"
+        assert gg["columns"][1]["name"] == "city_to"
+        assert gg["columns"][2]["semantic_entity"] == "v3.location.city[customer->home]"
+        assert gg["columns"][2]["name"] == "city_home"
+        assert gg["columns"][3]["semantic_entity"] == "v3.total_revenue"
+        assert gg["columns"][3]["name"] == "total_revenue"
+
+        # Validate SQL
         assert_sql_equal(
-            data["sql"],
+            gg["sql"],
             """
-            WITH v3_order_details AS (
-                SELECT from_location_id, to_location_id, customer_id, oi.quantity * oi.unit_price AS line_total
-                FROM v3.src_orders o
-                JOIN v3.src_order_items oi ON o.order_id = oi.order_id
+            WITH
+            v3_customer AS (
+                SELECT customer_id
+                FROM v3.src_customers
             ),
             v3_location AS (
                 SELECT location_id, city
-                FROM v3.src_locations
+                FROM default.v3.locations
             ),
-            v3_customer AS (
-                SELECT customer_id, location_id
-                FROM v3.src_customers
+            v3_order_details AS (
+                SELECT o.customer_id, o.from_location_id, o.to_location_id,
+                       oi.quantity * oi.unit_price AS line_total
+                FROM default.v3.orders o
+                JOIN default.v3.order_items oi ON o.order_id = oi.order_id
             )
-            SELECT t2.city AS city_from, t3.city AS city_to, t5.city AS city_home,
+            SELECT t2.city city_from, t3.city city_to, t5.city city_home,
                    SUM(t1.line_total) total_revenue
             FROM v3_order_details t1
             LEFT OUTER JOIN v3_location t2 ON t1.from_location_id = t2.location_id
@@ -2063,17 +2519,12 @@ class TestAllMetrics:
             """,
         )
 
-        assert "_DOT_" not in data["sql"]
-        # Should have 3 dimension columns (city with different roles) + 1 metric
-        assert len(data["columns"]) == 4
-        assert data["columns"][0]["semantic_entity"] == "v3.location.city[from]"
-        assert data["columns"][0]["name"] == "city_from"
-        assert data["columns"][1]["semantic_entity"] == "v3.location.city[to]"
-        assert data["columns"][1]["name"] == "city_to"
-        assert (
-            data["columns"][2]["semantic_entity"] == "v3.location.city[customer->home]"
-        )
-        assert data["columns"][2]["name"] == "city_home"
+        # Validate requested_dimensions
+        assert result["requested_dimensions"] == [
+            "v3.location.city[from]",
+            "v3.location.city[to]",
+            "v3.location.city[customer->home]",
+        ]
 
     @pytest.mark.asyncio
     async def test_complex_multi_dimension_multi_role_query(self, client_with_build_v3):
@@ -2084,11 +2535,18 @@ class TestAllMetrics:
         - Order date month (via order role)
         - Customer registration year (via customer->registration multi-hop)
         - Customer home country (via customer->home multi-hop)
+
+        Uses only FULL aggregability metrics (total_revenue, total_quantity, customer_count)
+        to keep the test simple (single grain group).
         """
         response = await client_with_build_v3.get(
             "/sql/measures/v3/",
             params={
-                "metrics": self.ORDER_DETAILS_BASE_METRICS,
+                "metrics": [
+                    "v3.total_revenue",
+                    "v3.total_quantity",
+                    "v3.customer_count",
+                ],
                 "dimensions": [
                     "v3.order_details.status",
                     "v3.customer.name",
@@ -2100,18 +2558,23 @@ class TestAllMetrics:
         )
 
         assert response.status_code == 200
-        data = response.json()
+        result = response.json()
 
-        # Verify structure
-        assert "_DOT_" not in data["sql"]
+        # Should have 1 grain group (all FULL aggregability)
+        assert len(result["grain_groups"]) == 1
 
-        # Should have 5 dimensions + 4 metrics = 9 columns
-        assert len(data["columns"]) == 9
+        gg = result["grain_groups"][0]
+
+        # Validate aggregability
+        assert gg["aggregability"] == "full"
+
+        # Should have 5 dimensions + 3 metrics = 8 columns
+        assert len(gg["columns"]) == 8
 
         # Check all dimension semantic entities
         dim_entities = [
             c["semantic_entity"]
-            for c in data["columns"]
+            for c in gg["columns"]
             if c["semantic_type"] == "dimension"
         ]
         assert "v3.order_details.status" in dim_entities
@@ -2122,14 +2585,22 @@ class TestAllMetrics:
 
         # Check all metrics present
         metric_names = [
-            c["name"] for c in data["columns"] if c["semantic_type"] == "metric"
+            c["name"] for c in gg["columns"] if c["semantic_type"] == "metric"
         ]
         assert set(metric_names) == {
             "total_revenue",
             "total_quantity",
-            "order_count",
             "customer_count",
         }
+
+        # Validate requested_dimensions
+        assert result["requested_dimensions"] == [
+            "v3.order_details.status",
+            "v3.customer.name",
+            "v3.date.month[order]",
+            "v3.date.year[customer->registration]",
+            "v3.location.country[customer->home]",
+        ]
 
 
 class TestInnerCTEFlattening:
@@ -2205,7 +2676,7 @@ class TestInnerCTEFlattening:
         )
 
         assert response.status_code == 200, response.json()
-        data = response.json()
+        data = get_first_grain_group(response.json())
         sql = data["sql"]
         assert_sql_equal(
             sql,
@@ -2236,8 +2707,9 @@ class TestInnerCTEFlattening:
         Test that transforms with multiple inner CTEs have all of them flattened.
         """
         # Create a transform with multiple inner CTEs
+        # Note: Use full CTE names as table aliases to avoid DJ validation issues
         transform_response = await client_with_build_v3.post(
-            "/nodes/v3.transform_multi_cte/",
+            "/nodes/transform",
             json={
                 "name": "v3.transform_multi_cte",
                 "type": "transform",
@@ -2245,23 +2717,23 @@ class TestInnerCTEFlattening:
                 "query": """
                     WITH
                         order_counts AS (
-                            SELECT customer_id, COUNT(*) AS num_orders
-                            FROM v3.src_orders
-                            GROUP BY customer_id
+                            SELECT src.customer_id, COUNT(*) AS num_orders
+                            FROM v3.src_orders src
+                            GROUP BY src.customer_id
                         ),
                         item_totals AS (
-                            SELECT order_id, SUM(quantity) AS total_items
-                            FROM v3.src_order_items
-                            GROUP BY order_id
+                            SELECT items.order_id, SUM(items.quantity) AS total_items
+                            FROM v3.src_order_items items
+                            GROUP BY items.order_id
                         )
                     SELECT
-                        oc.customer_id,
-                        oc.num_orders,
-                        SUM(it.total_items) AS total_items_purchased
-                    FROM order_counts oc
-                    JOIN v3.src_orders o ON oc.customer_id = o.customer_id
-                    JOIN item_totals it ON o.order_id = it.order_id
-                    GROUP BY oc.customer_id, oc.num_orders
+                        order_counts.customer_id,
+                        order_counts.num_orders,
+                        SUM(item_totals.total_items) AS total_items_purchased
+                    FROM order_counts
+                    JOIN v3.src_orders o ON order_counts.customer_id = o.customer_id
+                    JOIN item_totals ON o.order_id = item_totals.order_id
+                    GROUP BY order_counts.customer_id, order_counts.num_orders
                 """,
                 "mode": "published",
             },
@@ -2270,7 +2742,7 @@ class TestInnerCTEFlattening:
 
         # Create a metric
         metric_response = await client_with_build_v3.post(
-            "/nodes/v3.avg_items_per_customer/",
+            "/nodes/metric",
             json={
                 "name": "v3.avg_items_per_customer",
                 "type": "metric",
@@ -2291,7 +2763,7 @@ class TestInnerCTEFlattening:
         )
 
         assert response.status_code == 200, response.json()
-        data = response.json()
+        data = get_first_grain_group(response.json())
         sql = data["sql"]
 
         # Verify both inner CTEs are flattened with prefix

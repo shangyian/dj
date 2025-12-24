@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, cast, Any
 
 from sqlalchemy import select, text, bindparam
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -116,17 +116,9 @@ class BuildContext:
             return self._parsed_join_cache[link.id]
 
         join_ast = parse(f"SELECT 1 WHERE {link.join_sql}").select.where
-        self._parsed_join_cache[link.id] = join_ast
+        if join_ast is not None:
+            self._parsed_join_cache[link.id] = join_ast
         return join_ast
-
-
-@dataclass
-class GeneratedSQL:
-    """Output of the SQL generation pipeline."""
-
-    sql: str
-    columns: list[ColumnMetadata]
-    dialect: Dialect
 
 
 @dataclass
@@ -145,7 +137,58 @@ class ColumnMetadata:
         str  # Full semantic path (e.g., 'v3.customer.name' or 'v3.total_revenue')
     )
     type: str  # SQL type (string, number, etc.)
-    semantic_type: str  # "dimension", "metric", or future: "metric_component"
+    semantic_type: str  # "dimension", "metric", "metric_component", or "metric_input"
+
+
+@dataclass
+class GrainGroupSQL:
+    """
+    SQL for a single grain group within measures SQL.
+
+    Each grain group represents metrics that can be computed at the same aggregation level.
+    Different aggregability levels produce different grain groups:
+    - FULL: aggregates to requested dimensions
+    - LIMITED: aggregates to requested dimensions + level columns
+    - NONE: stays at native grain (primary key)
+    """
+
+    sql: str
+    columns: list[ColumnMetadata]
+    grain: list[
+        str
+    ]  # Column names in GROUP BY (beyond requested dims for LIMITED/NONE)
+    aggregability: Aggregability
+    metrics: list[str]  # Metric names covered by this grain group
+
+
+@dataclass
+class GeneratedMeasuresSQL:
+    """
+    Output of measures SQL generation.
+
+    Contains multiple grain groups, each at a different aggregation level.
+    These can be:
+    - Materialized separately for efficient queries
+    - Combined by metrics SQL into a single executable query
+    """
+
+    grain_groups: list[GrainGroupSQL]
+    dialect: Dialect
+    requested_dimensions: list[str]  # Original dimension refs for context
+
+
+@dataclass
+class GeneratedSQL:
+    """
+    Output of metrics SQL generation (single combined SQL).
+
+    This is the final, executable SQL that combines all grain groups
+    and applies final metric expressions.
+    """
+
+    sql: str
+    columns: list[ColumnMetadata]
+    dialect: Dialect
 
 
 @dataclass
@@ -519,15 +562,34 @@ async def load_nodes(ctx: BuildContext) -> None:
         ctx.nodes[node.name] = node
 
     # Collect parent revision IDs for join path lookup (using parent_map from Query 1)
+    # For derived metrics, we need to recursively find fact parents through the metric chain
     parent_revision_ids: set[int] = set()
-    for metric_name in ctx.metrics:
+
+    def collect_fact_parents(metric_name: str, visited: set[str]) -> None:
+        """Recursively collect fact/transform parent revision IDs from metrics."""
+        if metric_name in visited:
+            return
+        visited.add(metric_name)
+
         metric_node = ctx.nodes.get(metric_name)
-        if metric_node and metric_node.type == NodeType.METRIC:
-            parent_names = ctx.parent_map.get(metric_name, [])
-            for parent_name in parent_names:
-                parent_node = ctx.nodes.get(parent_name)
-                if parent_node and parent_node.current:
-                    parent_revision_ids.add(parent_node.current.id)
+        if not metric_node:
+            return
+
+        parent_names = ctx.parent_map.get(metric_name, [])
+        for parent_name in parent_names:
+            parent_node = ctx.nodes.get(parent_name)
+            if not parent_node:
+                continue
+
+            if parent_node.type == NodeType.METRIC:
+                # Parent is another metric - recurse to find its fact parents
+                collect_fact_parents(parent_name, visited)
+            elif parent_node.current:
+                # Parent is a fact/transform - collect its revision ID
+                parent_revision_ids.add(parent_node.current.id)
+
+    for metric_name in ctx.metrics:
+        collect_fact_parents(metric_name, set())
 
     logger.debug(f"[BuildV3] Loaded {len(ctx.nodes)} nodes")
 
@@ -538,20 +600,6 @@ async def load_nodes(ctx: BuildContext) -> None:
 # =============================================================================
 # Topological Sort & Table Reference Rewriting
 # =============================================================================
-
-
-def get_physical_table_name(node: Node) -> str:
-    """
-    Get the fully qualified physical table name for a source node.
-
-    Returns: catalog.schema.table format
-    """
-    if not node.current:
-        raise DJInvalidInputException(f"Node {node.name} has no current revision")
-    rev = node.current
-    if not rev.catalog:
-        raise DJInvalidInputException(f"Source node {node.name} has no catalog")
-    return f"{rev.catalog.name}.{rev.schema_}.{rev.table}"
 
 
 def get_cte_name(node_name: str) -> str:
@@ -638,17 +686,21 @@ def topological_sort_nodes(ctx: BuildContext, node_names: set[str]) -> list[Node
                 dependents[dep].append(name)
 
     # Start with nodes that have no dependencies (in_degree == 0)
-    queue = [name for name, degree in in_degree.items() if degree == 0]
+    # Sort to ensure deterministic output order
+    queue = sorted([name for name, degree in in_degree.items() if degree == 0])
     sorted_names: list[str] = []
 
     while queue:
         current = queue.pop(0)
         sorted_names.append(current)
         # Reduce in-degree for all dependents
+        # Collect new zero-degree nodes and sort for determinism
+        new_ready = []
         for dependent in dependents.get(current, []):
             in_degree[dependent] -= 1
             if in_degree[dependent] == 0:
-                queue.append(dependent)
+                new_ready.append(dependent)
+        queue.extend(sorted(new_ready))
 
     # Return sorted nodes (excluding any we couldn't sort due to cycles)
     return [node_map[name] for name in sorted_names if name in node_map]
@@ -700,7 +752,8 @@ def rewrite_table_references(
             if ref_node.type == NodeType.SOURCE:
                 # Replace with physical table name
                 physical_name = get_physical_table_name(ref_node)
-                table.name = ast.Name(physical_name)
+                if physical_name:
+                    table.name = ast.Name(physical_name)
             elif table_name in cte_names:
                 # Replace with CTE name
                 table.name = ast.Name(cte_names[table_name])
@@ -805,13 +858,13 @@ def get_metric_expression_ast(ctx: BuildContext, metric_node: Node) -> ast.Expre
 
     # Copy the expression before modifying to protect the cache
     expr = expr.copy()
-    if hasattr(expr, "alias") and expr.alias:
+    if isinstance(expr, ast.Aliasable) and expr.alias:
         expr.alias = None
 
     # Clear parent reference so we can attach to new query
     expr.clear_parent()
 
-    return expr
+    return cast(ast.Expression, expr)
 
 
 async def decompose_metric(
@@ -876,12 +929,13 @@ def build_component_expression(component: MetricComponent) -> ast.Expression:
         if isinstance(expr_ast, ast.Alias):
             expr_ast = expr_ast.child
         expr_ast.clear_parent()
-        return expr_ast
+        return cast(ast.Expression, expr_ast)
     else:
         # Simple function name like "SUM" - build SUM(expression)
+        arg_expr = parse(f"SELECT {component.expression}").select.projection[0]
         func = ast.Function(
             name=ast.Name(component.aggregation),
-            args=[parse(f"SELECT {component.expression}").select.projection[0]],
+            args=[cast(ast.Expression, arg_expr)],
         )
         return func
 
@@ -947,6 +1001,10 @@ def find_join_path(
     For multi-hop joins (role like "customer->home"):
         fact -> customer -> location
 
+    If no role is specified, will find ANY path to the dimension (first match).
+    This handles cases where the dimension link has a role but the user
+    doesn't specify one.
+
     Returns None if no path found.
     """
     if not from_node.current:
@@ -955,7 +1013,7 @@ def find_join_path(
     source_revision_id = from_node.current.id
     role_path = role or ""
 
-    # Look up preloaded path
+    # Look up preloaded path with exact role match
     key = (source_revision_id, target_dim_name, role_path)
     links = ctx.join_paths.get(key)
 
@@ -967,15 +1025,20 @@ def find_join_path(
             role=role,
         )
 
-    # Fallback: check for direct links without role (may have been eagerly loaded)
-    # if not role and from_node.current.dimension_links:
-    #     for link in from_node.current.dimension_links:
-    #         if link.dimension and link.dimension.name == target_dim_name:
-    #             return JoinPath(
-    #                 links=[link],
-    #                 target_dimension=link.dimension,
-    #                 role=role,
-    #             )
+    # Fallback: if no role specified, find ANY path to this dimension
+    # This handles cases where the dimension link has a role but user didn't specify one
+    if not role:
+        for (src_id, dim_name, stored_role), path_links in ctx.join_paths.items():
+            if src_id == source_revision_id and dim_name == target_dim_name:
+                logger.debug(
+                    f"[BuildV3] Using path with role '{stored_role}' for "
+                    f"dimension {target_dim_name} (no role specified)",
+                )
+                return JoinPath(
+                    links=path_links,
+                    target_dimension=path_links[-1].dimension,
+                    role=stored_role or None,
+                )
 
     return None
 
@@ -1467,12 +1530,16 @@ def build_join_clause(
     right_table_name = make_name(SEPARATOR.join(right_table_parts))
 
     # Create the join
-    join = ast.Join(
-        join_type=join_type_str,
-        right=ast.Alias(
+    right_expr: ast.Expression = cast(
+        ast.Expression,
+        ast.Alias(
             child=ast.Table(name=right_table_name),
             alias=ast.Name(right_alias),
         ),
+    )
+    join = ast.Join(
+        join_type=join_type_str,
+        right=right_expr,
         criteria=ast.JoinCriteria(on=on_clause) if on_clause else None,
     )
 
@@ -1502,7 +1569,8 @@ def build_select_ast(
         AST Query node
     """
     # Build projection (SELECT clause)
-    projection: list[ast.Expression] = []
+    # Use Any type to satisfy ast.Select.projection which accepts Union[Aliasable, Expression, Column]
+    projection: list[Any] = []
     grain_columns = grain_columns or []
 
     # Generate alias for the main table
@@ -1719,11 +1787,15 @@ def build_select_ast(
     table_name = make_name(SEPARATOR.join(table_parts))
 
     # Create relation with joins
-    relation = ast.Relation(
-        primary=ast.Alias(
+    primary_expr: ast.Expression = cast(
+        ast.Expression,
+        ast.Alias(
             child=ast.Table(name=table_name),
             alias=ast.Name(main_alias),
         ),
+    )
+    relation = ast.Relation(
+        primary=primary_expr,
         extensions=joins,
     )
 
@@ -1793,13 +1865,202 @@ class MetricGroup:
         return result
 
 
+@dataclass
+class GrainGroup:
+    """
+    A group of metric components that share the same effective grain.
+
+    Components in the same grain group can be computed in a single SELECT
+    with the same GROUP BY clause.
+
+    Grain groups are determined by aggregability:
+    - FULL: requested dimensions only
+    - LIMITED: requested dimensions + level columns (e.g., customer_id for COUNT DISTINCT)
+    - NONE: native grain (primary key of parent node)
+    """
+
+    parent_node: Node
+    aggregability: Aggregability
+    grain_columns: list[str]  # Columns to GROUP BY (beyond requested dimensions)
+    components: list[tuple[Node, MetricComponent]]  # (metric_node, component) pairs
+
+    @property
+    def grain_key(self) -> tuple[str, Aggregability, tuple[str, ...]]:
+        """
+        Key for grouping: (parent_name, aggregability, sorted grain columns).
+        """
+        return (
+            self.parent_node.name,
+            self.aggregability,
+            tuple(sorted(self.grain_columns)),
+        )
+
+
+def get_native_grain(node: Node) -> list[str]:
+    """
+    Get the native grain (primary key columns) of a node.
+
+    For transforms/dimensions, this is their primary key columns.
+    If no PK is defined, returns empty list (meaning row-level grain).
+    """
+    if not node.current:
+        return []
+
+    pk_columns = []
+    for col in node.current.columns:
+        # Check if this column is part of the primary key
+        if col.has_primary_key_attribute:
+            pk_columns.append(col.name)
+
+    return pk_columns
+
+
+def analyze_grain_groups(
+    metric_group: MetricGroup,
+    requested_dimensions: list[str],
+) -> list[GrainGroup]:
+    """
+    Analyze a MetricGroup and split it into GrainGroups based on aggregability.
+
+    Each GrainGroup contains components that can be computed at the same grain.
+
+    Rules:
+    - FULL aggregability: grain = requested dimensions
+    - LIMITED aggregability: grain = requested dimensions + level columns
+    - NONE aggregability: grain = native grain (PK of parent)
+
+    Args:
+        metric_group: MetricGroup with decomposed metrics
+        requested_dimensions: Dimensions requested by user (column names only)
+
+    Returns:
+        List of GrainGroups, one per unique grain
+    """
+    parent_node = metric_group.parent_node
+
+    # Group components by their effective grain
+    # Key: (aggregability, tuple of additional grain columns)
+    grain_buckets: dict[
+        tuple[Aggregability, tuple[str, ...]],
+        list[tuple[Node, MetricComponent]],
+    ] = {}
+
+    for metric_node, component in metric_group.get_all_components():
+        agg_type = component.rule.type
+
+        # Explicitly type the key to satisfy mypy
+        key: tuple[Aggregability, tuple[str, ...]]
+        if agg_type == Aggregability.FULL:
+            # FULL: no additional grain columns needed
+            key = (Aggregability.FULL, ())
+        elif agg_type == Aggregability.LIMITED:
+            # LIMITED: add level columns to grain
+            level_cols = tuple(sorted(component.rule.level or []))
+            key = (Aggregability.LIMITED, level_cols)
+        else:  # NONE
+            # NONE: use native grain (PK columns)
+            native_grain = get_native_grain(parent_node)
+            key = (Aggregability.NONE, tuple(sorted(native_grain)))
+
+        if key not in grain_buckets:
+            grain_buckets[key] = []
+        grain_buckets[key].append((metric_node, component))
+
+    # Convert buckets to GrainGroup objects
+    grain_groups = []
+    for (agg_type, grain_cols), components in grain_buckets.items():
+        grain_groups.append(
+            GrainGroup(
+                parent_node=parent_node,
+                aggregability=agg_type,
+                grain_columns=list(grain_cols),
+                components=components,
+            ),
+        )
+
+    # Sort groups: FULL first, then LIMITED, then NONE (for consistent output)
+    agg_order = {Aggregability.FULL: 0, Aggregability.LIMITED: 1, Aggregability.NONE: 2}
+    grain_groups.sort(
+        key=lambda g: (agg_order.get(g.aggregability, 3), g.grain_columns),
+    )
+
+    return grain_groups
+
+
+def get_fact_parent(ctx: BuildContext, metric_node: Node) -> Node:
+    """
+    Get the fact/transform parent of a metric, traversing through derived metrics.
+
+    For base metrics: returns the direct parent (a fact/transform)
+    For derived metrics: returns None (caller should get base metrics first)
+    """
+    parent_names = ctx.parent_map.get(metric_node.name, [])
+    if not parent_names:
+        raise DJInvalidInputException(f"Metric {metric_node.name} has no parent node")
+
+    # Check if first parent is a metric (derived) or fact/transform (base)
+    first_parent_name = parent_names[0]
+    first_parent = ctx.nodes.get(first_parent_name)
+
+    if not first_parent:
+        raise DJInvalidInputException(f"Parent node not found: {first_parent_name}")
+
+    return first_parent
+
+
+def get_base_metrics_for_derived(ctx: BuildContext, metric_node: Node) -> list[Node]:
+    """
+    For a derived metric, get all the base metrics it depends on.
+
+    Returns list of base metric nodes (metrics that SELECT FROM a fact/transform, not other metrics).
+    """
+    base_metrics = []
+    visited = set()
+
+    def collect_bases(node: Node):
+        if node.name in visited:
+            return
+        visited.add(node.name)
+
+        parent_names = ctx.parent_map.get(node.name, [])
+        for parent_name in parent_names:
+            parent = ctx.nodes.get(parent_name)
+            if not parent:
+                continue
+
+            if parent.type == NodeType.METRIC:
+                # Parent is also a metric - recurse
+                collect_bases(parent)
+            else:
+                # Parent is a fact/transform - this is a base metric
+                base_metrics.append(node)
+                break  # Found the base, don't check other parents
+
+    collect_bases(metric_node)
+    return base_metrics
+
+
+def is_derived_metric(ctx: BuildContext, metric_node: Node) -> bool:
+    """Check if a metric is derived (references other metrics) vs base (references fact/transform)."""
+    parent_names = ctx.parent_map.get(metric_node.name, [])
+    if not parent_names:
+        return False
+
+    first_parent = ctx.nodes.get(parent_names[0])
+    return first_parent is not None and first_parent.type == NodeType.METRIC
+
+
 async def decompose_and_group_metrics(
     ctx: BuildContext,
 ) -> list[MetricGroup]:
     """
-    Decompose metrics and group them by parent node.
+    Decompose metrics and group them by parent node (fact/transform).
 
-    This replaces the simple group_metrics_by_parent with decomposition support.
+    For base metrics: groups by direct parent
+    For derived metrics: decomposes into base metrics and groups by their parents
+
+    This enables cross-fact derived metrics by producing separate grain groups
+    for each underlying fact.
 
     Returns:
         List of MetricGroup, one per unique parent node, with decomposed metrics.
@@ -1809,19 +2070,36 @@ async def decompose_and_group_metrics(
     parent_nodes: dict[str, Node] = {}
 
     for metric_name in ctx.metrics:
-        # Get metric and parent nodes (in-memory)
         metric_node = get_metric_node(ctx, metric_name)
-        parent_node = get_parent_node(ctx, metric_node)
 
-        # Decompose the metric (requires DB for MetricComponentExtractor)
-        decomposed = await decompose_metric(ctx.session, metric_node)
+        if is_derived_metric(ctx, metric_node):
+            # Derived metric - get base metrics and decompose each
+            base_metric_nodes = get_base_metrics_for_derived(ctx, metric_node)
 
-        parent_name = parent_node.name
-        if parent_name not in parent_groups:
-            parent_groups[parent_name] = []
-            parent_nodes[parent_name] = parent_node
+            for base_metric in base_metric_nodes:
+                # Get the fact/transform parent of the base metric
+                parent_node = get_parent_node(ctx, base_metric)
 
-        parent_groups[parent_name].append(decomposed)
+                # Decompose the BASE metric (not the derived one)
+                decomposed = await decompose_metric(ctx.session, base_metric)
+
+                parent_name = parent_node.name
+                if parent_name not in parent_groups:
+                    parent_groups[parent_name] = []
+                    parent_nodes[parent_name] = parent_node
+
+                parent_groups[parent_name].append(decomposed)
+        else:
+            # Base metric - use direct parent
+            parent_node = get_parent_node(ctx, metric_node)
+            decomposed = await decompose_metric(ctx.session, metric_node)
+
+            parent_name = parent_node.name
+            if parent_name not in parent_groups:
+                parent_groups[parent_name] = []
+                parent_nodes[parent_name] = parent_node
+
+            parent_groups[parent_name].append(decomposed)
 
     # Build MetricGroup objects
     return [
@@ -1835,20 +2113,215 @@ async def decompose_and_group_metrics(
 # =============================================================================
 
 
+def build_grain_group_sql(
+    ctx: BuildContext,
+    grain_group: GrainGroup,
+    resolved_dimensions: list[ResolvedDimension],
+    components_per_metric: dict[str, int],
+) -> GrainGroupSQL:
+    """
+    Build SQL for a single grain group.
+
+    Args:
+        ctx: Build context
+        grain_group: The grain group to generate SQL for
+        resolved_dimensions: Pre-resolved dimensions with join paths
+        components_per_metric: Metric name -> component count mapping
+
+    Returns:
+        GrainGroupSQL with SQL and metadata for this grain group
+    """
+    parent_node = grain_group.parent_node
+
+    # Build list of component expressions with their aliases
+    component_expressions: list[tuple[str, ast.Expression]] = []
+    component_metadata: list[tuple[str, MetricComponent, Node, bool]] = []
+
+    # Track which metrics are covered by this grain group
+    metrics_covered: set[str] = set()
+
+    # Track which components we've already added (deduplicate by component name)
+    seen_components: set[str] = set()
+
+    for metric_node, component in grain_group.components:
+        metrics_covered.add(metric_node.name)
+
+        # Deduplicate components - same component may appear for multiple derived metrics
+        if component.name in seen_components:
+            continue
+        seen_components.add(component.name)
+
+        # For NONE aggregability, we output raw columns, not aggregations
+        if grain_group.aggregability == Aggregability.NONE:
+            # Just output the column reference, no aggregation
+            # The actual aggregation (MEDIAN, etc.) happens in metrics SQL
+            if component.column:
+                col_ast = ast.Column(
+                    name=ast.Name(component.column),
+                    _table=None,
+                )
+                component_alias = component.column
+                component_expressions.append((component_alias, col_ast))
+                component_metadata.append(
+                    (component_alias, component, metric_node, False),
+                )
+            continue
+
+        # Skip LIMITED aggregability components with no aggregation
+        # These are represented by grain columns instead
+        if component.rule.type == Aggregability.LIMITED and not component.aggregation:
+            continue
+
+        num_components = components_per_metric.get(metric_node.name, 1)
+        is_simple = num_components == 1
+
+        if is_simple:
+            component_alias = metric_node.name.split(SEPARATOR)[-1]
+        else:
+            component_alias = component.name
+
+        expr_ast = build_component_expression(component)
+        component_expressions.append((component_alias, expr_ast))
+        component_metadata.append((component_alias, component, metric_node, is_simple))
+
+    # Determine grain columns for this group
+    if grain_group.aggregability == Aggregability.NONE:
+        # NONE: use native grain (PK columns)
+        effective_grain_columns = grain_group.grain_columns
+    elif grain_group.aggregability == Aggregability.LIMITED:
+        # LIMITED: use level columns from components
+        effective_grain_columns = grain_group.grain_columns
+    else:
+        # FULL: no additional grain columns
+        effective_grain_columns = []
+
+    # Build AST
+    query_ast = build_select_ast(
+        ctx,
+        metric_expressions=component_expressions,
+        resolved_dimensions=resolved_dimensions,
+        parent_node=parent_node,
+        grain_columns=effective_grain_columns,
+    )
+
+    sql_str = str(query_ast)
+
+    # Build column metadata
+    columns_metadata = []
+
+    # Add dimension columns
+    for resolved_dim in resolved_dimensions:
+        alias = (
+            ctx.alias_registry.get_alias(resolved_dim.original_ref)
+            or resolved_dim.column_name
+        )
+        if resolved_dim.is_local:
+            col_type = get_column_type(parent_node, resolved_dim.column_name)
+        else:
+            dim_node = ctx.nodes.get(resolved_dim.node_name)
+            col_type = (
+                get_column_type(dim_node, resolved_dim.column_name)
+                if dim_node
+                else "string"
+            )
+        columns_metadata.append(
+            ColumnMetadata(
+                name=alias,
+                semantic_name=resolved_dim.original_ref,
+                type=col_type,
+                semantic_type="dimension",
+            ),
+        )
+
+    # Add grain columns (for LIMITED and NONE)
+    for grain_col in effective_grain_columns:
+        col_type = get_column_type(parent_node, grain_col)
+        columns_metadata.append(
+            ColumnMetadata(
+                name=grain_col,
+                semantic_name=f"{parent_node.name}{SEPARATOR}{grain_col}",
+                type=col_type,
+                semantic_type="dimension",  # Added for aggregability (e.g., customer_id for COUNT DISTINCT)
+            ),
+        )
+
+    # Add metric component columns
+    for comp_alias, component, metric_node, is_simple in component_metadata:
+        if grain_group.aggregability == Aggregability.NONE:
+            # NONE: raw column, will be aggregated in metrics SQL
+            columns_metadata.append(
+                ColumnMetadata(
+                    name=comp_alias,
+                    semantic_name=f"{metric_node.name}:{component.column}",
+                    type="number",
+                    semantic_type="metric_input",  # Raw input for non-aggregatable metric
+                ),
+            )
+        elif is_simple:
+            columns_metadata.append(
+                ColumnMetadata(
+                    name=ctx.alias_registry.get_alias(comp_alias) or comp_alias,
+                    semantic_name=metric_node.name,
+                    type="number",
+                    semantic_type="metric",
+                ),
+            )
+        else:
+            columns_metadata.append(
+                ColumnMetadata(
+                    name=ctx.alias_registry.get_alias(comp_alias) or comp_alias,
+                    semantic_name=f"{metric_node.name}:{component.name}",
+                    type="number",
+                    semantic_type="metric_component",
+                ),
+            )
+
+    # Build the full grain list (GROUP BY columns)
+    # Start with dimension column aliases
+    full_grain = []
+    for resolved_dim in resolved_dimensions:
+        alias = (
+            ctx.alias_registry.get_alias(resolved_dim.original_ref)
+            or resolved_dim.column_name
+        )
+        full_grain.append(alias)
+
+    # Add any additional grain columns (from LIMITED/NONE aggregability)
+    for grain_col in effective_grain_columns:
+        if grain_col not in full_grain:
+            full_grain.append(grain_col)
+
+    # Sort for deterministic output
+    full_grain.sort()
+
+    return GrainGroupSQL(
+        sql=sql_str,
+        columns=columns_metadata,
+        grain=full_grain,
+        aggregability=grain_group.aggregability,
+        metrics=list(metrics_covered),
+    )
+
+
 async def build_measures_sql(
     session: AsyncSession,
     metrics: list[str],
     dimensions: list[str],
     filters: list[str] | None = None,
     dialect: Dialect = Dialect.SPARK,
-) -> GeneratedSQL:
+) -> GeneratedMeasuresSQL:
     """
     Build measures SQL for a set of metrics and dimensions.
 
     This is the main entry point for V3 measures SQL generation.
 
     Measures SQL aggregates metric components to the requested dimensional
-    grain, but does NOT apply final metric expressions.
+    grain, producing one SQL query per grain group. Different aggregability
+    levels (FULL, LIMITED, NONE) result in different grain groups.
+
+    Use cases:
+    - Materialization: Each grain group can be materialized separately
+    - Live queries: Pass to build_metrics_sql() to get a single combined query
 
     Args:
         session: Database session
@@ -1858,7 +2331,7 @@ async def build_measures_sql(
         dialect: SQL dialect for output
 
     Returns:
-        GeneratedSQL with the SQL string and column metadata
+        GeneratedMeasuresSQL with one GrainGroupSQL per aggregation level
     """
     # Create context
     ctx = BuildContext(
@@ -1879,146 +2352,72 @@ async def build_measures_sql(
     # Decompose metrics and group by parent node
     metric_groups = await decompose_and_group_metrics(ctx)
 
-    # For now (Chunk 3), we only support metrics from a single parent
-    # Multi-parent support (cross-fact) will be added in a later chunk
-    if len(metric_groups) > 1:
-        parent_names = [g.parent_node.name for g in metric_groups]
-        raise DJInvalidInputException(
-            f"All metrics must come from the same parent node. "
-            f"Found metrics from: {', '.join(parent_names)}. "
-            f"Cross-fact metrics will be supported in a future version.",
-        )
+    # Process each metric group into grain group SQLs
+    # Cross-fact metrics produce separate grain groups (one per parent node)
+    # Currently we only support single metric group; cross-fact will iterate over all
+    all_grain_group_sqls: list[GrainGroupSQL] = []
+    for metric_group in metric_groups:
+        grain_group_sqls = process_metric_group(ctx, metric_group)
+        all_grain_group_sqls.extend(grain_group_sqls)
 
-    # Get the single metric group
-    metric_group = metric_groups[0]
+    return GeneratedMeasuresSQL(
+        grain_groups=all_grain_group_sqls,
+        dialect=dialect,
+        requested_dimensions=dimensions,
+    )
+
+
+def process_metric_group(
+    ctx: BuildContext,
+    metric_group: MetricGroup,
+) -> list[GrainGroupSQL]:
+    """
+    Process a single MetricGroup into one or more GrainGroupSQLs.
+
+    This handles:
+    1. Counting components per metric for naming strategy
+    2. Analyzing grain groups by aggregability
+    3. Resolving dimension join paths
+    4. Building SQL for each grain group
+
+    Args:
+        ctx: Build context
+        metric_group: The metric group to process
+
+    Returns:
+        List of GrainGroupSQL, one per aggregability level
+    """
     parent_node = metric_group.parent_node
 
     # Count components per metric to determine naming strategy
-    # Single component metrics use the metric name; multi-component use hash names
     components_per_metric: dict[str, int] = {}
     for decomposed in metric_group.decomposed_metrics:
         components_per_metric[decomposed.metric_node.name] = len(decomposed.components)
 
-    # Collect grain columns from LIMITED aggregability components
-    # These must be included in GROUP BY for the output to be re-aggregatable
-    grain_columns: list[str] = []
-    for metric_node, component in metric_group.get_all_components():
-        if component.rule.type == Aggregability.LIMITED and component.rule.level:
-            for level_col in component.rule.level:
-                if level_col not in grain_columns:
-                    grain_columns.append(level_col)
+    # Analyze grain groups - split by aggregability
+    # Extract just the column names from dimensions for grain analysis
+    dim_column_names = [parse_dimension_ref(d).column_name for d in ctx.dimensions]
+    grain_groups = analyze_grain_groups(metric_group, dim_column_names)
 
-    # Build list of component expressions with their aliases
-    # For measures SQL, we output components (not the full metric expression)
-    component_expressions: list[tuple[str, ast.Expression]] = []
-    component_metadata: list[
-        tuple[str, MetricComponent, Node, bool]
-    ] = []  # (alias, component, metric_node, is_simple)
-
-    for metric_node, component in metric_group.get_all_components():
-        # Skip LIMITED aggregability components with no aggregation
-        # These are represented by grain columns instead (e.g., customer_id for COUNT DISTINCT)
-        if component.rule.type == Aggregability.LIMITED and not component.aggregation:
-            continue
-
-        num_components = components_per_metric.get(metric_node.name, 1)
-        is_simple = num_components == 1
-
-        if is_simple:
-            # Single component: use metric name as alias
-            component_alias = metric_node.name.split(SEPARATOR)[-1]
-        else:
-            # Multiple components: use component name (includes hash for uniqueness)
-            component_alias = component.name
-
-        expr_ast = build_component_expression(component)
-        component_expressions.append((component_alias, expr_ast))
-        component_metadata.append((component_alias, component, metric_node, is_simple))
-
-    # Resolve dimensions (find join paths)
+    # Resolve dimensions (find join paths) - shared across grain groups
     resolved_dimensions = resolve_dimensions(ctx, parent_node)
 
-    # Build AST with JOIN support and component expressions
-    # Pass grain_columns for LIMITED aggregability support
-    query_ast = build_select_ast(
-        ctx,
-        metric_expressions=component_expressions,
-        resolved_dimensions=resolved_dimensions,
-        parent_node=parent_node,
-        grain_columns=grain_columns,
-    )
+    # Build SQL for each grain group
+    grain_group_sqls: list[GrainGroupSQL] = []
+    for grain_group in grain_groups:
+        # Reset alias registry for each grain group to avoid conflicts
+        ctx.alias_registry = AliasRegistry()
+        ctx._table_alias_counter = 0
 
-    # Generate SQL string from AST
-    sql_str = str(query_ast)
-
-    # Build column metadata
-    columns_metadata = []
-
-    # Add dimension columns
-    for resolved_dim in resolved_dimensions:
-        alias = (
-            ctx.alias_registry.get_alias(resolved_dim.original_ref)
-            or resolved_dim.column_name
+        grain_group_sql = build_grain_group_sql(
+            ctx,
+            grain_group,
+            resolved_dimensions,
+            components_per_metric,
         )
-        # Get column type from appropriate node
-        if resolved_dim.is_local:
-            col_type = get_column_type(parent_node, resolved_dim.column_name)
-        else:
-            dim_node = ctx.nodes.get(resolved_dim.node_name)
-            col_type = (
-                get_column_type(dim_node, resolved_dim.column_name)
-                if dim_node
-                else "string"
-            )
-        columns_metadata.append(
-            ColumnMetadata(
-                name=alias,
-                semantic_name=resolved_dim.original_ref,
-                type=col_type,
-                semantic_type="dimension",
-            ),
-        )
+        grain_group_sqls.append(grain_group_sql)
 
-    # Add grain columns for LIMITED aggregability (e.g., customer_id for COUNT DISTINCT)
-    for grain_col in grain_columns:
-        col_type = get_column_type(parent_node, grain_col)
-        columns_metadata.append(
-            ColumnMetadata(
-                name=grain_col,
-                semantic_name=f"{parent_node.name}{SEPARATOR}{grain_col}",
-                type=col_type,
-                semantic_type="dimension",  # Dimension required by metric's aggregability
-            ),
-        )
-
-    # Add metric component columns
-    for comp_alias, component, metric_node, is_simple in component_metadata:
-        if is_simple:
-            # Simple metric (single component): use metric name, type is "metric"
-            columns_metadata.append(
-                ColumnMetadata(
-                    name=ctx.alias_registry.get_alias(comp_alias) or comp_alias,
-                    semantic_name=metric_node.name,
-                    type="number",  # TODO: Get actual type from component
-                    semantic_type="metric",
-                ),
-            )
-        else:
-            # Complex metric (multiple components): use component name, type is "metric_component"
-            columns_metadata.append(
-                ColumnMetadata(
-                    name=ctx.alias_registry.get_alias(comp_alias) or comp_alias,
-                    semantic_name=f"{metric_node.name}:{component.name}",  # metric:component format
-                    type="number",  # TODO: Get actual type from component
-                    semantic_type="metric_component",
-                ),
-            )
-
-    return GeneratedSQL(
-        sql=sql_str,
-        columns=columns_metadata,
-        dialect=dialect,
-    )
+    return grain_group_sqls
 
 
 # Placeholder for metrics SQL (Chunk 5)
