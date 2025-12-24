@@ -12,7 +12,7 @@ See ARCHITECTURE.md for full documentation.
 
 Usage:
     from datajunction_server.construction.build_v3 import build_measures_sql, build_metrics_sql
-    
+
     # Generate measures SQL (pre-aggregated to dimensional grain)
     result = await build_measures_sql(
         session,
@@ -20,7 +20,7 @@ Usage:
         dimensions=['country', 'quarter'],
     )
     print(result.sql)
-    
+
     # Generate metrics SQL (with final metric expressions)
     result = await build_metrics_sql(
         session,
@@ -44,14 +44,13 @@ from datajunction_server.construction.build_v3.alias_registry import (
 
 __all__ = [
     # Main entry points
-    'build_measures_sql',
-    'build_metrics_sql',
+    "build_measures_sql",
+    "build_metrics_sql",
     # Context and types
-    'BuildContext',
-    'GeneratedSQL',
-    'ColumnMetadata',
+    "BuildContext",
+    "GeneratedSQL",
+    "ColumnMetadata",
     # Alias registry
-    'AliasRegistry',
-    'ScopedAliasRegistry',
+    "AliasRegistry",
+    "ScopedAliasRegistry",
 ]
-

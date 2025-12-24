@@ -180,17 +180,17 @@ async def get_measures_sql_v3(
 ) -> TranslatedSQL:
     """
     V3 Measures SQL generation (for testing/development).
-    
+
     Returns SQL with metric expressions aggregated to the dimensional grain,
     but without applying final metric expressions.
-    
+
     This is the new Build V3 SQL generation system - see ARCHITECTURE.md
     in datajunction_server/construction/build_v3/ for details.
     """
     from datajunction_server.construction.build_v3 import build_measures_sql
     from datajunction_server.models.dialect import Dialect
     from datajunction_server.models.query import ColumnMetadata
-    
+
     result = await build_measures_sql(
         session=session,
         metrics=metrics,
@@ -198,11 +198,16 @@ async def get_measures_sql_v3(
         filters=filters,
         dialect=Dialect.SPARK,
     )
-    
+
     return TranslatedSQL(
         sql=result.sql,
         columns=[
-            ColumnMetadata(name=col.name, type=col.type)
+            ColumnMetadata(
+                name=col.name,
+                type=col.type,
+                semantic_entity=col.semantic_name,
+                semantic_type=col.semantic_type,
+            )
             for col in result.columns
         ],
         dialect=result.dialect,
@@ -225,32 +230,39 @@ async def get_metrics_sql_v3(
 ) -> TranslatedSQL:
     """
     V3 Metrics SQL generation (for testing/development).
-    
+
     Returns SQL with final metric expressions applied, including
     handling for derived metrics.
-    
+
     This is the new Build V3 SQL generation system - see ARCHITECTURE.md
     in datajunction_server/construction/build_v3/ for details.
-    
+
     NOTE: Not yet implemented - will be available in Chunk 5.
     """
     from datajunction_server.construction.build_v3 import build_metrics_sql
     from datajunction_server.models.dialect import Dialect
     from datajunction_server.models.query import ColumnMetadata
-    
-    result = await build_metrics_sql(
-        session=session,
-        metrics=metrics,
-        dimensions=dimensions,
-        filters=filters,
-        dialect=Dialect.SPARK,
-    )
-    
+    from datajunction_server.errors import DJException
+    from http import HTTPStatus
+
+    try:
+        result = await build_metrics_sql(
+            session=session,
+            metrics=metrics,
+            dimensions=dimensions,
+            filters=filters,
+            dialect=Dialect.SPARK,
+        )
+    except NotImplementedError as e:
+        raise DJException(
+            message=str(e) or "Metrics SQL V3 not yet implemented (Chunk 5)",
+            http_status_code=HTTPStatus.NOT_IMPLEMENTED,
+        )
+
     return TranslatedSQL(
         sql=result.sql,
         columns=[
-            ColumnMetadata(name=col.name, type=col.type)
-            for col in result.columns
+            ColumnMetadata(name=col.name, type=col.type) for col in result.columns
         ],
         dialect=result.dialect,
     )
