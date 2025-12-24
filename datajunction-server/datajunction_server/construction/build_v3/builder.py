@@ -66,11 +66,52 @@ class BuildContext:
     # Table alias counter for generating unique aliases
     _table_alias_counter: int = field(default=0)
 
+    # AST cache: node_name -> parsed query AST (avoids re-parsing same query)
+    _parsed_query_cache: dict[str, ast.Query] = field(default_factory=dict)
+
+    # Join SQL cache: link_id -> parsed join condition AST
+    _parsed_join_cache: dict[int, ast.Expression] = field(default_factory=dict)
+
     def next_table_alias(self, base_name: str) -> str:
         """Generate a unique table alias."""
         self._table_alias_counter += 1
         # Use short alias like t1, t2, etc.
         return f"t{self._table_alias_counter}"
+
+    def get_parsed_query(self, node: Node) -> ast.Query:
+        """
+        Get the parsed query AST for a node, using cache if available.
+
+        Important: Returns a reference to the cached AST. If you need to modify
+        it, make a copy first to avoid corrupting the cache.
+        """
+        if node.name in self._parsed_query_cache:
+            return self._parsed_query_cache[node.name]
+
+        if not node.current or not node.current.query:
+            raise DJInvalidInputException(f"Node {node.name} has no query")
+
+        query_ast = parse(node.current.query)
+        self._parsed_query_cache[node.name] = query_ast
+        return query_ast
+
+    def get_parsed_join_condition(
+        self, link: DimensionLink,
+    ) -> Optional[ast.Expression]:
+        """
+        Get the parsed join condition AST for a dimension link, using cache.
+
+        Returns the WHERE clause AST from parsing "SELECT 1 WHERE <join_sql>".
+        """
+        if not link.join_sql:
+            return None
+
+        if link.id in self._parsed_join_cache:
+            return self._parsed_join_cache[link.id]
+
+        join_ast = parse(f"SELECT 1 WHERE {link.join_sql}").select.where
+        self._parsed_join_cache[link.id] = join_ast
+        return join_ast
 
 
 @dataclass
@@ -532,9 +573,9 @@ def topological_sort_nodes(ctx: BuildContext, node_names: set[str]) -> list[Node
             # Metrics depend on their parent node (handled separately, skip)
             continue
         elif node.current and node.current.query:
-            # Transform/dimension - parse query to find references
+            # Transform/dimension - parse query to find references (using cache)
             try:
-                query_ast = parse(node.current.query)
+                query_ast = ctx.get_parsed_query(node)
                 refs = get_table_references_from_ast(query_ast)
                 # Only keep references that are in our node set
                 dependencies[name] = {r for r in refs if r in node_names}
@@ -681,7 +722,7 @@ def get_parent_node(ctx: BuildContext, metric_node: Node) -> Node:
     return parent
 
 
-def get_metric_expression_ast(metric_node: Node) -> ast.Expression:
+def get_metric_expression_ast(ctx: BuildContext, metric_node: Node) -> ast.Expression:
     """
     Extract the metric expression AST from the metric's query.
 
@@ -694,7 +735,8 @@ def get_metric_expression_ast(metric_node: Node) -> ast.Expression:
     if not metric_node.current or not metric_node.current.query:
         raise DJInvalidInputException(f"Metric {metric_node.name} has no query")
 
-    query_ast = parse(metric_node.current.query)
+    # Use cached parsed query
+    query_ast = ctx.get_parsed_query(metric_node)
     if not query_ast.select.projection:
         raise DJInvalidInputException(f"Metric {metric_node.name} has no projection")
 
@@ -704,9 +746,10 @@ def get_metric_expression_ast(metric_node: Node) -> ast.Expression:
     # Remove alias if present - we want the raw expression
     if isinstance(expr, ast.Alias):
         expr = expr.child
-    elif hasattr(expr, "alias") and expr.alias:
-        # Clear the alias so we can add our own
-        expr = expr.copy()
+
+    # Copy the expression before modifying to protect the cache
+    expr = expr.copy()
+    if hasattr(expr, "alias") and expr.alias:
         expr.alias = None
 
     # Clear parent reference so we can attach to new query
@@ -1082,66 +1125,6 @@ def extract_columns_from_expression(expr: ast.Expression) -> set[str]:
     return columns
 
 
-def build_node_cte(
-    node: Node,
-    needed_columns: Optional[set[str]] = None,
-) -> Optional[ast.Query]:
-    """
-    Build a CTE query for a transform or dimension node.
-
-    If needed_columns is provided, modifies the query's projection to only
-    include the columns that are needed, reducing the data transferred.
-
-    Returns the parsed query AST, or None for source nodes.
-    """
-    if node.type == NodeType.SOURCE:
-        return None
-
-    rev = node.current
-    if not rev or not rev.query:
-        return None
-
-    # Parse the node's query
-    query_ast = parse(rev.query)
-
-    # If no column filter, return the full query
-    if not needed_columns:
-        return query_ast
-
-    # Filter the projection to only include needed columns
-    # Build a map of output column name -> projection expression
-    original_projection = query_ast.select.projection
-
-    # Build new projection with only needed columns
-    new_projection: list[ast.Expression] = []
-
-    for expr in original_projection:
-        # Determine the output name of this expression
-        if isinstance(expr, ast.Alias):
-            output_name = expr.alias.name if expr.alias else None
-        elif isinstance(expr, ast.Column):
-            output_name = (
-                expr.alias.name
-                if expr.alias
-                else (expr.name.name if expr.name else None)
-            )
-        else:
-            # For other expressions, check if they have an alias
-            output_name = (
-                expr.alias.name if hasattr(expr, "alias") and expr.alias else None
-            )
-
-        # Include if this column is needed
-        if output_name and output_name in needed_columns:
-            new_projection.append(expr)
-
-    # If we filtered some columns, update the projection
-    if new_projection:
-        query_ast.select.projection = new_projection
-
-    return query_ast
-
-
 def get_table_reference(ctx: BuildContext, node: Node) -> tuple[str, bool]:
     """
     Get the table reference for a node.
@@ -1197,7 +1180,8 @@ def collect_node_ctes(
 
         if node.current and node.current.query:
             try:
-                query_ast = parse(node.current.query)
+                # Use cached parsed query for reference extraction
+                query_ast = ctx.get_parsed_query(node)
                 refs = get_table_references_from_ast(query_ast)
                 for ref in refs:
                     ref_node = ctx.nodes.get(ref)
