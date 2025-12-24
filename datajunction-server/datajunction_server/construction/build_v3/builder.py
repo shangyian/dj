@@ -63,6 +63,11 @@ class BuildContext:
         default_factory=dict,
     )
 
+    # Parent map: child_node_name -> list of parent_node_names
+    # Populated by find_upstream_node_names(), used to find metric parents without
+    # needing to eager-load the parents relationship
+    parent_map: dict[str, list[str]] = field(default_factory=dict)
+
     # Table alias counter for generating unique aliases
     _table_alias_counter: int = field(default=0)
 
@@ -220,7 +225,7 @@ def get_column_type(node: Node, column_name: str) -> str:
 async def find_upstream_node_names(
     session: AsyncSession,
     starting_node_names: list[str],
-) -> set[str]:
+) -> tuple[set[str], dict[str, list[str]]]:
     """
     Find all upstream node names using a lightweight recursive CTE.
 
@@ -228,18 +233,21 @@ async def find_upstream_node_names(
     Uses NodeRelationship to traverse the parent-child relationships.
 
     Returns:
-        Set of all upstream node names (including the starting nodes).
+        Tuple of:
+        - Set of all upstream node names (including the starting nodes)
+        - Dict mapping child_name -> list of parent_names (for metrics to find their parents)
     """
     if not starting_node_names:
-        return set()
+        return set(), {}
 
-    # Lightweight recursive CTE - only returns node names
+    # Lightweight recursive CTE - returns node names AND parent-child relationships
     recursive_query = text("""
         WITH RECURSIVE upstream AS (
             -- Base case: get the starting nodes' current revision IDs
             SELECT
                 nr.id as revision_id,
-                n.name as node_name
+                n.name as node_name,
+                CAST(NULL AS TEXT) as child_name
             FROM node n
             JOIN noderevision nr ON n.id = nr.node_id AND n.current_version = nr.version
             WHERE n.name IN :starting_names
@@ -250,7 +258,8 @@ async def find_upstream_node_names(
             -- Recursive case: find parents of current nodes
             SELECT
                 parent_nr.id as revision_id,
-                parent_n.name as node_name
+                parent_n.name as node_name,
+                u.node_name as child_name
             FROM upstream u
             JOIN noderelationship nrel ON u.revision_id = nrel.child_id
             JOIN node parent_n ON nrel.parent_id = parent_n.id
@@ -258,27 +267,29 @@ async def find_upstream_node_names(
                 AND parent_n.current_version = parent_nr.version
             WHERE parent_n.deactivated_at IS NULL
         )
-        SELECT DISTINCT node_name FROM upstream
+        SELECT DISTINCT node_name, child_name FROM upstream
     """).bindparams(bindparam("starting_names", expanding=True))
 
     result = await session.execute(
         recursive_query,
         {"starting_names": list(starting_node_names)},
     )
-    return {row[0] for row in result.fetchall()}
+    rows = result.fetchall()
 
+    # Collect all node names and parent relationships
+    all_names: set[str] = set()
+    # child_name -> list of parent_names
+    parent_map: dict[str, list[str]] = {}
 
-def _dimension_link_eager_load():
-    """Common eager loading options for dimension links and their dimensions."""
-    return selectinload(NodeRevision.dimension_links).options(
-        joinedload(DimensionLink.dimension).options(
-            selectinload(Node.current).options(
-                selectinload(NodeRevision.columns),
-                selectinload(NodeRevision.catalog),
-                selectinload(NodeRevision.dimension_links),
-            ),
-        ),
-    )
+    for node_name, child_name in rows:
+        all_names.add(node_name)
+        if child_name:
+            # node_name is the parent of child_name
+            if child_name not in parent_map:
+                parent_map[child_name] = []
+            parent_map[child_name].append(node_name)
+
+    return all_names, parent_map
 
 
 async def find_join_paths_batch(
@@ -469,12 +480,15 @@ async def load_nodes(ctx: BuildContext) -> None:
             initial_node_names.add(dim_ref.node_name)
             target_dim_names.add(dim_ref.node_name)
 
-    # Query 1: Find ALL upstream node names using lightweight recursive CTE
+    # Query 1: Find ALL upstream node names AND parent relationships using lightweight recursive CTE
     # This includes all transitive dependencies (sources, transforms, dimensions)
-    all_node_names = await find_upstream_node_names(
+    all_node_names, parent_map = await find_upstream_node_names(
         ctx.session,
         list(initial_node_names),
     )
+
+    # Store parent map in context for later use (e.g., get_parent_node)
+    ctx.parent_map = parent_map
 
     # Also include the initial nodes themselves
     all_node_names.update(initial_node_names)
@@ -482,6 +496,8 @@ async def load_nodes(ctx: BuildContext) -> None:
     logger.debug(f"[BuildV3] Found {len(all_node_names)} nodes to load")
 
     # Query 2: Batch load all nodes with appropriate eager loading
+    # NOTE: parents and dimension_links are NOT loaded here - parent relationships
+    # come from Query 1's parent_map, dimension_links from Queries 3-4
     stmt = (
         select(Node)
         .where(Node.name.in_(all_node_names))
@@ -491,9 +507,6 @@ async def load_nodes(ctx: BuildContext) -> None:
                 selectinload(NodeRevision.columns),
                 selectinload(NodeRevision.catalog),
                 selectinload(NodeRevision.required_dimensions),
-                _dimension_link_eager_load(),
-                # Still need parents for metrics to find their parent node
-                selectinload(NodeRevision.parents),
             ),
         )
     )
@@ -501,15 +514,20 @@ async def load_nodes(ctx: BuildContext) -> None:
     result = await ctx.session.execute(stmt)
     nodes = result.scalars().unique().all()
 
-    # Cache all loaded nodes and collect parent revision IDs (for join path lookup)
-    parent_revision_ids: set[int] = set()
+    # Cache all loaded nodes
     for node in nodes:
         ctx.nodes[node.name] = node
-        # Collect parent revision IDs for join path lookup
-        if node.type == NodeType.METRIC and node.current and node.current.parents:
-            for parent in node.current.parents:
-                if parent.current:
-                    parent_revision_ids.add(parent.current.id)
+
+    # Collect parent revision IDs for join path lookup (using parent_map from Query 1)
+    parent_revision_ids: set[int] = set()
+    for metric_name in ctx.metrics:
+        metric_node = ctx.nodes.get(metric_name)
+        if metric_node and metric_node.type == NodeType.METRIC:
+            parent_names = ctx.parent_map.get(metric_name, [])
+            for parent_name in parent_names:
+                parent_node = ctx.nodes.get(parent_name)
+                if parent_node and parent_node.current:
+                    parent_revision_ids.add(parent_node.current.id)
 
     logger.debug(f"[BuildV3] Loaded {len(ctx.nodes)} nodes")
 
@@ -640,25 +658,44 @@ def rewrite_table_references(
     query_ast: ast.Query,
     ctx: BuildContext,
     cte_names: dict[str, str],
+    inner_cte_renames: Optional[dict[str, str]] = None,
 ) -> ast.Query:
     """
     Rewrite table references in a query AST.
 
     - Source nodes → physical table names (catalog.schema.table)
     - Transform/dimension nodes → CTE names
+    - Inner CTE names → prefixed CTE names with alias to original name
+      e.g., `FROM base` → `FROM prefix_base base` (keeps column refs like base.col working)
 
     Args:
         query_ast: The query AST to rewrite (modified in place)
         ctx: Build context with loaded nodes
         cte_names: Mapping of node names to their CTE names
+        inner_cte_renames: Optional mapping of inner CTE old names to prefixed names
 
     Returns:
         The modified query AST
     """
+    inner_cte_renames = inner_cte_renames or {}
+
     for table in query_ast.find_all(ast.Table):
         table_name = str(table.name)
-        ref_node = ctx.nodes.get(table_name)
 
+        # First check if it's an inner CTE reference that needs renaming
+        if table_name in inner_cte_renames:
+            # Use the prefixed name but alias it to the original name
+            # So `FROM base` becomes `FROM prefix_base base`
+            # This keeps column references like `base.col` working
+            new_name = inner_cte_renames[table_name]
+            table.name = ast.Name(new_name)
+            # Only set alias if not already set (preserve existing aliases)
+            if not table.alias:
+                table.alias = ast.Name(table_name)
+            continue
+
+        # Then check if it's a node reference
+        ref_node = ctx.nodes.get(table_name)
         if ref_node:
             if ref_node.type == NodeType.SOURCE:
                 # Replace with physical table name
@@ -728,13 +765,16 @@ def get_metric_node(ctx: BuildContext, metric_name: str) -> Node:
 
 def get_parent_node(ctx: BuildContext, metric_node: Node) -> Node:
     """Get the parent node of a metric (the node it's defined on)."""
-    if not metric_node.current or not metric_node.current.parents:
+    # Use parent_map from Query 1 instead of the parents relationship
+    parent_names = ctx.parent_map.get(metric_node.name, [])
+    if not parent_names:
         raise DJInvalidInputException(f"Metric {metric_node.name} has no parent node")
 
-    parent_ref = metric_node.current.parents[0]
-    parent = ctx.nodes.get(parent_ref.name)
+    # Metrics typically have one parent (the node they SELECT FROM)
+    parent_name = parent_names[0]
+    parent = ctx.nodes.get(parent_name)
     if not parent:
-        raise DJInvalidInputException(f"Parent node not found: {parent_ref.name}")
+        raise DJInvalidInputException(f"Parent node not found: {parent_name}")
     return parent
 
 
@@ -928,14 +968,14 @@ def find_join_path(
         )
 
     # Fallback: check for direct links without role (may have been eagerly loaded)
-    if not role and from_node.current.dimension_links:
-        for link in from_node.current.dimension_links:
-            if link.dimension and link.dimension.name == target_dim_name:
-                return JoinPath(
-                    links=[link],
-                    target_dimension=link.dimension,
-                    role=role,
-                )
+    # if not role and from_node.current.dimension_links:
+    #     for link in from_node.current.dimension_links:
+    #         if link.dimension and link.dimension.name == target_dim_name:
+    #             return JoinPath(
+    #                 links=[link],
+    #                 target_dimension=link.dimension,
+    #                 role=role,
+    #             )
 
     return None
 
@@ -1161,6 +1201,71 @@ def get_table_reference(ctx: BuildContext, node: Node) -> tuple[str, bool]:
     return (cte_name, True)
 
 
+def flatten_inner_ctes(
+    query_ast: ast.Query,
+    outer_cte_name: str,
+) -> tuple[list[tuple[str, ast.Query]], dict[str, str]]:
+    """
+    Extract inner CTEs from a query and rename them to avoid collisions.
+
+    If a transform has:
+        WITH temp AS (SELECT ...) SELECT * FROM temp
+
+    We extract 'temp' as 'v3_transform__temp' and return the rename mapping.
+    The caller is responsible for rewriting references using the returned mapping.
+
+    Args:
+        query_ast: The parsed query that may contain inner CTEs
+        outer_cte_name: The name of the outer CTE (e.g., 'v3_order_details')
+
+    Returns:
+        Tuple of:
+        - List of (prefixed_cte_name, cte_query) tuples for the extracted CTEs
+        - Dict mapping old CTE names to new prefixed names (for reference rewriting)
+    """
+    if not query_ast.ctes:
+        return [], {}
+
+    extracted_ctes: list[tuple[str, ast.Query]] = []
+
+    # Build mapping of old CTE name -> new prefixed name
+    inner_cte_renames: dict[str, str] = {}
+    for inner_cte in query_ast.ctes:
+        if inner_cte.alias:
+            old_name = (
+                inner_cte.alias.name
+                if hasattr(inner_cte.alias, "name")
+                else str(inner_cte.alias)
+            )
+            new_name = f"{outer_cte_name}__{old_name}"
+            inner_cte_renames[old_name] = new_name
+
+    # Extract each inner CTE with renamed name
+    for inner_cte in query_ast.ctes:
+        if inner_cte.alias:
+            old_name = (
+                inner_cte.alias.name
+                if hasattr(inner_cte.alias, "name")
+                else str(inner_cte.alias)
+            )
+            new_name = inner_cte_renames[old_name]
+
+            # Create a new Query for the CTE content
+            cte_query = ast.Query(select=inner_cte.select)
+            if inner_cte.ctes:
+                # Recursively flatten if this CTE also has CTEs
+                nested_ctes, nested_renames = flatten_inner_ctes(cte_query, new_name)
+                extracted_ctes.extend(nested_ctes)
+                inner_cte_renames.update(nested_renames)
+
+            extracted_ctes.append((new_name, cte_query))
+
+    # Clear inner CTEs from the original query
+    query_ast.ctes = []
+
+    return extracted_ctes, inner_cte_renames
+
+
 def collect_node_ctes(
     ctx: BuildContext,
     nodes_to_include: list[Node],
@@ -1172,6 +1277,7 @@ def collect_node_ctes(
     This handles the full dependency chain:
     - Source nodes → replaced with physical table names (catalog.schema.table)
     - Transform/dimension nodes → recursive CTEs with dependencies resolved
+    - Inner CTEs within transforms → flattened and prefixed to avoid collisions
 
     Args:
         ctx: Build context
@@ -1230,8 +1336,22 @@ def collect_node_ctes(
         # Parse the node's query
         query_ast = parse(node.current.query)
 
-        # Rewrite table references (sources → physical tables, transforms → CTE names)
-        rewrite_table_references(query_ast, ctx, cte_names)
+        cte_name = cte_names[node.name]
+
+        # Flatten any inner CTEs to avoid nested WITH clauses
+        # Returns extracted CTEs and mapping of old names → prefixed names
+        inner_ctes, inner_cte_renames = flatten_inner_ctes(query_ast, cte_name)
+
+        # Rewrite table references in extracted inner CTEs
+        # (they may reference sources that need → physical table names)
+        for inner_cte_name, inner_cte_query in inner_ctes:
+            rewrite_table_references(inner_cte_query, ctx, cte_names, inner_cte_renames)
+
+        ctes.extend(inner_ctes)
+
+        # Rewrite table references in main query
+        # (sources → physical tables, transforms → CTE names, inner CTEs → prefixed names)
+        rewrite_table_references(query_ast, ctx, cte_names, inner_cte_renames)
 
         # Apply column filtering if specified
         needed_cols = None
@@ -1241,7 +1361,6 @@ def collect_node_ctes(
         if needed_cols:
             query_ast = filter_cte_projection(query_ast, needed_cols)
 
-        cte_name = cte_names[node.name]
         ctes.append((cte_name, query_ast))
 
     return ctes
