@@ -10,6 +10,12 @@ from fastapi import BackgroundTasks, Depends, Query, Request
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from datajunction_server.construction.build_v3 import (
+    build_metrics_sql,
+    build_measures_sql,
+)
+from datajunction_server.models.dialect import Dialect
+
 from datajunction_server.internal.caching.cachelib_cache import get_cache
 from datajunction_server.internal.caching.interface import Cache
 from datajunction_server.internal.caching.query_cache_manager import (
@@ -25,9 +31,9 @@ from datajunction_server.errors import DJInvalidInputException
 from datajunction_server.internal.access.authentication.http import SecureAPIRouter
 from datajunction_server.internal.access.authorization import validate_access
 from datajunction_server.models import access
-from datajunction_server.models.metric import TranslatedSQL
+from datajunction_server.models.metric import TranslatedSQL, V3TranslatedSQL
 from datajunction_server.models.node_type import NodeType
-from datajunction_server.models.query import ColumnMetadata
+from datajunction_server.models.query import V3ColumnMetadata
 from datajunction_server.models.sql import GeneratedSQL
 from datajunction_server.utils import (
     get_current_user,
@@ -170,7 +176,7 @@ class GrainGroupResponse(BaseModel):
     """Response model for a single grain group in measures SQL."""
 
     sql: str
-    columns: List[ColumnMetadata]
+    columns: List[V3ColumnMetadata]  # Clean V3 column metadata
     grain: List[str]
     aggregability: str
     metrics: List[str]
@@ -208,13 +214,7 @@ async def get_measures_sql_v3(
     Use cases:
     - Materialization: Each grain group can be materialized separately
     - Live queries: Pass to /sql/metrics/v3/ to get a single combined query
-
-    This is the new Build V3 SQL generation system - see ARCHITECTURE.md
-    in datajunction_server/construction/build_v3/ for details.
     """
-    from datajunction_server.construction.build_v3 import build_measures_sql
-    from datajunction_server.models.dialect import Dialect
-
     result = await build_measures_sql(
         session=session,
         metrics=metrics,
@@ -228,7 +228,7 @@ async def get_measures_sql_v3(
             GrainGroupResponse(
                 sql=gg.sql,
                 columns=[
-                    ColumnMetadata(
+                    V3ColumnMetadata(
                         name=col.name,
                         type=col.type,
                         semantic_entity=col.semantic_name,
@@ -251,7 +251,7 @@ async def get_measures_sql_v3(
 
 @router.get(
     "/sql/metrics/v3/",
-    response_model=TranslatedSQL,
+    response_model=V3TranslatedSQL,
     name="Get Metrics SQL V3",
     tags=["sql", "v3"],
 )
@@ -262,40 +262,26 @@ async def get_metrics_sql_v3(
     *,
     session: AsyncSession = Depends(get_session),
     current_user: User = Depends(get_current_user),
-) -> TranslatedSQL:
+) -> V3TranslatedSQL:
     """
     V3 Metrics SQL generation (for testing/development).
 
     Returns SQL with final metric expressions applied, including
     handling for derived metrics.
-
-    This is the new Build V3 SQL generation system - see ARCHITECTURE.md
-    in datajunction_server/construction/build_v3/ for details.
-
-    NOTE: Not yet implemented - will be available in Chunk 5.
     """
-    from datajunction_server.construction.build_v3 import build_metrics_sql
-    from datajunction_server.models.dialect import Dialect
-    from datajunction_server.errors import DJException
 
-    try:
-        result = await build_metrics_sql(
-            session=session,
-            metrics=metrics,
-            dimensions=dimensions,
-            filters=filters,
-            dialect=Dialect.SPARK,
-        )
-    except NotImplementedError as e:
-        raise DJException(
-            message=str(e) or "Metrics SQL V3 not yet implemented (Chunk 5)",
-            http_status_code=HTTPStatus.NOT_IMPLEMENTED,
-        )
+    result = await build_metrics_sql(
+        session=session,
+        metrics=metrics,
+        dimensions=dimensions,
+        filters=filters,
+        dialect=Dialect.SPARK,
+    )
 
-    return TranslatedSQL(
+    return V3TranslatedSQL(
         sql=result.sql,
         columns=[
-            ColumnMetadata(
+            V3ColumnMetadata(
                 name=col.name,
                 type=col.type,
                 semantic_entity=col.semantic_name,

@@ -21,27 +21,27 @@ class AliasRegistry:
     Maps semantic names to clean, unique SQL aliases.
 
     The registry tries to produce the shortest unique alias:
-    - 'orders.customer.country' → 'country' (if unique)
-    - 'orders.customer.country' → 'customer_country' (if 'country' taken)
-    - 'orders.customer.country' → 'orders_customer_country' (if both taken)
-    - 'orders.customer.country' → 'country_1' (fallback with numeric suffix)
+    - 'orders.customer.country' -> 'country' (if unique)
+    - 'orders.customer.country' -> 'customer_country' (if 'country' taken)
+    - 'orders.customer.country' -> 'orders_customer_country' (if both taken)
+    - 'orders.customer.country' -> 'country_1' (fallback with numeric suffix)
 
     Role support:
-    - 'v3.location.country[from]' → 'country_from' (role incorporated into alias)
-    - 'v3.location.country[to]' → 'country_to'
-    - 'v3.date.year[customer->registration]' → 'year_registration' (last part of role path)
+    - 'v3.location.country[from]' -> 'country_from' (role incorporated into alias)
+    - 'v3.location.country[to]' -> 'country_to'
+    - 'v3.date.year[customer->registration]' -> 'year_registration' (last part of role path)
 
     Usage:
         registry = AliasRegistry()
 
-        alias1 = registry.register('orders.customer.country')  # → 'country'
-        alias2 = registry.register('users.country')  # → 'users_country' (conflict)
-        alias3 = registry.register('v3.location.country[from]')  # → 'country_from'
-        alias4 = registry.register('v3.location.country[to]')  # → 'country_to'
+        alias1 = registry.register('orders.customer.country')  # -> 'country'
+        alias2 = registry.register('users.country')  # -> 'users_country' (conflict)
+        alias3 = registry.register('v3.location.country[from]')  # -> 'country_from'
+        alias4 = registry.register('v3.location.country[to]')  # -> 'country_to'
 
         # Later, look up the alias
-        alias = registry.get_alias('orders.customer.country')  # → 'country'
-        semantic = registry.get_semantic('country')  # → 'orders.customer.country'
+        alias = registry.get_alias('orders.customer.country')  # -> 'country'
+        semantic = registry.get_semantic('country')  # -> 'orders.customer.country'
     """
 
     # Characters that are not valid in SQL identifiers (will be replaced with _)
@@ -90,7 +90,7 @@ class AliasRegistry:
         return semantic_name in self._semantic_to_alias
 
     def _register(self, semantic_name: str, alias: str) -> None:
-        """Internal: register a semantic name → alias mapping."""
+        """Internal: register a semantic name -> alias mapping."""
         self._semantic_to_alias[semantic_name] = alias
         self._alias_to_semantic[alias] = semantic_name
         self._used_aliases.add(alias)
@@ -100,13 +100,13 @@ class AliasRegistry:
         Generate a unique alias for a semantic name.
 
         Strategy:
-        1. Extract role if present: 'v3.location.country[from]' → base='v3.location.country', role='from'
+        1. Extract role if present: 'v3.location.country[from]' -> base='v3.location.country', role='from'
         2. If role exists, always include it: 'country_from' (for clarity and predictability)
-        3. If no role, try the last part: 'orders.customer.country' → 'country'
+        3. If no role, try the last part: 'orders.customer.country' -> 'country'
         4. Try progressively longer suffixes: 'customer_country', 'orders_customer_country'
         5. Fall back to numeric suffix: 'country_1', 'country_2', ...
         """
-        # Extract role if present (e.g., "v3.location.country[from]" → base, role="from")
+        # Extract role if present (e.g., "v3.location.country[from]" -> base, role="from")
         base_name = semantic_name
         role_suffix = None
 
@@ -181,7 +181,7 @@ class AliasRegistry:
         return cleaned
 
     def all_mappings(self) -> dict[str, str]:
-        """Return all semantic → alias mappings."""
+        """Return all semantic -> alias mappings."""
         return dict(self._semantic_to_alias)
 
     def clear(self) -> None:
@@ -210,11 +210,11 @@ class ScopedAliasRegistry(AliasRegistry):
         registry = ScopedAliasRegistry()
 
         # Register some aliases
-        registry.register('orders.total')  # → 'total'
+        registry.register('orders.total')  # -> 'total'
 
         # Enter a new scope (e.g., for a subquery)
         registry.push_scope()
-        registry.register('users.total')  # → 'total' (different scope)
+        registry.register('users.total')  # -> 'total' (different scope)
 
         # Exit scope
         registry.pop_scope()
