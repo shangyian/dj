@@ -96,7 +96,8 @@ class BuildContext:
         return query_ast
 
     def get_parsed_join_condition(
-        self, link: DimensionLink,
+        self,
+        link: DimensionLink,
     ) -> Optional[ast.Expression]:
         """
         Get the parsed join condition AST for a dimension link, using cache.
@@ -282,30 +283,36 @@ def _dimension_link_eager_load():
 
 async def find_join_paths_batch(
     session: AsyncSession,
-    source_revision_id: int,
+    source_revision_ids: set[int],
     target_dimension_names: set[str],
     max_depth: int = 5,
-) -> dict[tuple[str, str], list[int]]:
+) -> dict[tuple[int, str, str], list[int]]:
     """
-    Find join paths from a source node to all target dimension nodes using a
-    single recursive CTE query.
+    Find join paths from multiple source nodes to all target dimension nodes
+    using a single recursive CTE query.
 
-    Returns a dict mapping (dimension_node_name, role_path) to the list of
-    DimensionLink IDs forming the path.
+    Args:
+        source_revision_ids: Set of source node revision IDs to find paths from
+        target_dimension_names: Set of dimension node names to find paths to
+        max_depth: Maximum path depth to search
+
+    Returns a dict mapping (source_revision_id, dimension_node_name, role_path)
+    to the list of DimensionLink IDs forming the path.
 
     The role_path is a "->" separated string of roles at each step.
     Empty roles are represented as empty strings.
 
-    This is O(1) database calls instead of O(nodes * depth) individual queries.
+    This is O(1) database calls instead of O(sources * nodes * depth) individual queries.
     """
-    if not target_dimension_names:
+    if not target_dimension_names or not source_revision_ids:
         return {}
 
-    # Single recursive CTE to find all paths at once
+    # Single recursive CTE to find all paths from all sources at once
     recursive_query = text("""
         WITH RECURSIVE paths AS (
-            -- Base case: first level dimension links from the source node
+            -- Base case: first level dimension links from any source node
             SELECT
+                dl.node_revision_id as source_rev_id,
                 dl.id as link_id,
                 n.name as dim_name,
                 CAST(dl.id AS TEXT) as path,
@@ -313,12 +320,13 @@ async def find_join_paths_batch(
                 1 as depth
             FROM dimensionlink dl
             JOIN node n ON dl.dimension_id = n.id
-            WHERE dl.node_revision_id = :source_revision_id
+            WHERE dl.node_revision_id IN :source_revision_ids
 
             UNION ALL
 
             -- Recursive case: follow dimension_links from each dimension node
             SELECT
+                paths.source_rev_id as source_rev_id,
                 dl2.id as link_id,
                 n2.name as dim_name,
                 paths.path || ',' || CAST(dl2.id AS TEXT) as path,
@@ -331,26 +339,29 @@ async def find_join_paths_batch(
             JOIN node n2 ON dl2.dimension_id = n2.id
             WHERE paths.depth < :max_depth
         )
-        SELECT dim_name, path, role_path, depth
+        SELECT source_rev_id, dim_name, path, role_path, depth
         FROM paths
         WHERE dim_name IN :target_names
         ORDER BY depth ASC
-    """).bindparams(bindparam("target_names", expanding=True))
+    """).bindparams(
+        bindparam("source_revision_ids", expanding=True),
+        bindparam("target_names", expanding=True),
+    )
 
     result = await session.execute(
         recursive_query,
         {
-            "source_revision_id": source_revision_id,
+            "source_revision_ids": list(source_revision_ids),
             "max_depth": max_depth,
             "target_names": list(target_dimension_names),
         },
     )
     rows = result.fetchall()
 
-    # Build paths dict keyed by (dim_name, role_path)
-    paths: dict[tuple[str, str], list[int]] = {}
-    for dim_name, path_str, role_path, depth in rows:
-        key = (dim_name, role_path or "")
+    # Build paths dict keyed by (source_rev_id, dim_name, role_path)
+    paths: dict[tuple[int, str, str], list[int]] = {}
+    for source_rev_id, dim_name, path_str, role_path, depth in rows:
+        key = (source_rev_id, dim_name, role_path or "")
         if key not in paths:  # Keep first (shortest) path
             paths[key] = [int(x) for x in path_str.split(",")]
 
@@ -392,22 +403,25 @@ async def load_dimension_links_batch(
 
 async def preload_join_paths(
     ctx: BuildContext,
-    source_revision_id: int,
+    source_revision_ids: set[int],
     target_dimension_names: set[str],
 ) -> None:
     """
-    Preload all join paths from a source node to target dimensions.
+    Preload all join paths from multiple source nodes to target dimensions.
 
-    Uses a single recursive CTE query to find paths, then a single batch
-    load for DimensionLink objects. Results are stored in ctx.join_paths.
+    Uses a single recursive CTE query to find paths from ALL sources at once,
+    then a single batch load for DimensionLink objects. Results are stored
+    in ctx.join_paths.
+
+    This is O(2) queries regardless of how many source nodes we have.
     """
-    if not target_dimension_names:
+    if not target_dimension_names or not source_revision_ids:
         return
 
-    # Find all paths using recursive CTE (single query)
+    # Find all paths from all sources using recursive CTE (single query)
     path_ids = await find_join_paths_batch(
         ctx.session,
-        source_revision_id,
+        source_revision_ids,
         target_dimension_names,
     )
 
@@ -420,15 +434,18 @@ async def preload_join_paths(
     link_dict = await load_dimension_links_batch(ctx.session, all_link_ids)
 
     # Store in context, keyed by (source_revision_id, dim_name, role_path)
-    for (dim_name, role_path), link_id_list in path_ids.items():
+    for (source_rev_id, dim_name, role_path), link_id_list in path_ids.items():
         links = [link_dict[lid] for lid in link_id_list if lid in link_dict]
-        ctx.join_paths[(source_revision_id, dim_name, role_path)] = links
+        ctx.join_paths[(source_rev_id, dim_name, role_path)] = links
         # Also cache dimension nodes
         for link in links:
             if link.dimension and link.dimension.name not in ctx.nodes:
                 ctx.nodes[link.dimension.name] = link.dimension
 
-    logger.debug(f"[BuildV3] Preloaded {len(path_ids)} join paths in 2 queries")
+    logger.debug(
+        f"[BuildV3] Preloaded {len(path_ids)} join paths for "
+        f"{len(source_revision_ids)} sources in 2 queries",
+    )
 
 
 async def load_nodes(ctx: BuildContext) -> None:
@@ -496,9 +513,8 @@ async def load_nodes(ctx: BuildContext) -> None:
 
     logger.debug(f"[BuildV3] Loaded {len(ctx.nodes)} nodes")
 
-    # Queries 3-4: Preload join paths for each parent node to target dimensions
-    for parent_revision_id in parent_revision_ids:
-        await preload_join_paths(ctx, parent_revision_id, target_dim_names)
+    # Queries 3-4: Preload join paths for ALL parent nodes in a single batch
+    await preload_join_paths(ctx, parent_revision_ids, target_dim_names)
 
 
 # =============================================================================
