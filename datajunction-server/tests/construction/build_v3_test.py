@@ -10,10 +10,7 @@ These tests cover:
 import re
 import pytest
 
-from datajunction_server.construction.build_v3 import (
-    AliasRegistry,
-    ScopedAliasRegistry,
-)
+from datajunction_server.construction.build_v3 import AliasRegistry
 from datajunction_server.construction.build_v3.builder import parse_dimension_ref
 from datajunction_server.sql.parsing.backends.antlr4 import parse as parse_sql
 
@@ -216,38 +213,6 @@ class TestAliasRegistry:
 
         alias3 = registry.register("v3.location.city[customer->home]")
         assert alias3 == "city_home"
-
-
-class TestScopedAliasRegistry:
-    """Tests for the ScopedAliasRegistry class."""
-
-    def test_push_pop_scope(self):
-        """Test scope push and pop."""
-        registry = ScopedAliasRegistry()
-
-        # Register in root scope
-        alias1 = registry.register("orders.total")
-        assert alias1 == "total"
-
-        # Push new scope
-        registry.push_scope()
-        assert registry.scope_depth == 1
-
-        # Can register same name in new scope (it returns existing)
-        alias2 = registry.register("orders.total")
-        assert alias2 == "total"
-
-        # Pop scope
-        registry.pop_scope()
-        assert registry.scope_depth == 0
-        assert registry.get_alias("orders.total") == "total"
-
-    def test_pop_empty_scope_raises(self):
-        """Test that popping empty scope raises error."""
-        registry = ScopedAliasRegistry()
-
-        with pytest.raises(ValueError):
-            registry.pop_scope()
 
 
 # =============================================================================

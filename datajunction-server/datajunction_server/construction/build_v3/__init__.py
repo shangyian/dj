@@ -17,10 +17,7 @@ from datajunction_server.construction.build_v3.builder import (
     GrainGroupSQL,
     ColumnMetadata,
 )
-from datajunction_server.construction.build_v3.alias_registry import (
-    AliasRegistry,
-    ScopedAliasRegistry,
-)
+from datajunction_server.construction.build_v3.alias_registry import AliasRegistry
 
 __all__ = [
     # Main entry points
@@ -34,5 +31,4 @@ __all__ = [
     "ColumnMetadata",
     # Alias registry
     "AliasRegistry",
-    "ScopedAliasRegistry",
 ]
