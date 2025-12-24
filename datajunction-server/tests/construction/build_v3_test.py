@@ -462,11 +462,11 @@ class TestMeasuresSQLEndpoint:
 
 
 class TestMetricsSQLEndpoint:
-    """Tests for the /sql/metrics/v3/ endpoint (placeholder for Chunk 5)."""
+    """Tests for the /sql/metrics/v3/ endpoint."""
 
     @pytest.mark.asyncio
-    async def test_not_implemented(self, client_with_build_v3):
-        """Test that metrics SQL endpoint returns not implemented error."""
+    async def test_basic_metrics_sql(self, client_with_build_v3):
+        """Test that metrics SQL endpoint returns valid SQL."""
         response = await client_with_build_v3.get(
             "/sql/metrics/v3/",
             params={
@@ -475,8 +475,12 @@ class TestMetricsSQLEndpoint:
             },
         )
 
-        # Should return 501 Not Implemented or similar error
-        assert response.status_code >= 400
+        # Should return 200 OK with SQL
+        assert response.status_code == 200
+        result = response.json()
+        assert "sql" in result
+        assert result["sql"]
+        assert "SELECT" in result["sql"].upper()
 
 
 # =============================================================================
@@ -2779,3 +2783,607 @@ class TestInnerCTEFlattening:
         assert with_count == 1, (
             f"Should have only one WITH clause, found {with_count}. Got:\n{sql}"
         )
+
+
+class TestMetricsSQLV3:
+    """Tests for build_metrics_sql"""
+
+    @pytest.mark.asyncio
+    async def test_simple_single_metric(self, client_with_build_v3):
+        """
+        Test metrics SQL for a single simple metric (SUM).
+
+        For single-component metrics, the output should be similar
+        to measures SQL since no combiner is needed.
+        """
+        response = await client_with_build_v3.get(
+            "/sql/metrics/v3/",
+            params={
+                "metrics": ["v3.total_revenue"],
+                "dimensions": ["v3.order_details.status"],
+            },
+        )
+
+        assert response.status_code == 200, response.json()
+        result = response.json()
+
+        # Should have SQL output
+        assert_sql_equal(
+            result["sql"],
+            """
+            WITH
+            v3_order_details AS (
+            SELECT  o.status,
+                oi.quantity * oi.unit_price AS line_total
+            FROM default.v3.orders o JOIN default.v3.order_items oi ON o.order_id = oi.order_id
+            )
+
+            SELECT  t1.status,
+                SUM(t1.line_total) total_revenue
+            FROM v3_order_details t1
+            GROUP BY  t1.status
+            """,
+        )
+
+        # Should have columns
+        assert len(result["columns"]) >= 2  # At least status + total_revenue
+        assert result["columns"] == [
+            {
+                "name": "status",
+                "type": "string",
+                "column": None,
+                "node": None,
+                "semantic_entity": "v3.order_details.status",
+                "semantic_type": "dimension",
+            },
+            {
+                "name": "total_revenue",
+                "type": "number",
+                "column": None,
+                "node": None,
+                "semantic_entity": "v3.total_revenue",
+                "semantic_type": "metric",
+            },
+        ]
+
+    @pytest.mark.asyncio
+    async def test_multi_component_metric(self, client_with_build_v3):
+        """
+        Test metrics SQL for a multi-component metric (AVG).
+
+        AVG decomposes into SUM and COUNT, and the combiner expression
+        should be applied: SUM(x) / COUNT(x).
+        """
+        response = await client_with_build_v3.get(
+            "/sql/metrics/v3/",
+            params={
+                "metrics": ["v3.avg_unit_price"],
+                "dimensions": ["v3.order_details.status"],
+            },
+        )
+
+        assert response.status_code == 200, response.json()
+        result = response.json()
+
+        # Should have SQL output with flattened CTEs
+        sql = result["sql"]
+        assert_sql_equal(
+            sql,
+            """
+            WITH
+            v3_order_details AS (
+                SELECT o.status, oi.unit_price
+                FROM default.v3.orders o
+                JOIN default.v3.order_items oi ON o.order_id = oi.order_id
+            ),
+            measures AS (
+                SELECT t1.status,
+                    COUNT(t1.unit_price) unit_price_count_55cff00f,
+                    SUM(t1.unit_price) unit_price_sum_55cff00f
+                FROM v3_order_details t1
+                GROUP BY t1.status
+            )
+            SELECT status,
+                SUM(unit_price_sum_55cff00f) / SUM(unit_price_count_55cff00f) AS avg_unit_price
+            FROM measures
+            """,
+        )
+        assert result["columns"] == [
+            {
+                "name": "status",
+                "type": "string",
+                "column": None,
+                "node": None,
+                "semantic_entity": "v3.order_details.status",
+                "semantic_type": "dimension",
+            },
+            {
+                "name": "avg_unit_price",
+                "type": "number",
+                "column": None,
+                "node": None,
+                "semantic_entity": "v3.avg_unit_price",
+                "semantic_type": "metric",
+            },
+        ]
+
+    @pytest.mark.asyncio
+    async def test_multiple_metrics_same_grain(self, client_with_build_v3):
+        """
+        Test metrics SQL for multiple metrics from the same parent.
+        """
+        response = await client_with_build_v3.get(
+            "/sql/metrics/v3/",
+            params={
+                "metrics": ["v3.total_revenue", "v3.total_quantity"],
+                "dimensions": ["v3.order_details.status"],
+            },
+        )
+
+        assert response.status_code == 200, response.json()
+        result = response.json()
+
+        assert_sql_equal(
+            result["sql"],
+            """
+            WITH
+            v3_order_details AS (
+                SELECT o.status, oi.quantity, oi.quantity * oi.unit_price AS line_total
+                FROM default.v3.orders o
+                JOIN default.v3.order_items oi ON o.order_id = oi.order_id
+            )
+            SELECT t1.status, SUM(t1.line_total) total_revenue, SUM(t1.quantity) total_quantity
+            FROM v3_order_details t1
+            GROUP BY t1.status
+            """,
+        )
+        assert result["columns"] == [
+            {
+                "name": "status",
+                "type": "string",
+                "column": None,
+                "node": None,
+                "semantic_entity": "v3.order_details.status",
+                "semantic_type": "dimension",
+            },
+            {
+                "name": "total_revenue",
+                "type": "number",
+                "column": None,
+                "node": None,
+                "semantic_entity": "v3.total_revenue",
+                "semantic_type": "metric",
+            },
+            {
+                "name": "total_quantity",
+                "type": "number",
+                "column": None,
+                "node": None,
+                "semantic_entity": "v3.total_quantity",
+                "semantic_type": "metric",
+            },
+        ]
+
+    @pytest.mark.asyncio
+    async def test_cross_fact_metrics(self, client_with_build_v3):
+        """
+        Test metrics SQL for metrics from different facts.
+
+        This should JOIN the grain groups together.
+        """
+        response = await client_with_build_v3.get(
+            "/sql/metrics/v3/",
+            params={
+                "metrics": ["v3.total_revenue", "v3.page_view_count"],
+                "dimensions": ["v3.product.category"],
+            },
+        )
+
+        assert response.status_code == 200, response.json()
+        result = response.json()
+
+        assert_sql_equal(
+            result["sql"],
+            """
+            WITH
+            gg0_v3_order_details AS (
+                SELECT oi.product_id, oi.quantity * oi.unit_price AS line_total
+                FROM default.v3.orders o
+                JOIN default.v3.order_items oi ON o.order_id = oi.order_id
+            ),
+            gg0_v3_product AS (
+                SELECT product_id, category
+                FROM default.v3.products
+            ),
+            gg0 AS (
+                SELECT t2.category, SUM(t1.line_total) total_revenue
+                FROM gg0_v3_order_details t1
+                LEFT OUTER JOIN gg0_v3_product t2 ON t1.product_id = t2.product_id
+                GROUP BY t2.category
+            ),
+            gg1_v3_page_views_enriched AS (
+                SELECT view_id, product_id
+                FROM default.v3.page_views
+            ),
+            gg1_v3_product AS (
+                SELECT product_id, category
+                FROM default.v3.products
+            ),
+            gg1 AS (
+                SELECT t2.category, COUNT(t1.view_id) page_view_count
+                FROM gg1_v3_page_views_enriched t1
+                LEFT OUTER JOIN gg1_v3_product t2 ON t1.product_id = t2.product_id
+                GROUP BY t2.category
+            )
+            SELECT COALESCE(gg0.category, gg1.category) AS category,
+                   gg0.total_revenue AS total_revenue,
+                   gg1.page_view_count AS page_view_count
+            FROM gg0
+            FULL OUTER JOIN gg1 ON gg0.category = gg1.category
+            """,
+        )
+        assert result["columns"] == [
+            {
+                "name": "category",
+                "type": "string",
+                "column": None,
+                "node": None,
+                "semantic_entity": "v3.product.category",  # Full dimension reference
+                "semantic_type": "dimension",
+            },
+            {
+                "name": "total_revenue",
+                "type": "number",
+                "column": None,
+                "node": None,
+                "semantic_entity": "v3.total_revenue",
+                "semantic_type": "metric",
+            },
+            {
+                "name": "page_view_count",
+                "type": "number",
+                "column": None,
+                "node": None,
+                "semantic_entity": "v3.page_view_count",
+                "semantic_type": "metric",
+            },
+        ]
+
+    @pytest.mark.asyncio
+    async def test_derived_metric_ratio(self, client_with_build_v3):
+        """
+        Test metrics SQL for a derived metric (conversion_rate = order_count / visitor_count).
+
+        This is a cross-fact derived metric that requires:
+        1. Computing order_count from order_details (COUNT DISTINCT order_id)
+        2. Computing visitor_count from page_views (COUNT DISTINCT customer_id)
+        3. Dividing them to get conversion_rate
+
+        Only the requested metric (conversion_rate) is in the output - base metrics
+        are computed internally but not exposed.
+        """
+        response = await client_with_build_v3.get(
+            "/sql/metrics/v3/",
+            params={
+                "metrics": ["v3.conversion_rate"],
+                "dimensions": ["v3.product.category"],
+            },
+        )
+
+        assert response.status_code == 200, response.json()
+        result = response.json()
+
+        assert_sql_equal(
+            result["sql"],
+            """
+            WITH
+            gg0_v3_order_details AS (
+                SELECT o.order_id, oi.product_id
+                FROM default.v3.orders o
+                JOIN default.v3.order_items oi ON o.order_id = oi.order_id
+            ),
+            gg0_v3_product AS (
+                SELECT product_id, category
+                FROM default.v3.products
+            ),
+            gg0 AS (
+                SELECT t2.category, t1.order_id
+                FROM gg0_v3_order_details t1
+                LEFT OUTER JOIN gg0_v3_product t2 ON t1.product_id = t2.product_id
+                GROUP BY t2.category, t1.order_id
+            ),
+            gg1_v3_page_views_enriched AS (
+                SELECT customer_id, product_id
+                FROM default.v3.page_views
+            ),
+            gg1_v3_product AS (
+                SELECT product_id, category
+                FROM default.v3.products
+            ),
+            gg1 AS (
+                SELECT t2.category, t1.customer_id
+                FROM gg1_v3_page_views_enriched t1
+                LEFT OUTER JOIN gg1_v3_product t2 ON t1.product_id = t2.product_id
+                GROUP BY t2.category, t1.customer_id
+            )
+            SELECT COALESCE(gg0.category, gg1.category) AS category,
+                   CAST(COUNT(DISTINCT gg0.order_id) AS DOUBLE) / NULLIF(COUNT(DISTINCT gg1.customer_id), 0) AS conversion_rate
+            FROM gg0
+            FULL OUTER JOIN gg1 ON gg0.category = gg1.category
+            """,
+        )
+        # Only the derived metric appears in output (not base metrics)
+        assert result["columns"] == [
+            {
+                "name": "category",
+                "type": "string",
+                "column": None,
+                "node": None,
+                "semantic_entity": "v3.product.category",  # Full dimension reference
+                "semantic_type": "dimension",
+            },
+            {
+                "name": "conversion_rate",
+                "type": "number",
+                "column": None,
+                "node": None,
+                "semantic_entity": "v3.conversion_rate",
+                "semantic_type": "metric",
+            },
+        ]
+
+    @pytest.mark.asyncio
+    async def test_multiple_derived_metrics_same_fact(self, client_with_build_v3):
+        """
+        Test metrics SQL for a derived metric from the same fact.
+
+        avg_order_value = total_revenue / order_count (both from order_details)
+
+        This uses different aggregabilities:
+        - total_revenue: FULL (SUM)
+        - order_count: LIMITED (COUNT DISTINCT order_id)
+
+        Only the requested metric (avg_order_value) is in the output.
+        """
+        response = await client_with_build_v3.get(
+            "/sql/metrics/v3/",
+            params={
+                "metrics": ["v3.avg_order_value", "v3.avg_items_per_order"],
+                "dimensions": ["v3.order_details.status"],
+            },
+        )
+
+        assert response.status_code == 200, response.json()
+        result = response.json()
+
+        assert_sql_equal(
+            result["sql"],
+            """
+            WITH
+            gg0_v3_order_details AS (
+                SELECT o.status, oi.quantity, oi.quantity * oi.unit_price AS line_total
+                FROM default.v3.orders o
+                JOIN default.v3.order_items oi ON o.order_id = oi.order_id
+            ),
+            gg0 AS (
+                SELECT t1.status, SUM(t1.line_total) total_revenue, SUM(t1.quantity) total_quantity
+                FROM gg0_v3_order_details t1
+                GROUP BY t1.status
+            ),
+            gg1_v3_order_details AS (
+                SELECT o.order_id, o.status
+                FROM default.v3.orders o
+                JOIN default.v3.order_items oi ON o.order_id = oi.order_id
+            ),
+            gg1 AS (
+                SELECT t1.status, t1.order_id
+                FROM gg1_v3_order_details t1
+                GROUP BY t1.status, t1.order_id
+            )
+            SELECT COALESCE(gg0.status, gg1.status) AS status,
+                   SUM(gg0.total_revenue) / NULLIF(COUNT(DISTINCT gg1.order_id), 0) AS avg_order_value,
+                   SUM(gg0.total_quantity) / NULLIF(COUNT( DISTINCT gg1.order_id), 0) AS avg_items_per_order
+            FROM gg0
+            FULL OUTER JOIN gg1 ON gg0.status = gg1.status
+            """,
+        )
+        # Only the derived metrics appear in output (not base metrics)
+        assert result["columns"] == [
+            {
+                "name": "status",
+                "type": "string",
+                "column": None,
+                "node": None,
+                "semantic_entity": "v3.order_details.status",  # Full dimension reference
+                "semantic_type": "dimension",
+            },
+            {
+                "name": "avg_order_value",
+                "type": "number",
+                "column": None,
+                "node": None,
+                "semantic_entity": "v3.avg_order_value",
+                "semantic_type": "metric",
+            },
+            {
+                "name": "avg_items_per_order",
+                "type": "number",
+                "column": None,
+                "node": None,
+                "semantic_entity": "v3.avg_items_per_order",
+                "semantic_type": "metric",
+            },
+        ]
+
+    @pytest.mark.asyncio
+    async def test_derived_metrics_cross_fact(self, client_with_build_v3):
+        response = await client_with_build_v3.get(
+            "/sql/metrics/v3/",
+            params={
+                "metrics": [
+                    "v3.conversion_rate",
+                    "v3.revenue_per_visitor",
+                    "v3.revenue_per_page_view",
+                ],
+                "dimensions": [
+                    "v3.product.category",
+                    "v3.customer.name[customer]",
+                ],
+            },
+        )
+
+        assert response.status_code == 200, response.json()
+        result = response.json()
+
+        assert_sql_equal(
+            result["sql"],
+            """
+            WITH
+            gg0_v3_customer AS (
+            SELECT  customer_id,
+                name
+            FROM default.v3.customers
+            ),
+            gg0_v3_order_details AS (
+            SELECT  o.customer_id,
+                oi.product_id,
+                oi.quantity * oi.unit_price AS line_total
+            FROM default.v3.orders o JOIN default.v3.order_items oi ON o.order_id = oi.order_id
+            ),
+            gg0_v3_product AS (
+            SELECT  product_id,
+                category
+            FROM default.v3.products
+            ),
+            gg0 AS (
+            SELECT  t2.category,
+                t3.name name_customer,
+                SUM(t1.line_total) total_revenue
+            FROM gg0_v3_order_details t1 LEFT OUTER JOIN gg0_v3_product t2 ON t1.product_id = t2.product_id
+            LEFT OUTER JOIN gg0_v3_customer t3 ON t1.customer_id = t3.customer_id
+            GROUP BY  t2.category, t3.name
+            ),
+            gg1_v3_customer AS (
+            SELECT  customer_id,
+                name
+            FROM default.v3.customers
+            ),
+            gg1_v3_order_details AS (
+            SELECT  o.order_id,
+                o.customer_id,
+                oi.product_id
+            FROM default.v3.orders o JOIN default.v3.order_items oi ON o.order_id = oi.order_id
+            ),
+            gg1_v3_product AS (
+            SELECT  product_id,
+                category
+            FROM default.v3.products
+            ),
+            gg1 AS (
+            SELECT  t2.category,
+                t3.name name_customer,
+                t1.order_id
+            FROM gg1_v3_order_details t1 LEFT OUTER JOIN gg1_v3_product t2 ON t1.product_id = t2.product_id
+            LEFT OUTER JOIN gg1_v3_customer t3 ON t1.customer_id = t3.customer_id
+            GROUP BY  t2.category, t3.name, t1.order_id
+            ),
+            gg2_v3_customer AS (
+            SELECT  customer_id,
+                name
+            FROM default.v3.customers
+            ),
+            gg2_v3_page_views_enriched AS (
+            SELECT  view_id,
+                customer_id,
+                product_id
+            FROM default.v3.page_views
+            ),
+            gg2_v3_product AS (
+            SELECT  product_id,
+                category
+            FROM default.v3.products
+            ),
+            gg2 AS (
+            SELECT  t2.category,
+                t3.name name_customer,
+                COUNT(t1.view_id) page_view_count
+            FROM gg2_v3_page_views_enriched t1 LEFT OUTER JOIN gg2_v3_product t2 ON t1.product_id = t2.product_id
+            LEFT OUTER JOIN gg2_v3_customer t3 ON t1.customer_id = t3.customer_id
+            GROUP BY  t2.category, t3.name
+            ),
+            gg3_v3_customer AS (
+            SELECT  customer_id,
+                name
+            FROM default.v3.customers
+            ),
+            gg3_v3_page_views_enriched AS (
+            SELECT  customer_id,
+                product_id
+            FROM default.v3.page_views
+            ),
+            gg3_v3_product AS (
+            SELECT  product_id,
+                category
+            FROM default.v3.products
+            ),
+            gg3 AS (
+            SELECT  t2.category,
+                t3.name name_customer,
+                t1.customer_id
+            FROM gg3_v3_page_views_enriched t1 LEFT OUTER JOIN gg3_v3_product t2 ON t1.product_id = t2.product_id
+            LEFT OUTER JOIN gg3_v3_customer t3 ON t1.customer_id = t3.customer_id
+            GROUP BY  t2.category, t3.name, t1.customer_id
+            )
+
+            SELECT  COALESCE(gg0.category, gg1.category, gg2.category, gg3.category) AS category,
+                COALESCE(gg0.name_customer, gg1.name_customer, gg2.name_customer, gg3.name_customer) AS name_customer,
+                CAST(COUNT( DISTINCT gg1.order_id) AS DOUBLE) / NULLIF(COUNT( DISTINCT gg3.customer_id), 0) AS conversion_rate,
+                SUM(gg0.total_revenue) / NULLIF(COUNT( DISTINCT gg3.customer_id), 0) AS revenue_per_visitor,
+                SUM(gg0.total_revenue) / NULLIF(SUM(gg2.page_view_count), 0) AS revenue_per_page_view
+            FROM gg0 FULL OUTER JOIN gg1 ON gg0.category = gg1.category AND gg0.name_customer = gg1.name_customer
+            FULL OUTER JOIN gg2 ON gg0.category = gg2.category AND gg0.name_customer = gg2.name_customer
+            FULL OUTER JOIN gg3 ON gg0.category = gg3.category AND gg0.name_customer = gg3.name_customer
+            """,
+        )
+        assert result["columns"] == [
+            {
+                "name": "category",
+                "type": "string",
+                "column": None,
+                "node": None,
+                "semantic_entity": "v3.product.category",  # Full dimension reference
+                "semantic_type": "dimension",
+            },
+            {
+                "name": "name_customer",
+                "type": "string",
+                "column": None,
+                "node": None,
+                "semantic_entity": "v3.customer.name[customer]",  # Full with role
+                "semantic_type": "dimension",
+            },
+            {
+                "name": "conversion_rate",
+                "type": "number",
+                "column": None,
+                "node": None,
+                "semantic_entity": "v3.conversion_rate",
+                "semantic_type": "metric",
+            },
+            {
+                "name": "revenue_per_visitor",
+                "type": "number",
+                "column": None,
+                "node": None,
+                "semantic_entity": "v3.revenue_per_visitor",
+                "semantic_type": "metric",
+            },
+            {
+                "name": "revenue_per_page_view",
+                "type": "number",
+                "column": None,
+                "node": None,
+                "semantic_entity": "v3.revenue_per_page_view",
+                "semantic_type": "metric",
+            },
+        ]

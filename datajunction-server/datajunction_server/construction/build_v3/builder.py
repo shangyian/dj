@@ -229,17 +229,41 @@ class DecomposedMetricInfo:
     """
     Information about a decomposed metric.
 
-    Contains the metric's components (for measures SQL) and aggregability info.
+    Contains the metric's components (for measures SQL), combiner expression
+    (for metrics SQL), and aggregability info.
     """
 
     metric_node: Node
     components: list[MetricComponent]  # The decomposed components
     aggregability: Aggregability  # Overall aggregability (FULL, LIMITED, NONE)
+    combiner: str  # Expression combining merged components into final value
+    derived_ast: ast.Query  # The full derived query AST
 
     @property
     def is_fully_decomposable(self) -> bool:
         """True if all components have FULL aggregability."""
         return all(c.rule.type == Aggregability.FULL for c in self.components)
+
+    def is_derived_for_parents(
+        self,
+        parent_names: list[str],
+        nodes: dict[str, Node],
+    ) -> bool:
+        """
+        Check if this metric references other metrics (not just a simple aggregation).
+
+        Args:
+            parent_names: List of parent node names from the parent_map
+            nodes: Dict of loaded nodes
+
+        Returns:
+            True if any parent is a metric
+        """
+        for parent_name in parent_names:
+            parent_node = nodes.get(parent_name)
+            if parent_node and parent_node.type == NodeType.METRIC:
+                return True
+        return False
 
 
 # =============================================================================
@@ -715,10 +739,10 @@ def rewrite_table_references(
     """
     Rewrite table references in a query AST.
 
-    - Source nodes → physical table names (catalog.schema.table)
-    - Transform/dimension nodes → CTE names
-    - Inner CTE names → prefixed CTE names with alias to original name
-      e.g., `FROM base` → `FROM prefix_base base` (keeps column refs like base.col working)
+    - Source nodes -> physical table names (catalog.schema.table)
+    - Transform/dimension nodes -> CTE names
+    - Inner CTE names -> prefixed CTE names with alias to original name
+      e.g., `FROM base` -> `FROM prefix_base base` (keeps column refs like base.col working)
 
     Args:
         query_ast: The query AST to rewrite (modified in place)
@@ -875,12 +899,12 @@ async def decompose_metric(
     Decompose a metric into its constituent components.
 
     Uses MetricComponentExtractor to break down aggregations like:
-    - SUM(x) → [sum_x component]
-    - AVG(x) → [sum_x component, count_x component]
-    - COUNT(DISTINCT x) → [distinct_x component with LIMITED aggregability]
+    - SUM(x) -> [sum_x component]
+    - AVG(x) -> [sum_x component, count_x component]
+    - COUNT(DISTINCT x) -> [distinct_x component with LIMITED aggregability]
 
     Returns:
-        DecomposedMetricInfo with components and aggregability
+        DecomposedMetricInfo with components, combiner expression, and aggregability
     """
     if not metric_node.current:
         raise DJInvalidInputException(
@@ -889,7 +913,13 @@ async def decompose_metric(
 
     # Use the existing MetricComponentExtractor
     extractor = MetricComponentExtractor(metric_node.current.id)
-    components, _ = await extractor.extract(session)
+    components, derived_ast = await extractor.extract(session)
+
+    # Extract combiner expression from the derived query AST
+    # The first projection element is the metric expression with component references
+    combiner = (
+        str(derived_ast.select.projection[0]) if derived_ast.select.projection else ""
+    )
 
     # Determine overall aggregability (worst case among components)
     if not components:
@@ -906,6 +936,8 @@ async def decompose_metric(
         metric_node=metric_node,
         components=components,
         aggregability=aggregability,
+        combiner=combiner,
+        derived_ast=derived_ast,
     )
 
 
@@ -1338,9 +1370,9 @@ def collect_node_ctes(
     Collect CTEs for all non-source nodes, recursively expanding table references.
 
     This handles the full dependency chain:
-    - Source nodes → replaced with physical table names (catalog.schema.table)
-    - Transform/dimension nodes → recursive CTEs with dependencies resolved
-    - Inner CTEs within transforms → flattened and prefixed to avoid collisions
+    - Source nodes -> replaced with physical table names (catalog.schema.table)
+    - Transform/dimension nodes -> recursive CTEs with dependencies resolved
+    - Inner CTEs within transforms -> flattened and prefixed to avoid collisions
 
     Args:
         ctx: Build context
@@ -1402,18 +1434,18 @@ def collect_node_ctes(
         cte_name = cte_names[node.name]
 
         # Flatten any inner CTEs to avoid nested WITH clauses
-        # Returns extracted CTEs and mapping of old names → prefixed names
+        # Returns extracted CTEs and mapping of old names -> prefixed names
         inner_ctes, inner_cte_renames = flatten_inner_ctes(query_ast, cte_name)
 
         # Rewrite table references in extracted inner CTEs
-        # (they may reference sources that need → physical table names)
+        # (they may reference sources that need -> physical table names)
         for inner_cte_name, inner_cte_query in inner_ctes:
             rewrite_table_references(inner_cte_query, ctx, cte_names, inner_cte_renames)
 
         ctes.extend(inner_ctes)
 
         # Rewrite table references in main query
-        # (sources → physical tables, transforms → CTE names, inner CTEs → prefixed names)
+        # (sources -> physical tables, transforms -> CTE names, inner CTEs -> prefixed names)
         rewrite_table_references(query_ast, ctx, cte_names, inner_cte_renames)
 
         # Apply column filtering if specified
@@ -2434,8 +2466,558 @@ async def build_metrics_sql(
     This is the main entry point for V3 metrics SQL generation.
 
     Metrics SQL applies final metric expressions on top of measures,
-    including handling derived metrics.
+    including handling derived metrics. It produces a single executable
+    query that:
+    1. Uses measures SQL output as CTEs (one per grain group)
+    2. JOINs grain groups if metrics come from different facts/aggregabilities
+    3. Applies combiner expressions for multi-component metrics
+    4. Computes derived metrics that reference other metrics
 
-    This will be implemented in Chunk 5.
+    Architecture:
+    - Layer 0 (Measures): Grain group CTEs from build_measures_sql()
+    - Layer 1 (Base Metrics): Combiner expressions applied
+    - Layer 2+ (Derived Metrics): Metrics referencing other metrics
     """
-    raise NotImplementedError("Metrics SQL not yet implemented (Chunk 5)")
+    # Step 1: Get measures SQL with grain groups
+    measures_result = await build_measures_sql(
+        session=session,
+        metrics=metrics,
+        dimensions=dimensions,
+        filters=filters,
+        dialect=dialect,
+    )
+
+    if not measures_result.grain_groups:
+        raise DJInvalidInputException("No grain groups produced from measures SQL")
+
+    # Step 2: Build context for metrics processing
+    ctx = BuildContext(
+        session=session,
+        metrics=metrics,
+        dimensions=dimensions,
+        filters=filters or [],
+        dialect=dialect,
+    )
+
+    # Load nodes for combiner expression extraction
+    await load_nodes(ctx)
+
+    # Step 3: Decompose all metrics to get combiner expressions
+    # This includes both requested metrics AND base metrics from grain groups
+    decomposed_metrics: dict[str, DecomposedMetricInfo] = {}
+
+    # First decompose requested metrics
+    for metric_name in metrics:
+        metric_node = ctx.nodes.get(metric_name)
+        if metric_node:
+            decomposed = await decompose_metric(session, metric_node)
+            decomposed_metrics[metric_name] = decomposed
+
+    # Also decompose base metrics from grain groups (needed for component mapping)
+    all_grain_group_metrics = set()
+    for gg in measures_result.grain_groups:
+        all_grain_group_metrics.update(gg.metrics)
+
+    for metric_name in all_grain_group_metrics:
+        if metric_name not in decomposed_metrics:
+            metric_node = ctx.nodes.get(metric_name)
+            if metric_node:
+                decomposed = await decompose_metric(session, metric_node)
+                decomposed_metrics[metric_name] = decomposed
+
+    # Step 4: Build metric dependency DAG and compute layers
+    metric_layers = compute_metric_layers(ctx, decomposed_metrics)
+
+    # Step 5: Generate the combined SQL
+    sql, columns = generate_metrics_sql(
+        ctx,
+        measures_result,
+        decomposed_metrics,
+        metric_layers,
+    )
+
+    return GeneratedSQL(
+        sql=sql,
+        columns=columns,
+        dialect=dialect,
+    )
+
+
+def compute_metric_layers(
+    ctx: BuildContext,
+    decomposed_metrics: dict[str, DecomposedMetricInfo],
+) -> list[list[str]]:
+    """
+    Compute the order in which metrics should be evaluated.
+
+    Returns a list of layers, where each layer contains metric names
+    that can be computed in parallel (no dependencies on each other).
+
+    Layer 0: Base metrics (no metric dependencies)
+    Layer 1+: Derived metrics (depend on metrics in previous layers)
+    """
+    # Build dependency graph
+    # A metric depends on another if its parent node is that metric
+    dependencies: dict[str, set[str]] = {name: set() for name in decomposed_metrics}
+
+    for metric_name in decomposed_metrics:
+        # Use parent_map from context instead of accessing lazy-loaded relationships
+        parent_names = ctx.parent_map.get(metric_name, [])
+        for parent_name in parent_names:
+            parent_node = ctx.nodes.get(parent_name)
+            if (
+                parent_node
+                and parent_node.type == NodeType.METRIC
+                and parent_name in decomposed_metrics
+            ):
+                dependencies[metric_name].add(parent_name)
+
+    # Topological sort into layers
+    layers: list[list[str]] = []
+    computed: set[str] = set()
+
+    while len(computed) < len(decomposed_metrics):
+        # Find metrics whose dependencies are all computed
+        layer = [
+            name
+            for name, deps in dependencies.items()
+            if name not in computed and deps <= computed
+        ]
+
+        if not layer:
+            # Circular dependency - shouldn't happen
+            remaining = set(decomposed_metrics.keys()) - computed
+            raise DJInvalidInputException(
+                f"Circular dependency detected in metrics: {remaining}",
+            )
+
+        layers.append(sorted(layer))  # Sort for deterministic output
+        computed.update(layer)
+
+    return layers
+
+
+def generate_metrics_sql(
+    ctx: BuildContext,
+    measures_result: GeneratedMeasuresSQL,
+    decomposed_metrics: dict[str, DecomposedMetricInfo],
+    metric_layers: list[list[str]],
+) -> tuple[str, list[ColumnMetadata]]:
+    """
+    Generate the final metrics SQL query.
+
+    This combines grain groups from measures SQL and applies
+    combiner expressions for each metric.
+    """
+    grain_groups = measures_result.grain_groups
+    dimensions = measures_result.requested_dimensions
+
+    # For single grain group - simple case
+    if len(grain_groups) == 1:
+        return generate_single_grain_group_metrics_sql(
+            ctx,
+            grain_groups[0],
+            decomposed_metrics,
+            metric_layers,
+            dimensions,
+        )
+
+    # For multiple grain groups - need to JOIN them
+    return generate_multi_grain_group_metrics_sql(
+        ctx,
+        grain_groups,
+        decomposed_metrics,
+        metric_layers,
+        dimensions,
+    )
+
+
+def generate_single_grain_group_metrics_sql(
+    ctx: BuildContext,
+    grain_group: GrainGroupSQL,
+    decomposed_metrics: dict[str, DecomposedMetricInfo],
+    metric_layers: list[list[str]],
+    dimensions: list[str],
+) -> tuple[str, list[ColumnMetadata]]:
+    """
+    Generate metrics SQL for a single grain group.
+
+    This wraps the measures SQL in CTEs and applies combiner expressions.
+    """
+    # For single-component metrics, the measures SQL already has the final value
+    # For multi-component metrics, we need to apply the combiner
+
+    # Check if any metric needs a combiner (has multiple components)
+    needs_combiner = any(
+        len(
+            decomposed_metrics.get(
+                m,
+                DecomposedMetricInfo(
+                    metric_node=Node(name="", type=NodeType.METRIC),
+                    components=[],
+                    aggregability=Aggregability.FULL,
+                    combiner="",
+                    derived_ast=ast.Query(select=ast.Select(projection=[])),
+                ),
+            ).components,
+        )
+        > 1
+        for m in grain_group.metrics
+    )
+
+    if not needs_combiner and len(metric_layers) == 1:
+        # Simple case: single-component metrics, no derived metrics
+        # Just return the measures SQL as-is
+        return grain_group.sql, grain_group.columns
+
+    # Build a wrapper query that applies combiners
+    # CTE structure:
+    #   WITH measures AS (<grain_group_sql>)
+    #   SELECT <dims>, <combiner_exprs> FROM measures
+
+    # Build projection with dimensions and metric combiners
+    projection: list[str] = []
+    columns_metadata: list[ColumnMetadata] = []
+
+    # Add dimension columns
+    for col in grain_group.columns:
+        if col.semantic_type == "dimension":
+            projection.append(col.name)
+            columns_metadata.append(col)
+
+    # Add metric columns with combiner expressions
+    for metric_name in grain_group.metrics:
+        decomposed = decomposed_metrics.get(metric_name)
+        if not decomposed:
+            continue
+
+        if len(decomposed.components) == 1:
+            # Single component - use the column directly
+            col_name = next(
+                (c.name for c in grain_group.columns if c.semantic_name == metric_name),
+                decomposed.components[0].name,
+            )
+            # Get the short metric name for the alias
+            short_name = metric_name.split(SEPARATOR)[-1]
+            projection.append(f"{col_name} AS {short_name}")
+            columns_metadata.append(
+                ColumnMetadata(
+                    name=short_name,
+                    semantic_name=metric_name,
+                    type="number",
+                    semantic_type="metric",
+                ),
+            )
+        else:
+            # Multi-component - apply combiner expression
+            # The combiner references component names which are column aliases
+            combiner_expr = decomposed.combiner
+            short_name = metric_name.split(SEPARATOR)[-1]
+            projection.append(f"{combiner_expr} AS {short_name}")
+            columns_metadata.append(
+                ColumnMetadata(
+                    name=short_name,
+                    semantic_name=metric_name,
+                    type="number",
+                    semantic_type="metric",
+                ),
+            )
+
+    # Build the SQL by flattening CTEs from measures SQL
+    measures_sql = grain_group.sql.strip()
+
+    # Parse the measures SQL to extract CTEs and main query
+    measures_ast = parse(measures_sql)
+
+    existing_ctes: list[str] = []
+    main_select_sql: str
+
+    if measures_ast.ctes:
+        # Extract existing CTEs - each CTE is a Query object with an alias
+        for cte in measures_ast.ctes:
+            # Get CTE name from alias
+            cte_name = str(cte.alias) if cte.alias else "unnamed_cte"
+            # Get the CTE body (the SELECT inside the CTE)
+            # Temporarily remove the alias and parenthesization to get clean SQL
+            cte.alias = None
+            cte.parenthesized = False
+            cte_body = str(cte)
+            existing_ctes.append(f"{cte_name} AS (\n{cte_body}\n)")
+
+        # Get the main SELECT (without the WITH clause)
+        # Temporarily remove CTEs to get just the SELECT
+        original_ctes = measures_ast.ctes
+        measures_ast.ctes = []
+        main_select_sql = str(measures_ast)
+        measures_ast.ctes = original_ctes  # Restore for safety
+    else:
+        main_select_sql = measures_sql
+
+    # Build the combined CTE list
+    all_ctes = existing_ctes + [f"measures AS (\n{main_select_sql}\n)"]
+
+    projection_str = ", ".join(projection)
+    cte_str = ",\n".join(all_ctes)
+    sql = f"""
+WITH
+{cte_str}
+SELECT {projection_str}
+FROM measures
+"""
+
+    return sql.strip() + "\n", columns_metadata
+
+
+def generate_multi_grain_group_metrics_sql(
+    ctx: BuildContext,
+    grain_groups: list[GrainGroupSQL],
+    decomposed_metrics: dict[str, DecomposedMetricInfo],
+    metric_layers: list[list[str]],
+    dimensions: list[str],
+) -> tuple[str, list[ColumnMetadata]]:
+    """
+    Generate metrics SQL for multiple grain groups.
+
+    This JOINs grain groups together on their common dimension columns
+    and applies combiner expressions.
+    """
+    # For cross-fact or cross-aggregability queries, we need to:
+    # 1. Extract CTEs from each grain group and flatten them
+    # 2. Create a final CTE for each grain group's main SELECT
+    # 3. FULL OUTER JOIN them on the common dimensions
+    # 4. Apply combiner expressions in the final SELECT
+
+    all_ctes: list[str] = []
+    cte_aliases: list[str] = []
+
+    for i, gg in enumerate(grain_groups):
+        alias = f"gg{i}"
+        cte_aliases.append(alias)
+        gg_sql = gg.sql.strip()
+
+        # Parse the grain group SQL to extract any CTEs
+        gg_ast = parse(gg_sql)
+
+        if gg_ast.ctes:
+            # Extract existing CTEs with prefixed names to avoid collisions
+            for cte in gg_ast.ctes:
+                cte_name = str(cte.alias) if cte.alias else "unnamed_cte"
+                # Prefix with grain group alias to avoid name collisions
+                prefixed_name = f"{alias}_{cte_name}"
+                # Get the CTE body
+                cte.alias = None
+                cte.parenthesized = False
+                cte_body = str(cte)
+                all_ctes.append(f"{prefixed_name} AS (\n{cte_body}\n)")
+
+            # Get the main SELECT (without CTEs) and update table references
+            gg_ast.ctes = []
+            main_select = str(gg_ast)
+            # Replace original CTE names with prefixed names
+            for cte in parse(gg_sql).ctes:
+                original_name = str(cte.alias) if cte.alias else "unnamed_cte"
+                prefixed_name = f"{alias}_{original_name}"
+                main_select = main_select.replace(original_name, prefixed_name)
+
+            all_ctes.append(f"{alias} AS (\n{main_select}\n)")
+        else:
+            # No CTEs - just wrap the query directly
+            all_ctes.append(f"{alias} AS (\n{gg_sql}\n)")
+
+    # Build projection
+    projection: list[str] = []
+    columns_metadata: list[ColumnMetadata] = []
+
+    # Parse dimensions to get column names and preserve mapping to original refs
+    dim_info: list[tuple[str, str]] = []  # (original_dim_ref, col_alias)
+    for dim in dimensions:
+        # Generate a consistent alias for this dimension
+        # Using register() ensures we get a proper alias (with role suffix if applicable)
+        col_name = ctx.alias_registry.register(dim)
+        dim_info.append((dim, col_name))
+
+    # Add dimension columns using COALESCE across all grain groups
+    for original_dim_ref, dim_col in dim_info:
+        coalesce_parts = [f"{alias}.{dim_col}" for alias in cte_aliases]
+        projection.append(f"COALESCE({', '.join(coalesce_parts)}) AS {dim_col}")
+        columns_metadata.append(
+            ColumnMetadata(
+                name=dim_col,
+                semantic_name=original_dim_ref,  # Preserve original dimension reference
+                type="string",
+                semantic_type="dimension",
+            ),
+        )
+
+    # Build maps for resolving references in derived metric expressions:
+    # 1. base_metric_columns: metric_name -> (gg_alias, output_col_name)
+    # 2. component_columns: component_name -> (gg_alias, actual_col_name)
+    # 3. base_metric_exprs: metric_name -> SQL expression (for use in derived metrics)
+    base_metric_columns: dict[str, tuple[str, str]] = {}
+    component_columns: dict[str, tuple[str, str]] = {}
+    base_metric_exprs: dict[str, str] = {}  # For building derived metric expressions
+
+    # Determine which metrics were explicitly requested by the user
+    requested_metrics_set = set(ctx.metrics)
+
+    # Process base metric columns from each grain group
+    for i, gg in enumerate(grain_groups):
+        alias = cte_aliases[i]
+        for metric_name in gg.metrics:
+            decomposed = decomposed_metrics.get(metric_name)
+            short_name = metric_name.split(SEPARATOR)[-1]
+
+            # Determine if this base metric was explicitly requested
+            # (not just needed for a derived metric)
+            is_explicitly_requested = metric_name in requested_metrics_set
+
+            if decomposed and len(decomposed.components) > 1:
+                # Multi-component - apply combiner with table alias prefix
+                combiner_expr = decomposed.combiner
+                # Prefix component references with table alias
+                for comp in decomposed.components:
+                    combiner_expr = combiner_expr.replace(
+                        comp.name,
+                        f"{alias}.{comp.name}",
+                    )
+                    # Track component for derived metric resolution
+                    component_columns[comp.name] = (alias, comp.name)
+
+                # Store expression for derived metrics
+                base_metric_exprs[metric_name] = combiner_expr
+
+                # Only add to projection if explicitly requested
+                if is_explicitly_requested:
+                    projection.append(f"{combiner_expr} AS {short_name}")
+                    columns_metadata.append(
+                        ColumnMetadata(
+                            name=short_name,
+                            semantic_name=metric_name,
+                            type="number",
+                            semantic_type="metric",
+                        ),
+                    )
+            else:
+                # Single component - find the actual column name in the grain group
+                # For LIMITED aggregability, the column is the grain column (e.g., order_id)
+                if decomposed and decomposed.components:
+                    comp = decomposed.components[0]
+                    # For LIMITED aggregability, use the component's expression (grain column)
+                    if decomposed.aggregability == Aggregability.LIMITED:
+                        actual_col = comp.expression  # e.g., "order_id"
+                        # The expression for derived metrics includes the aggregation
+                        agg_expr = decomposed.combiner.replace(
+                            comp.name,
+                            f"{alias}.{actual_col}",
+                        )
+                        base_metric_exprs[metric_name] = agg_expr
+                    else:
+                        # For FULL, use the column from metadata
+                        actual_col = next(
+                            (
+                                c.name
+                                for c in gg.columns
+                                if c.semantic_name == metric_name
+                            ),
+                            short_name,
+                        )
+                        base_metric_exprs[metric_name] = f"{alias}.{actual_col}"
+
+                    # Track component for derived metric resolution
+                    component_columns[comp.name] = (alias, actual_col)
+
+                    # Only add to projection if explicitly requested
+                    if is_explicitly_requested:
+                        if decomposed.aggregability == Aggregability.LIMITED:
+                            projection.append(f"{agg_expr} AS {short_name}")
+                        else:
+                            projection.append(f"{alias}.{actual_col} AS {short_name}")
+                        columns_metadata.append(
+                            ColumnMetadata(
+                                name=short_name,
+                                semantic_name=metric_name,
+                                type="number",
+                                semantic_type="metric",
+                            ),
+                        )
+                else:
+                    col_name = next(
+                        (c.name for c in gg.columns if c.semantic_name == metric_name),
+                        short_name,
+                    )
+                    base_metric_exprs[metric_name] = f"{alias}.{col_name}"
+
+                    # Only add to projection if explicitly requested
+                    if is_explicitly_requested:
+                        projection.append(f"{alias}.{col_name} AS {short_name}")
+                        columns_metadata.append(
+                            ColumnMetadata(
+                                name=short_name,
+                                semantic_name=metric_name,
+                                type="number",
+                                semantic_type="metric",
+                            ),
+                        )
+
+            # Track for derived metric resolution
+            base_metric_columns[metric_name] = (alias, short_name)
+
+    # Now handle derived metrics that reference the base metrics
+    # These are in ctx.metrics but not in any grain group's metrics
+    all_grain_group_metrics = set()
+    for gg in grain_groups:
+        all_grain_group_metrics.update(gg.metrics)
+
+    for metric_name in ctx.metrics:
+        if metric_name in all_grain_group_metrics:
+            # Already handled as a base metric
+            continue
+
+        decomposed = decomposed_metrics.get(metric_name)
+        if not decomposed:
+            continue
+
+        # This is a derived metric - get its combiner expression
+        short_name = metric_name.split(SEPARATOR)[-1]
+        combiner_expr = decomposed.combiner
+
+        # Replace component name references with qualified column references
+        # The combiner uses component names (e.g., order_id_distinct_f93d50ab)
+        for comp_name, (gg_alias, col_name) in component_columns.items():
+            combiner_expr = combiner_expr.replace(comp_name, f"{gg_alias}.{col_name}")
+
+        projection.append(f"{combiner_expr} AS {short_name}")
+        columns_metadata.append(
+            ColumnMetadata(
+                name=short_name,
+                semantic_name=metric_name,
+                type="number",
+                semantic_type="metric",
+            ),
+        )
+
+    # Build JOIN clause
+    # Use FULL OUTER JOIN on dimension columns
+    dim_col_aliases = [col_alias for _, col_alias in dim_info]
+    from_clause = cte_aliases[0]
+    for i in range(1, len(cte_aliases)):
+        join_conditions = [
+            f"{cte_aliases[0]}.{dim_col} = {cte_aliases[i]}.{dim_col}"
+            for dim_col in dim_col_aliases
+        ]
+        from_clause += (
+            f"\nFULL OUTER JOIN {cte_aliases[i]} ON {' AND '.join(join_conditions)}"
+        )
+
+    # Build the SQL
+    cte_separator = ",\n"
+    ctes_joined = cte_separator.join(all_ctes)
+    projection_joined = ", ".join(projection)
+    sql = f"""
+WITH
+{ctes_joined}
+SELECT {projection_joined}
+FROM {from_clause}
+"""
+
+    return sql.strip() + "\n", columns_metadata

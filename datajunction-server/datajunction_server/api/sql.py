@@ -295,7 +295,13 @@ async def get_metrics_sql_v3(
     return TranslatedSQL(
         sql=result.sql,
         columns=[
-            ColumnMetadata(name=col.name, type=col.type) for col in result.columns
+            ColumnMetadata(
+                name=col.name,
+                type=col.type,
+                semantic_entity=col.semantic_name,
+                semantic_type=col.semantic_type,
+            )
+            for col in result.columns
         ],
         dialect=result.dialect,
     )
