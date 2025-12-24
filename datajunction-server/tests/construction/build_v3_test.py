@@ -2636,8 +2636,8 @@ class TestMetricsSQLV3:
         """
         Test metrics SQL for a single simple metric (SUM).
 
-        For single-component metrics, the output should be similar
-        to measures SQL since no combiner is needed.
+        Even for single grain groups, the unified generate_metrics_sql
+        wraps the result in a grain group CTE (gg0) for consistency.
         """
         response = await client_with_build_v3.get(
             "/sql/metrics/v3/",
@@ -2650,26 +2650,27 @@ class TestMetricsSQLV3:
         assert response.status_code == 200, response.json()
         result = response.json()
 
-        # Should have SQL output
+        # Should have SQL output with gg0 wrapper
         assert_sql_equal(
             result["sql"],
             """
             WITH
-            v3_order_details AS (
-            SELECT  o.status,
-                oi.quantity * oi.unit_price AS line_total
-            FROM default.v3.orders o JOIN default.v3.order_items oi ON o.order_id = oi.order_id
+            gg0_v3_order_details AS (
+                SELECT o.status, oi.quantity * oi.unit_price AS line_total
+                FROM default.v3.orders o
+                JOIN default.v3.order_items oi ON o.order_id = oi.order_id
+            ),
+            gg0 AS (
+                SELECT t1.status, SUM(t1.line_total) total_revenue
+                FROM gg0_v3_order_details t1
+                GROUP BY t1.status
             )
-
-            SELECT  t1.status,
-                SUM(t1.line_total) total_revenue
-            FROM v3_order_details t1
-            GROUP BY  t1.status
+            SELECT COALESCE(gg0.status) AS status, gg0.total_revenue AS total_revenue
+            FROM gg0
             """,
         )
 
         # Should have columns
-        assert len(result["columns"]) >= 2  # At least status + total_revenue
         assert result["columns"] == [
             {
                 "name": "status",
@@ -2710,21 +2711,21 @@ class TestMetricsSQLV3:
             sql,
             """
             WITH
-            v3_order_details AS (
-                SELECT o.status, oi.unit_price
-                FROM default.v3.orders o
-                JOIN default.v3.order_items oi ON o.order_id = oi.order_id
+            gg0_v3_order_details AS (
+            SELECT  o.status,
+                oi.unit_price
+            FROM default.v3.orders o JOIN default.v3.order_items oi ON o.order_id = oi.order_id
             ),
-            measures AS (
-                SELECT t1.status,
-                    COUNT(t1.unit_price) unit_price_count_55cff00f,
-                    SUM(t1.unit_price) unit_price_sum_55cff00f
-                FROM v3_order_details t1
-                GROUP BY t1.status
+            gg0 AS (
+            SELECT  t1.status,
+                COUNT(t1.unit_price) unit_price_count_55cff00f,
+                SUM(t1.unit_price) unit_price_sum_55cff00f
+            FROM gg0_v3_order_details t1
+            GROUP BY  t1.status
             )
-            SELECT status,
-                SUM(unit_price_sum_55cff00f) / SUM(unit_price_count_55cff00f) AS avg_unit_price
-            FROM measures
+            SELECT  COALESCE(gg0.status) AS status,
+                SUM(gg0.unit_price_sum_55cff00f) / SUM(gg0.unit_price_count_55cff00f) AS avg_unit_price
+            FROM gg0
             """,
         )
         assert result["columns"] == [
@@ -2762,14 +2763,23 @@ class TestMetricsSQLV3:
             result["sql"],
             """
             WITH
-            v3_order_details AS (
-                SELECT o.status, oi.quantity, oi.quantity * oi.unit_price AS line_total
-                FROM default.v3.orders o
-                JOIN default.v3.order_items oi ON o.order_id = oi.order_id
+            gg0_v3_order_details AS (
+            SELECT  o.status,
+                oi.quantity,
+                oi.quantity * oi.unit_price AS line_total
+            FROM default.v3.orders o JOIN default.v3.order_items oi ON o.order_id = oi.order_id
+            ),
+            gg0 AS (
+            SELECT  t1.status,
+                SUM(t1.line_total) total_revenue,
+                SUM(t1.quantity) total_quantity
+            FROM gg0_v3_order_details t1
+            GROUP BY  t1.status
             )
-            SELECT t1.status, SUM(t1.line_total) total_revenue, SUM(t1.quantity) total_quantity
-            FROM v3_order_details t1
-            GROUP BY t1.status
+            SELECT  COALESCE(gg0.status) AS status,
+                gg0.total_revenue AS total_revenue,
+                gg0.total_quantity AS total_quantity
+            FROM gg0
             """,
         )
         assert result["columns"] == [
