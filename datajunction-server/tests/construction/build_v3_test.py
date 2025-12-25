@@ -2777,8 +2777,8 @@ class TestMetricsSQLV3:
             GROUP BY  t1.status
             )
             SELECT  COALESCE(gg0.status) AS status,
-                gg0.total_revenue AS total_revenue,
-                gg0.total_quantity AS total_quantity
+                gg0.total_quantity AS total_quantity,
+                gg0.total_revenue AS total_revenue
             FROM gg0
             """,
         )
@@ -2790,15 +2790,15 @@ class TestMetricsSQLV3:
                 "semantic_type": "dimension",
             },
             {
-                "name": "total_revenue",
-                "type": "number",
-                "semantic_entity": "v3.total_revenue",
-                "semantic_type": "metric",
-            },
-            {
                 "name": "total_quantity",
                 "type": "number",
                 "semantic_entity": "v3.total_quantity",
+                "semantic_type": "metric",
+            },
+            {
+                "name": "total_revenue",
+                "type": "number",
+                "semantic_entity": "v3.total_revenue",
                 "semantic_type": "metric",
             },
         ]

@@ -220,6 +220,15 @@ class ResolvedDimension:
 
 
 @dataclass
+class DimensionRef:
+    """Parsed dimension reference."""
+
+    node_name: str
+    column_name: str
+    role: Optional[str] = None
+
+
+@dataclass
 class DecomposedMetricInfo:
     """
     Information about a decomposed metric.
@@ -259,3 +268,71 @@ class DecomposedMetricInfo:
             if parent_node and parent_node.type == NodeType.METRIC:
                 return True
         return False
+
+
+@dataclass
+class MetricGroup:
+    """
+    A group of metrics that share the same parent node.
+
+    All metrics in a group can be computed in the same SELECT statement.
+    Contains decomposed metric info with components and aggregability.
+    """
+
+    parent_node: Node
+    decomposed_metrics: list[DecomposedMetricInfo]  # Decomposed metrics with components
+
+    @property
+    def overall_aggregability(self) -> Aggregability:
+        """
+        Get the worst-case aggregability across all metrics in this group.
+        """
+        if not self.decomposed_metrics:
+            return Aggregability.NONE
+
+        if any(m.aggregability == Aggregability.NONE for m in self.decomposed_metrics):
+            return Aggregability.NONE
+        if any(
+            m.aggregability == Aggregability.LIMITED for m in self.decomposed_metrics
+        ):
+            return Aggregability.LIMITED
+        return Aggregability.FULL
+
+    def get_all_components(self) -> list[tuple[Node, MetricComponent]]:
+        """Get all components with their source metric node."""
+        result = []
+        for decomposed in self.decomposed_metrics:
+            for component in decomposed.components:
+                result.append((decomposed.metric_node, component))
+        return result
+
+
+@dataclass
+class GrainGroup:
+    """
+    A group of metric components that share the same effective grain.
+
+    Components in the same grain group can be computed in a single SELECT
+    with the same GROUP BY clause.
+
+    Grain groups are determined by aggregability:
+    - FULL: requested dimensions only
+    - LIMITED: requested dimensions + level columns (e.g., customer_id for COUNT DISTINCT)
+    - NONE: native grain (primary key of parent node)
+    """
+
+    parent_node: Node
+    aggregability: Aggregability
+    grain_columns: list[str]  # Columns to GROUP BY (beyond requested dimensions)
+    components: list[tuple[Node, MetricComponent]]  # (metric_node, component) pairs
+
+    @property
+    def grain_key(self) -> tuple[str, Aggregability, tuple[str, ...]]:
+        """
+        Key for grouping: (parent_name, aggregability, sorted grain columns).
+        """
+        return (
+            self.parent_node.name,
+            self.aggregability,
+            tuple(sorted(self.grain_columns)),
+        )
