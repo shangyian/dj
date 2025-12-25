@@ -2777,8 +2777,8 @@ class TestMetricsSQLV3:
             GROUP BY  t1.status
             )
             SELECT  COALESCE(gg0.status) AS status,
-                gg0.total_quantity AS total_quantity,
-                gg0.total_revenue AS total_revenue
+                gg0.total_revenue AS total_revenue,
+                gg0.total_quantity AS total_quantity
             FROM gg0
             """,
         )
@@ -2790,15 +2790,15 @@ class TestMetricsSQLV3:
                 "semantic_type": "dimension",
             },
             {
-                "name": "total_quantity",
-                "type": "number",
-                "semantic_entity": "v3.total_quantity",
-                "semantic_type": "metric",
-            },
-            {
                 "name": "total_revenue",
                 "type": "number",
                 "semantic_entity": "v3.total_revenue",
+                "semantic_type": "metric",
+            },
+            {
+                "name": "total_quantity",
+                "type": "number",
+                "semantic_entity": "v3.total_quantity",
                 "semantic_type": "metric",
             },
         ]
@@ -3234,6 +3234,8 @@ class TestAdditionalMetricTypes:
                     "v3.min_unit_price",
                     "v3.completed_order_revenue",
                     "v3.total_revenue",
+                    "v3.price_spread",
+                    "v3.price_spread_pct",
                 ],
                 "dimensions": [
                     "v3.order_details.status",
@@ -3256,6 +3258,8 @@ class TestAdditionalMetricTypes:
             "v3.min_unit_price",
             "v3.completed_order_revenue",
             "v3.total_revenue",
+            "v3.price_spread",
+            "v3.avg_unit_price",
         }
 
         assert_sql_equal(
@@ -3280,7 +3284,9 @@ class TestAdditionalMetricTypes:
                 MAX(t1.unit_price) max_unit_price,
                 MIN(t1.unit_price) min_unit_price,
                 SUM(CASE WHEN t1.status = 'completed' THEN t1.line_total ELSE 0 END) completed_order_revenue,
-                SUM(t1.line_total) total_revenue
+                SUM(t1.line_total) total_revenue,
+                COUNT(t1.unit_price) unit_price_count_55cff00f,
+                SUM(t1.unit_price) unit_price_sum_55cff00f
             FROM v3_order_details t1 LEFT OUTER JOIN v3_product t2 ON t1.product_id = t2.product_id
             GROUP BY  t1.status, t2.category
             """,
@@ -3323,6 +3329,18 @@ class TestAdditionalMetricTypes:
                 "semantic_entity": "v3.total_revenue",
                 "semantic_type": "metric",
             },
+            {
+                "name": "unit_price_count_55cff00f",
+                "semantic_entity": "v3.avg_unit_price:unit_price_count_55cff00f",
+                "semantic_type": "metric_component",
+                "type": "number",
+            },
+            {
+                "name": "unit_price_sum_55cff00f",
+                "semantic_entity": "v3.avg_unit_price:unit_price_sum_55cff00f",
+                "semantic_type": "metric_component",
+                "type": "number",
+            },
         ]
 
     @pytest.mark.asyncio
@@ -3338,6 +3356,8 @@ class TestAdditionalMetricTypes:
                     "v3.min_unit_price",
                     "v3.completed_order_revenue",
                     "v3.total_revenue",
+                    "v3.price_spread",
+                    "v3.price_spread_pct",
                 ],
                 "dimensions": [
                     "v3.order_details.status",
@@ -3371,17 +3391,21 @@ class TestAdditionalMetricTypes:
                 MAX(t1.unit_price) max_unit_price,
                 MIN(t1.unit_price) min_unit_price,
                 SUM(CASE WHEN t1.status = 'completed' THEN t1.line_total ELSE 0 END) completed_order_revenue,
-                SUM(t1.line_total) total_revenue
+                SUM(t1.line_total) total_revenue,
+                COUNT(t1.unit_price) unit_price_count_55cff00f,
+                SUM(t1.unit_price) unit_price_sum_55cff00f
             FROM gg0_v3_order_details t1 LEFT OUTER JOIN gg0_v3_product t2 ON t1.product_id = t2.product_id
             GROUP BY  t1.status, t2.category
             )
 
             SELECT  COALESCE(gg0.status) AS status,
                 COALESCE(gg0.category) AS category,
-                gg0.completed_order_revenue AS completed_order_revenue,
                 gg0.max_unit_price AS max_unit_price,
                 gg0.min_unit_price AS min_unit_price,
-                gg0.total_revenue AS total_revenue
+                gg0.completed_order_revenue AS completed_order_revenue,
+                gg0.total_revenue AS total_revenue,
+                MAX(gg0.max_unit_price) - MIN(gg0.min_unit_price) AS price_spread,
+                (MAX(gg0.max_unit_price) - MIN(gg0.min_unit_price)) / NULLIF(SUM(gg0.unit_price_sum_55cff00f) / SUM(gg0.unit_price_count_55cff00f), 0) * 100 AS price_spread_pct
             FROM gg0
             """,
         )
@@ -3400,12 +3424,6 @@ class TestAdditionalMetricTypes:
                 "semantic_type": "dimension",
             },
             {
-                "name": "completed_order_revenue",
-                "type": "number",
-                "semantic_entity": "v3.completed_order_revenue",
-                "semantic_type": "metric",
-            },
-            {
                 "name": "max_unit_price",
                 "type": "number",
                 "semantic_entity": "v3.max_unit_price",
@@ -3418,10 +3436,28 @@ class TestAdditionalMetricTypes:
                 "semantic_type": "metric",
             },
             {
+                "name": "completed_order_revenue",
+                "type": "number",
+                "semantic_entity": "v3.completed_order_revenue",
+                "semantic_type": "metric",
+            },
+            {
                 "name": "total_revenue",
                 "type": "number",
                 "semantic_entity": "v3.total_revenue",
                 "semantic_type": "metric",
+            },
+            {
+                "name": "price_spread",
+                "semantic_entity": "v3.price_spread",
+                "semantic_type": "metric",
+                "type": "number",
+            },
+            {
+                "name": "price_spread_pct",
+                "semantic_entity": "v3.price_spread_pct",
+                "semantic_type": "metric",
+                "type": "number",
             },
         ]
 
@@ -3670,7 +3706,7 @@ class TestAdditionalMetricTypes:
             )
 
             SELECT  COALESCE(gg0.month_order) AS month_order,
-                (SUM(gg0.total_revenue) - LAG(SUM(gg0.total_revenue), 1) OVER ( ORDER BY v3.date.month) ) / NULLIF(LAG(SUM(gg0.total_revenue), 1) OVER ( ORDER BY v3.date.month) , 0) * 100 AS mom_revenue_change
+                (SUM(gg0.total_revenue) - LAG(SUM(gg0.total_revenue), 1) OVER ( ORDER BY month_order) ) / NULLIF(LAG(SUM(gg0.total_revenue), 1) OVER ( ORDER BY month_order) , 0) * 100 AS mom_revenue_change
             FROM gg0
             """,
         )

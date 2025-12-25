@@ -40,6 +40,8 @@ from datajunction_server.construction.build_v3.helpers import (
     make_name,
     parse_dimension_ref,
     analyze_grain_groups,
+    replace_dimension_refs_in_ast,
+    replace_component_refs_in_ast,
 )
 from datajunction_server.construction.build_v3.types import (
     BuildContext,
@@ -964,166 +966,113 @@ def generate_metrics_sql(
             ),
         )
 
-    # Build maps for resolving references in derived metric expressions:
-    # 1. base_metric_columns: metric_name -> (gg_alias, output_col_name)
-    # 2. component_columns: component_name -> (gg_alias, actual_col_name)
-    # 3. base_metric_exprs: metric_name -> SQL expression string (for use in derived metrics)
-    base_metric_columns: dict[str, tuple[str, str]] = {}
+    # Build maps for resolving references in metric expressions:
+    # 1. component_columns: component_name -> (gg_alias, actual_col_name)
+    # 2. metric_expr_asts: metric_name -> (expr_ast, short_name) for building projection
+    # 3. dimension_aliases: dimension_ref -> col_alias (for resolving dims in expressions)
     component_columns: dict[str, tuple[str, str]] = {}
-    base_metric_exprs: dict[str, str] = {}  # For building derived metric expressions
+    metric_expr_asts: dict[str, tuple[ast.Expression, str]] = {}
 
-    # Determine which metrics were explicitly requested by the user
-    requested_metrics_set = set(ctx.metrics)
+    # Build dimension alias mapping for resolving dimension references in metric expressions
+    # Dimension refs can appear anywhere: window functions, CASE expressions, arithmetic, etc.
+    # Maps both the full reference (with role) and the base reference (without role) to the alias
+    dimension_aliases: dict[str, str] = {}
+    for original_dim_ref, col_alias in dim_info:
+        dimension_aliases[original_dim_ref] = col_alias
+        # Also map the base dimension (without role) if different
+        # e.g., "v3.date.month[order]" -> also map "v3.date.month"
+        if "[" in original_dim_ref:
+            base_ref = original_dim_ref.split("[")[0]
+            # Only add base ref if not already mapped (first role wins)
+            if base_ref not in dimension_aliases:
+                dimension_aliases[base_ref] = col_alias
 
-    # Process base metric columns from each grain group
-    # Sort metrics within each grain group for deterministic output
-    for i, gg in enumerate(grain_groups):
-        alias = cte_aliases[i]
-        for metric_name in sorted(gg.metrics):
-            decomposed = decomposed_metrics.get(metric_name)
-            short_name = metric_name.split(SEPARATOR)[-1]
-
-            # Determine if this base metric was explicitly requested
-            # (not just needed for a derived metric)
-            is_explicitly_requested = metric_name in requested_metrics_set
-
-            if decomposed and len(decomposed.components) > 1:
-                # Multi-component - apply combiner with table alias prefix
-                # Use component_aliases to get the actual column name in the CTE
-                # (may differ from component.name if component was shared with a single-component metric)
-                combiner_expr = decomposed.combiner
-                for comp in decomposed.components:
-                    # Get the actual alias from the grain group, or fall back to comp.name
-                    actual_col = gg.component_aliases.get(comp.name, comp.name)
-                    combiner_expr = combiner_expr.replace(
-                        comp.name,
-                        f"{alias}.{actual_col}",
-                    )
-                    # Track component for derived metric resolution
-                    component_columns[comp.name] = (alias, actual_col)
-
-                # Store expression for derived metrics
-                base_metric_exprs[metric_name] = combiner_expr
-
-                # Only add to projection if explicitly requested
-                if is_explicitly_requested:
-                    # Parse the expression and add alias
-                    expr_ast = parse(f"SELECT {combiner_expr}").select.projection[0]
-                    aliased_expr = expr_ast.set_alias(ast.Name(short_name))
-                    aliased_expr.set_as(True)
-                    projection.append(aliased_expr)
-                    columns_metadata.append(
-                        ColumnMetadata(
-                            name=short_name,
-                            semantic_name=metric_name,
-                            type="number",
-                            semantic_type="metric",
-                        ),
-                    )
-            else:
-                # Single component - find the actual column name in the grain group
-                # For LIMITED aggregability, the column is the grain column (e.g., order_id)
-                if decomposed and decomposed.components:
-                    comp = decomposed.components[0]
-                    # For LIMITED aggregability, use the component's expression (grain column)
-                    if decomposed.aggregability == Aggregability.LIMITED:
-                        actual_col = comp.expression  # e.g., "order_id"
-                        # The expression for derived metrics includes the aggregation
-                        agg_expr = decomposed.combiner.replace(
-                            comp.name,
-                            f"{alias}.{actual_col}",
-                        )
-                        base_metric_exprs[metric_name] = agg_expr
-                    else:
-                        # For FULL, use the column from metadata
-                        actual_col = next(
-                            (
-                                c.name
-                                for c in gg.columns
-                                if c.semantic_name == metric_name
-                            ),
-                            short_name,
-                        )
-                        base_metric_exprs[metric_name] = f"{alias}.{actual_col}"
-
-                    # Track component for derived metric resolution
-                    component_columns[comp.name] = (alias, actual_col)
-
-                    # Only add to projection if explicitly requested
-                    if is_explicitly_requested:
-                        if decomposed.aggregability == Aggregability.LIMITED:
-                            expr_ast = parse(f"SELECT {agg_expr}").select.projection[0]
-                        else:
-                            expr_ast = ast.Column(
-                                name=ast.Name(actual_col),
-                                _table=ast.Table(ast.Name(alias)),
-                            )
-                        aliased_expr = expr_ast.set_alias(ast.Name(short_name))
-                        aliased_expr.set_as(True)
-                        projection.append(aliased_expr)
-                        columns_metadata.append(
-                            ColumnMetadata(
-                                name=short_name,
-                                semantic_name=metric_name,
-                                type="number",
-                                semantic_type="metric",
-                            ),
-                        )
-                else:
-                    col_name = next(
-                        (c.name for c in gg.columns if c.semantic_name == metric_name),
-                        short_name,
-                    )
-                    base_metric_exprs[metric_name] = f"{alias}.{col_name}"
-
-                    # Only add to projection if explicitly requested
-                    if is_explicitly_requested:
-                        expr_ast = ast.Column(
-                            name=ast.Name(col_name),
-                            _table=ast.Table(ast.Name(alias)),
-                        )
-                        aliased_expr = expr_ast.set_alias(ast.Name(short_name))
-                        aliased_expr.set_as(True)
-                        projection.append(aliased_expr)
-                        columns_metadata.append(
-                            ColumnMetadata(
-                                name=short_name,
-                                semantic_name=metric_name,
-                                type="number",
-                                semantic_type="metric",
-                            ),
-                        )
-
-            # Track for derived metric resolution
-            base_metric_columns[metric_name] = (alias, short_name)
-
-    # Now handle derived metrics that reference the base metrics
-    # These are in ctx.metrics but not in any grain group's metrics
+    # Collect all metrics in grain groups
     all_grain_group_metrics = set()
     for gg in grain_groups:
         all_grain_group_metrics.update(gg.metrics)
 
+    # =========================================================================
+    # PHASE 1: Build expressions for all metrics (don't add to projection yet)
+    # =========================================================================
+
+    # Process base metrics from each grain group
+    for i, gg in enumerate(grain_groups):
+        alias = cte_aliases[i]
+        for metric_name in gg.metrics:
+            decomposed = decomposed_metrics.get(metric_name)
+            short_name = metric_name.split(SEPARATOR)[-1]
+
+            if decomposed and len(decomposed.components) > 1:
+                # Multi-component metric
+                comp_alias_map: dict[str, tuple[str, str]] = {}
+                for comp in decomposed.components:
+                    actual_col = gg.component_aliases.get(comp.name, comp.name)
+                    comp_alias_map[comp.name] = (alias, actual_col)
+                    component_columns[comp.name] = (alias, actual_col)
+
+                expr_ast = decomposed.combiner_ast
+                replace_component_refs_in_ast(expr_ast, comp_alias_map)
+                replace_dimension_refs_in_ast(expr_ast, dimension_aliases)
+                metric_expr_asts[metric_name] = (expr_ast, short_name)
+
+            elif decomposed and decomposed.components:
+                comp = decomposed.components[0]
+                if decomposed.aggregability == Aggregability.LIMITED:
+                    actual_col = comp.expression
+                    comp_alias_map = {comp.name: (alias, actual_col)}
+                    expr_ast = decomposed.combiner_ast
+                    replace_component_refs_in_ast(expr_ast, comp_alias_map)
+                    replace_dimension_refs_in_ast(expr_ast, dimension_aliases)
+                else:
+                    actual_col = next(
+                        (c.name for c in gg.columns if c.semantic_name == metric_name),
+                        short_name,
+                    )
+                    expr_ast = ast.Column(
+                        name=ast.Name(actual_col),
+                        _table=ast.Table(ast.Name(alias)),
+                    )
+
+                component_columns[comp.name] = (alias, actual_col)
+                metric_expr_asts[metric_name] = (expr_ast, short_name)
+            else:
+                # No decomposition info - use column from metadata
+                col_name = next(
+                    (c.name for c in gg.columns if c.semantic_name == metric_name),
+                    short_name,
+                )
+                expr_ast = ast.Column(
+                    name=ast.Name(col_name),
+                    _table=ast.Table(ast.Name(alias)),
+                )
+                metric_expr_asts[metric_name] = (expr_ast, short_name)
+
+    # Process derived metrics (not in any grain group)
     for metric_name in ctx.metrics:
         if metric_name in all_grain_group_metrics:
-            # Already handled as a base metric
             continue
 
         decomposed = decomposed_metrics.get(metric_name)
         if not decomposed:
             continue
 
-        # This is a derived metric - get its combiner expression
         short_name = metric_name.split(SEPARATOR)[-1]
-        combiner_expr = decomposed.combiner
+        expr_ast = decomposed.combiner_ast
+        replace_component_refs_in_ast(expr_ast, component_columns)
+        replace_dimension_refs_in_ast(expr_ast, dimension_aliases)
+        metric_expr_asts[metric_name] = (expr_ast, short_name)
 
-        # Replace component name references with qualified column references
-        # The combiner uses component names (e.g., order_id_distinct_f93d50ab)
-        for comp_name, (gg_alias, col_name) in component_columns.items():
-            combiner_expr = combiner_expr.replace(comp_name, f"{gg_alias}.{col_name}")
+    # =========================================================================
+    # PHASE 2: Build projection in requested order
+    # =========================================================================
 
-        # Parse the expression and add alias
-        expr_ast = parse(f"SELECT {combiner_expr}").select.projection[0]
-        aliased_expr = expr_ast.set_alias(ast.Name(short_name))
+    for metric_name in ctx.metrics:
+        if metric_name not in metric_expr_asts:
+            continue
+
+        expr_ast, short_name = metric_expr_asts[metric_name]
+        aliased_expr = expr_ast.set_alias(ast.Name(short_name))  # type: ignore
         aliased_expr.set_as(True)
         projection.append(aliased_expr)
         columns_metadata.append(

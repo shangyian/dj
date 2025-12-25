@@ -247,6 +247,102 @@ def extract_columns_from_expression(expr: ast.Expression) -> set[str]:
     return columns
 
 
+def get_column_full_name(col: ast.Column) -> str:
+    """
+    Get the full dotted name of a column, including its table/namespace.
+
+    For example, a column like v3.date.month returns "v3.date.month".
+    """
+    parts: list[str] = []
+
+    # Get table prefix if present
+    if col.table and hasattr(col.table, "alias_or_name"):
+        table_name = col.table.alias_or_name
+        if table_name:
+            if isinstance(table_name, str):
+                parts.append(table_name)
+            else:
+                # It's an ast.Name with possible namespace
+                parts.append(table_name.identifier(quotes=False))
+
+    # Get column name with its namespace chain
+    if col.name:
+        parts.append(col.name.identifier(quotes=False))
+
+    return ".".join(parts) if parts else ""
+
+
+def replace_component_refs_in_ast(
+    expr_ast: ast.Node,
+    component_aliases: dict[str, tuple[str, str]],
+) -> None:
+    """
+    Replace component name references in an AST with qualified column references.
+
+    Modifies the AST in place. For each Column node in the AST, checks if its
+    name matches a component name (hash-based like "unit_price_sum_abc123").
+    If so, replaces it with a qualified reference like "gg0.actual_col".
+
+    Args:
+        expr_ast: The AST expression to modify (mutated in place)
+        component_aliases: Mapping from component name to (table_alias, column_name)
+            e.g., {"unit_price_sum_abc123": ("gg0", "sum_unit_price")}
+    """
+    for col in expr_ast.find_all(ast.Column):
+        # Get the column name (might be in name.name or just name)
+        col_name = col.name.name if col.name else None
+        if not col_name:
+            continue
+
+        # Check if this column name matches a component
+        if col_name in component_aliases:
+            table_alias, actual_col = component_aliases[col_name]
+            # Replace with qualified column reference
+            col.name = ast.Name(actual_col)
+            col._table = ast.Table(ast.Name(table_alias))
+
+
+def replace_dimension_refs_in_ast(
+    expr_ast: ast.Node,
+    dimension_aliases: dict[str, str],
+) -> None:
+    """
+    Replace dimension references in an AST with their resolved column aliases.
+
+    Modifies the AST in place. For each Column node in the AST, checks if its
+    full identifier (e.g., "v3.date.month") matches a dimension reference.
+    If so, replaces it with a simple column reference using the resolved alias.
+
+    Args:
+        expr_ast: The AST expression to modify (mutated in place)
+        dimension_aliases: Mapping from dimension refs to column aliases
+            e.g., {"v3.date.month": "month_order", "v3.date.month[order]": "month_order"}
+    """
+    for col in expr_ast.find_all(ast.Column):
+        full_name = get_column_full_name(col)
+        if not full_name:
+            continue
+
+        # Check for exact match first (handles roles like "v3.date.month[order]")
+        if full_name in dimension_aliases:
+            alias = dimension_aliases[full_name]
+            # Replace with simple column reference
+            col.name = ast.Name(alias)
+            col._table = None
+            continue
+
+        # Check without role suffix (for base dimension refs)
+        # The column AST might be just "v3.date.month" but we have "v3.date.month[order]"
+        for dim_ref, alias in dimension_aliases.items():
+            # Match if the dim_ref starts with our full_name and has a role suffix
+            if dim_ref.startswith(full_name) and (
+                dim_ref == full_name or dim_ref[len(full_name)] == "["
+            ):
+                col.name = ast.Name(alias)
+                col._table = None
+                break
+
+
 def topological_sort_nodes(ctx: BuildContext, node_names: set[str]) -> list[Node]:
     """
     Sort nodes in topological order (dependencies first).

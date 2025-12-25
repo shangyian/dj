@@ -243,8 +243,23 @@ class DecomposedMetricInfo:
     metric_node: Node
     components: list[MetricComponent]  # The decomposed components
     aggregability: Aggregability  # Overall aggregability (FULL, LIMITED, NONE)
-    combiner: str  # Expression combining merged components into final value
+    combiner: (
+        str  # Expression combining merged components into final value (deprecated)
+    )
     derived_ast: ast.Query  # The full derived query AST
+
+    @property
+    def combiner_ast(self) -> ast.Expression:
+        """
+        Get the combiner expression as an AST node.
+
+        This is the first projection element from the derived query AST,
+        which contains the metric expression with component references.
+        """
+        from copy import deepcopy
+
+        # Return a copy to avoid mutating the original AST
+        return deepcopy(self.derived_ast.select.projection[0])  # type: ignore
 
     @property
     def is_fully_decomposable(self) -> bool:
