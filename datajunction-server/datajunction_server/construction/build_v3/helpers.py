@@ -46,6 +46,18 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 
 
+def get_short_name(full_name: str) -> str:
+    """
+    Get the last segment of a dot-separated name.
+
+    Examples:
+        get_short_name("v3.order_details") -> "order_details"
+        get_short_name("v3.product.category") -> "category"
+        get_short_name("simple_name") -> "simple_name"
+    """
+    return full_name.split(SEPARATOR)[-1]
+
+
 def get_column_type(node: Node, column_name: str) -> str:
     """
     Look up the column type from a node's columns.
@@ -816,7 +828,7 @@ def can_skip_join_for_dimension(
 
     # Check if this dimension column is in the foreign keys mapping
     if parent_col := link.foreign_keys_reversed.get(dim_col_fqn):
-        return True, parent_col.split(SEPARATOR)[-1]
+        return True, get_short_name(parent_col)
     return False, None
 
 

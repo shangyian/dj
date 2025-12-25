@@ -43,6 +43,7 @@ from datajunction_server.construction.build_v3.helpers import (
     merge_grain_groups,
     replace_dimension_refs_in_ast,
     replace_component_refs_in_ast,
+    get_short_name,
 )
 from datajunction_server.construction.build_v3.types import (
     BuildContext,
@@ -116,7 +117,7 @@ def build_select_ast(
                     if resolved_dim.role:
                         alias_base = resolved_dim.role.replace("->", "_")
                     else:
-                        alias_base = dim_node_name.split(SEPARATOR)[-1]
+                        alias_base = get_short_name(dim_node_name)
                     dim_alias = ctx.next_table_alias(alias_base)
                     dim_aliases[dim_key] = dim_alias
 
@@ -255,7 +256,7 @@ def build_select_ast(
                             col_id = col.identifier()
                             # Check if column is from parent node
                             if col_id.startswith(parent_node.name + SEPARATOR):
-                                col_name = col_id.split(SEPARATOR)[-1]
+                                col_name = get_short_name(col_id)
                                 parent_needed_cols.add(col_name)
 
     # Parent node needs CTE if it's not a source
@@ -288,7 +289,7 @@ def build_select_ast(
                             for col in join_cols.find_all(ast.Column):
                                 col_id = col.identifier()
                                 if col_id.startswith(dim_node.name + SEPARATOR):
-                                    col_name = col_id.split(SEPARATOR)[-1]
+                                    col_name = get_short_name(col_id)
                                     dim_cols.add(col_name)
 
                     # Merge with existing if any
@@ -482,7 +483,7 @@ def build_grain_group_sql(
                 num_components = components_per_metric.get(metric_node.name, 1)
                 is_simple = num_components == 1
                 if is_simple:
-                    component_alias = metric_node.name.split(SEPARATOR)[-1]
+                    component_alias = get_short_name(metric_node.name)
                 else:
                     component_alias = component.name
                 expr_ast = build_component_expression(component)
@@ -1062,7 +1063,7 @@ def generate_metrics_sql(
 
     for gg in grain_groups:
         # Get short parent name (last part after separator)
-        parent_short = gg.parent_name.split(SEPARATOR)[-1]
+        parent_short = get_short_name(gg.parent_name)
         # Get next index for this parent
         idx = parent_index_counter.get(parent_short, 0)
         parent_index_counter[parent_short] = idx + 1
@@ -1150,7 +1151,7 @@ def generate_metrics_sql(
         alias = cte_aliases[i]
         for metric_name in gg.metrics:
             decomposed = decomposed_metrics.get(metric_name)
-            short_name = metric_name.split(SEPARATOR)[-1]
+            short_name = get_short_name(metric_name)
 
             if not decomposed or not decomposed.components:
                 # No decomposition info - use column from metadata
