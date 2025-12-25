@@ -21,7 +21,6 @@ from datajunction_server.models.decompose import MetricComponent, Aggregability
 from datajunction_server.models.dialect import Dialect
 from datajunction_server.models.node_type import NodeType
 from datajunction_server.sql.parsing import ast
-from datajunction_server.sql.parsing.backends.antlr4 import parse
 from datajunction_server.utils import SEPARATOR
 from datajunction_server.construction.build_v3.loaders import load_nodes
 from datajunction_server.construction.build_v3.helpers import (
@@ -44,6 +43,7 @@ from datajunction_server.construction.build_v3.helpers import (
     replace_dimension_refs_in_ast,
     replace_component_refs_in_ast,
     get_short_name,
+    extract_join_columns_for_node,
 )
 from datajunction_server.construction.build_v3.types import (
     BuildContext,
@@ -247,17 +247,10 @@ def build_select_ast(
     for resolved_dim in resolved_dimensions:
         if resolved_dim.join_path:
             for link in resolved_dim.join_path.links:
-                # Extract the column name from the join_sql for the parent side
-                # join_sql is like "v3.order_details.customer_id = v3.customer.customer_id"
                 if link.join_sql:
-                    join_cols = parse(f"SELECT 1 WHERE {link.join_sql}").select.where
-                    if join_cols:
-                        for col in join_cols.find_all(ast.Column):
-                            col_id = col.identifier()
-                            # Check if column is from parent node
-                            if col_id.startswith(parent_node.name + SEPARATOR):
-                                col_name = get_short_name(col_id)
-                                parent_needed_cols.add(col_name)
+                    parent_needed_cols.update(
+                        extract_join_columns_for_node(link.join_sql, parent_node.name),
+                    )
 
     # Parent node needs CTE if it's not a source
     if parent_node.type != NodeType.SOURCE:
@@ -282,15 +275,9 @@ def build_select_ast(
 
                     # Add join key columns from this dimension
                     if link.join_sql:
-                        join_cols = parse(
-                            f"SELECT 1 WHERE {link.join_sql}",
-                        ).select.where
-                        if join_cols:
-                            for col in join_cols.find_all(ast.Column):
-                                col_id = col.identifier()
-                                if col_id.startswith(dim_node.name + SEPARATOR):
-                                    col_name = get_short_name(col_id)
-                                    dim_cols.add(col_name)
+                        dim_cols.update(
+                            extract_join_columns_for_node(link.join_sql, dim_node.name),
+                        )
 
                     # Merge with existing if any
                     if dim_node.name in needed_columns_by_node:

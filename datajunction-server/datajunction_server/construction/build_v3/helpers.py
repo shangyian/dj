@@ -58,6 +58,37 @@ def get_short_name(full_name: str) -> str:
     return full_name.split(SEPARATOR)[-1]
 
 
+def extract_join_columns_for_node(join_sql: str, node_name: str) -> set[str]:
+    """
+    Extract column names from join SQL that belong to a specific node.
+
+    Parses the join_sql (e.g., "v3.order_details.customer_id = v3.customer.customer_id")
+    and returns the short column names for columns belonging to the given node.
+
+    Args:
+        join_sql: The join condition SQL string
+        node_name: The fully qualified node name to filter by
+
+    Returns:
+        Set of short column names (e.g., {"customer_id"})
+
+    Examples:
+        extract_join_columns_for_node(
+            "v3.order_details.customer_id = v3.customer.customer_id",
+            "v3.order_details"
+        ) -> {"customer_id"}
+    """
+    result: set[str] = set()
+    join_expr = parse(f"SELECT 1 WHERE {join_sql}").select.where
+    if join_expr:
+        prefix = node_name + SEPARATOR
+        for col in join_expr.find_all(ast.Column):
+            col_id = col.identifier()
+            if col_id.startswith(prefix):
+                result.add(get_short_name(col_id))
+    return result
+
+
 def get_column_type(node: Node, column_name: str) -> str:
     """
     Look up the column type from a node's columns.
