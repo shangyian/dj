@@ -172,11 +172,19 @@ class GeneratedMeasuresSQL:
     These can be:
     - Materialized separately for efficient queries
     - Combined by metrics SQL into a single executable query
+
+    Also includes the build context and decomposed metrics to avoid
+    redundant database queries when generating metrics SQL.
     """
 
     grain_groups: list[GrainGroupSQL]
     dialect: Dialect
     requested_dimensions: list[str]  # Original dimension refs for context
+
+    # Internal: passed to build_metrics_sql to avoid redundant work
+    # These are not serialized in API responses
+    ctx: Optional["BuildContext"] = None
+    decomposed_metrics: dict[str, "DecomposedMetricInfo"] = field(default_factory=dict)
 
 
 @dataclass

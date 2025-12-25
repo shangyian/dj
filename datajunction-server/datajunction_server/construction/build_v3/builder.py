@@ -666,7 +666,8 @@ async def build_measures_sql(
         dialect: SQL dialect for output
 
     Returns:
-        GeneratedMeasuresSQL with one GrainGroupSQL per aggregation level
+        GeneratedMeasuresSQL with one GrainGroupSQL per aggregation level,
+        plus context and decomposed metrics for efficient reuse by build_metrics_sql
     """
     # Create context
     ctx = BuildContext(
@@ -677,7 +678,7 @@ async def build_measures_sql(
         dialect=dialect,
     )
 
-    # Load all required nodes
+    # Load all required nodes (single DB round trip)
     await load_nodes(ctx)
 
     # Validate we have at least one metric
@@ -689,16 +690,40 @@ async def build_measures_sql(
 
     # Process each metric group into grain group SQLs
     # Cross-fact metrics produce separate grain groups (one per parent node)
-    # Currently we only support single metric group; cross-fact will iterate over all
     all_grain_group_sqls: list[GrainGroupSQL] = []
     for metric_group in metric_groups:
         grain_group_sqls = process_metric_group(ctx, metric_group)
         all_grain_group_sqls.extend(grain_group_sqls)
 
+    # Decompose all metrics for metrics SQL to reuse
+    # This includes both requested metrics AND base metrics from grain groups
+    decomposed_metrics: dict[str, DecomposedMetricInfo] = {}
+
+    # Decompose requested metrics
+    for metric_name in metrics:
+        metric_node = ctx.nodes.get(metric_name)
+        if metric_node:
+            decomposed = await decompose_metric(session, metric_node)
+            decomposed_metrics[metric_name] = decomposed
+
+    # Also decompose base metrics from grain groups (for component mapping)
+    all_grain_group_metrics = set()
+    for gg in all_grain_group_sqls:
+        all_grain_group_metrics.update(gg.metrics)
+
+    for metric_name in all_grain_group_metrics:
+        if metric_name not in decomposed_metrics:
+            metric_node = ctx.nodes.get(metric_name)
+            if metric_node:
+                decomposed = await decompose_metric(session, metric_node)
+                decomposed_metrics[metric_name] = decomposed
+
     return GeneratedMeasuresSQL(
         grain_groups=all_grain_group_sqls,
         dialect=dialect,
         requested_dimensions=dimensions,
+        ctx=ctx,
+        decomposed_metrics=decomposed_metrics,
     )
 
 
@@ -760,7 +785,6 @@ def process_metric_group(
     return grain_group_sqls
 
 
-# Placeholder for metrics SQL (Chunk 5)
 async def build_metrics_sql(
     session: AsyncSession,
     metrics: list[str],
@@ -787,6 +811,7 @@ async def build_metrics_sql(
     - Layer 2+ (Derived Metrics): Metrics referencing other metrics
     """
     # Step 1: Get measures SQL with grain groups
+    # This also returns context and decomposed metrics to avoid redundant work
     measures_result = await build_measures_sql(
         session=session,
         metrics=metrics,
@@ -798,45 +823,18 @@ async def build_metrics_sql(
     if not measures_result.grain_groups:
         raise DJInvalidInputException("No grain groups produced from measures SQL")
 
-    # Step 2: Build context for metrics processing
-    ctx = BuildContext(
-        session=session,
-        metrics=metrics,
-        dimensions=dimensions,
-        filters=filters or [],
-        dialect=dialect,
-    )
+    # Step 2: Reuse context and decomposed metrics from measures SQL
+    # This avoids redundant database queries and metric decomposition
+    ctx = measures_result.ctx
+    if ctx is None:
+        raise DJInvalidInputException("Measures result missing context")
 
-    # Load nodes for combiner expression extraction
-    await load_nodes(ctx)
+    decomposed_metrics = measures_result.decomposed_metrics
 
-    # Step 3: Decompose all metrics to get combiner expressions
-    # This includes both requested metrics AND base metrics from grain groups
-    decomposed_metrics: dict[str, DecomposedMetricInfo] = {}
-
-    # First decompose requested metrics
-    for metric_name in metrics:
-        metric_node = ctx.nodes.get(metric_name)
-        if metric_node:
-            decomposed = await decompose_metric(session, metric_node)
-            decomposed_metrics[metric_name] = decomposed
-
-    # Also decompose base metrics from grain groups (needed for component mapping)
-    all_grain_group_metrics = set()
-    for gg in measures_result.grain_groups:
-        all_grain_group_metrics.update(gg.metrics)
-
-    for metric_name in all_grain_group_metrics:
-        if metric_name not in decomposed_metrics:
-            metric_node = ctx.nodes.get(metric_name)
-            if metric_node:
-                decomposed = await decompose_metric(session, metric_node)
-                decomposed_metrics[metric_name] = decomposed
-
-    # Step 4: Build metric dependency DAG and compute layers
+    # Step 3: Build metric dependency DAG and compute layers
     metric_layers = compute_metric_layers(ctx, decomposed_metrics)
 
-    # Step 5: Generate the combined SQL (returns GeneratedSQL with AST query)
+    # Step 4: Generate the combined SQL (returns GeneratedSQL with AST query)
     return generate_metrics_sql(
         ctx,
         measures_result,
@@ -899,37 +897,96 @@ def compute_metric_layers(
     return layers
 
 
-def _build_merged_metric_expression(
+def build_base_metric_expression(
     decomposed: DecomposedMetricInfo,
+    metric_name: str,
     cte_alias: str,
-    component_aggregabilities: dict[str, Aggregability],
-    component_aliases: dict[str, str],
-    grain_columns: list[str],
-) -> ast.Expression:
+    gg: GrainGroupSQL,
+) -> tuple[ast.Expression, dict[str, tuple[str, str]]]:
     """
-    Build an aggregation expression for a metric in a merged grain group.
+    Build an expression AST for a base metric from a grain group.
 
-    For merged grain groups:
-    - FULL components: CTE has pre-aggregated values at finest grain → re-aggregate with SUM
-    - LIMITED components: CTE has grain columns → use COUNT DISTINCT on grain column
+    Always applies re-aggregation in the final SELECT using the component's
+    merge function (e.g., SUM for sums/counts, MIN for min, hll_union for HLL).
 
-    For single-component metrics:
-        FULL: SUM(cte.pre_agg_column) - re-aggregate the pre-aggregated value
-        LIMITED: COUNT(DISTINCT cte.grain_column) - count distinct on grain column
+    This is correct whether the CTE is at the exact requested grain or finer:
+    - If CTE is at requested grain: re-aggregation is a no-op (SUM of one = that one)
+    - If CTE is at finer grain: re-aggregation does actual work
 
-    For multi-component metrics:
-        Use the combiner expression but replace component refs appropriately
+    Args:
+        decomposed: Decomposed metric info with components and combiner
+        metric_name: Full metric name (for fallback column lookup)
+        cte_alias: Alias of the grain group CTE
+        gg: The grain group SQL containing component metadata
+
+    Returns:
+        Tuple of (expression AST, component column mappings)
+        The component mappings are {component_name: (cte_alias, column_name)}
     """
-    if len(decomposed.components) == 1:
-        comp = decomposed.components[0]
-        orig_agg = component_aggregabilities.get(comp.name, Aggregability.FULL)
+    comp_mappings: dict[str, tuple[str, str]] = {}
+
+    # Build component -> column mappings
+    # For merged: use component_aggregabilities to determine column source
+    # For non-merged: use decomposed.aggregability
+    for comp in decomposed.components:
+        if gg.is_merged:
+            orig_agg = gg.component_aggregabilities.get(comp.name, Aggregability.FULL)
+        else:
+            orig_agg = decomposed.aggregability
 
         if orig_agg == Aggregability.LIMITED:
-            # LIMITED: COUNT DISTINCT on the grain column (e.g., order_id)
-            # The grain column comes from the component's rule.level
+            # LIMITED: use grain column (for COUNT DISTINCT)
             grain_col = comp.rule.level[0] if comp.rule.level else comp.expression
+            comp_mappings[comp.name] = (cte_alias, grain_col)
+        else:
+            # FULL/NONE: use pre-aggregated column
+            actual_col = gg.component_aliases.get(comp.name, comp.name)
+            comp_mappings[comp.name] = (cte_alias, actual_col)
+
+    # Build the aggregation expression
+    expr_ast = _build_metric_aggregation(decomposed, cte_alias, gg, comp_mappings)
+    return expr_ast, comp_mappings
+
+
+def _build_metric_aggregation(
+    decomposed: DecomposedMetricInfo,
+    cte_alias: str,
+    gg: GrainGroupSQL,
+    comp_mappings: dict[str, tuple[str, str]],
+) -> ast.Expression:
+    """
+    Build aggregation expression for a metric.
+
+    Always applies re-aggregation using each component's merge function:
+    - FULL: Uses comp.merge (SUM for counts/sums, MIN for min, hll_union for HLL, etc.)
+    - LIMITED: COUNT(DISTINCT grain_col)
+
+    This works whether the CTE is at exact grain or finer grain:
+    - Exact grain: re-aggregation is a no-op (SUM of one value = that value)
+    - Finer grain: re-aggregation does actual combining
+
+    Args:
+        decomposed: Decomposed metric info
+        cte_alias: CTE alias for column references
+        gg: Grain group SQL with aggregability info
+        comp_mappings: Pre-computed component -> (alias, column) mappings
+    """
+
+    # Determine aggregability for each component
+    def get_comp_aggregability(comp_name: str) -> Aggregability:
+        if gg.is_merged:
+            return gg.component_aggregabilities.get(comp_name, Aggregability.FULL)
+        return decomposed.aggregability
+
+    if len(decomposed.components) == 1:
+        comp = decomposed.components[0]
+        orig_agg = get_comp_aggregability(comp.name)
+        _, col_name = comp_mappings[comp.name]
+
+        if orig_agg == Aggregability.LIMITED:
+            # COUNT DISTINCT on grain column
             distinct_col = ast.Column(
-                name=ast.Name(grain_col),
+                name=ast.Name(col_name),
                 _table=ast.Table(ast.Name(cte_alias)),
             )
             agg_name = comp.aggregation or "COUNT"
@@ -939,39 +996,19 @@ def _build_merged_metric_expression(
                 quantifier=ast.SetQuantifier.Distinct,
             )
         else:
-            # FULL: re-aggregate the pre-aggregated column with SUM
-            # (SUM of SUMs, SUM of COUNTs, etc.)
-            actual_col = component_aliases.get(comp.name, comp.name)
+            # Re-aggregate with merge function
             col_ref = ast.Column(
-                name=ast.Name(actual_col),
+                name=ast.Name(col_name),
                 _table=ast.Table(ast.Name(cte_alias)),
             )
-            # Use merge function (usually SUM) to re-aggregate
             merge_func = comp.merge or "SUM"
             return ast.Function(ast.Name(merge_func), args=[col_ref])
 
-    else:
-        # Multi-component: use combiner expression with proper column references
-        # The combiner expects component names - map them to actual columns
-        comp_alias_map: dict[str, tuple[str, str]] = {}
-
-        for comp in decomposed.components:
-            orig_agg = component_aggregabilities.get(comp.name, Aggregability.FULL)
-            if orig_agg == Aggregability.LIMITED:
-                # LIMITED: use grain column
-                grain_col = comp.rule.level[0] if comp.rule.level else comp.expression
-                comp_alias_map[comp.name] = (cte_alias, grain_col)
-            else:
-                # FULL: use the pre-aggregated column
-                actual_col = component_aliases.get(comp.name, comp.name)
-                comp_alias_map[comp.name] = (cte_alias, actual_col)
-
-        # Use the combiner AST and replace component references
-        from copy import deepcopy
-
-        expr_ast = deepcopy(decomposed.combiner_ast)
-        replace_component_refs_in_ast(expr_ast, comp_alias_map)
-        return expr_ast
+    # Multi-component: build combiner with component refs
+    # The combiner AST already has the aggregation structure
+    expr_ast = deepcopy(decomposed.combiner_ast)
+    replace_component_refs_in_ast(expr_ast, comp_mappings)
+    return expr_ast
 
 
 def generate_metrics_sql(
@@ -1128,70 +1165,16 @@ def generate_metrics_sql(
                 metric_expr_asts[metric_name] = (expr_ast, short_name)
                 continue
 
-            # For merged grain groups, build aggregation expressions
-            # FULL components are pre-aggregated at finest grain → re-aggregate
-            # LIMITED components are grain columns → COUNT DISTINCT
-            if gg.is_merged:
-                expr_ast = _build_merged_metric_expression(
-                    decomposed,
-                    alias,
-                    gg.component_aggregabilities,
-                    gg.component_aliases,
-                    gg.grain,
-                )
-                for comp in decomposed.components:
-                    orig_agg = gg.component_aggregabilities.get(
-                        comp.name,
-                        Aggregability.FULL,
-                    )
-                    if orig_agg == Aggregability.LIMITED:
-                        # LIMITED: grain column
-                        grain_col = (
-                            comp.rule.level[0] if comp.rule.level else comp.expression
-                        )
-                        component_columns[comp.name] = (alias, grain_col)
-                    else:
-                        # FULL: pre-aggregated column
-                        actual_col = gg.component_aliases.get(comp.name, comp.name)
-                        component_columns[comp.name] = (alias, actual_col)
-                replace_dimension_refs_in_ast(expr_ast, dimension_aliases)
-                metric_expr_asts[metric_name] = (expr_ast, short_name)
-                continue
-
-            # Non-merged: use pre-aggregated columns
-            if len(decomposed.components) > 1:
-                # Multi-component metric
-                comp_alias_map: dict[str, tuple[str, str]] = {}
-                for comp in decomposed.components:
-                    actual_col = gg.component_aliases.get(comp.name, comp.name)
-                    comp_alias_map[comp.name] = (alias, actual_col)
-                    component_columns[comp.name] = (alias, actual_col)
-
-                expr_ast = decomposed.combiner_ast
-                replace_component_refs_in_ast(expr_ast, comp_alias_map)
-                replace_dimension_refs_in_ast(expr_ast, dimension_aliases)
-                metric_expr_asts[metric_name] = (expr_ast, short_name)
-
-            else:
-                comp = decomposed.components[0]
-                if decomposed.aggregability == Aggregability.LIMITED:
-                    actual_col = comp.expression
-                    comp_alias_map = {comp.name: (alias, actual_col)}
-                    expr_ast = decomposed.combiner_ast
-                    replace_component_refs_in_ast(expr_ast, comp_alias_map)
-                    replace_dimension_refs_in_ast(expr_ast, dimension_aliases)
-                else:
-                    actual_col = next(
-                        (c.name for c in gg.columns if c.semantic_name == metric_name),
-                        short_name,
-                    )
-                    expr_ast = ast.Column(
-                        name=ast.Name(actual_col),
-                        _table=ast.Table(ast.Name(alias)),
-                    )
-
-                component_columns[comp.name] = (alias, actual_col)
-                metric_expr_asts[metric_name] = (expr_ast, short_name)
+            # Build expression using unified function (handles merged + non-merged)
+            expr_ast, comp_mappings = build_base_metric_expression(
+                decomposed,
+                metric_name,
+                alias,
+                gg,
+            )
+            component_columns.update(comp_mappings)
+            replace_dimension_refs_in_ast(expr_ast, dimension_aliases)
+            metric_expr_asts[metric_name] = (expr_ast, short_name)
 
     # Process derived metrics (not in any grain group)
     for metric_name in ctx.metrics:
@@ -1203,7 +1186,7 @@ def generate_metrics_sql(
             continue
 
         short_name = metric_name.split(SEPARATOR)[-1]
-        expr_ast = decomposed.combiner_ast
+        expr_ast = deepcopy(decomposed.combiner_ast)
         replace_component_refs_in_ast(expr_ast, component_columns)
         replace_dimension_refs_in_ast(expr_ast, dimension_aliases)
         metric_expr_asts[metric_name] = (expr_ast, short_name)
@@ -1273,13 +1256,12 @@ def generate_metrics_sql(
         ],
     )
 
-    # Check if any grain group is merged - if so, we need GROUP BY in final SELECT
-    any_merged = any(gg.is_merged for gg in grain_groups)
-
-    # Build GROUP BY clause if needed (when merged grain groups require final aggregation)
+    # Always add GROUP BY on requested dimensions
+    # Metrics SQL always re-aggregates components to produce final metric values:
+    # - If CTE is at requested grain: re-aggregation is a no-op (SUM of one = that one)
+    # - If CTE is at finer grain: re-aggregation does actual work
     group_by: list[ast.Expression] = []
-    if any_merged and dim_col_aliases:
-        # Group by the dimension columns (using first CTE alias for column references)
+    if dim_col_aliases:
         group_by.extend(
             [
                 ast.Column(

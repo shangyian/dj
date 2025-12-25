@@ -2371,7 +2371,8 @@ class TestMetricsSQLV3:
         assert response.status_code == 200, response.json()
         result = response.json()
 
-        # Should have SQL output with shared CTEs and grain group wrapper
+        # Should have SQL output with shared CTEs, grain group wrapper,
+        # and re-aggregation in final SELECT (always applied for consistency)
         assert_sql_equal(
             result["sql"],
             """
@@ -2386,8 +2387,10 @@ class TestMetricsSQLV3:
                 FROM v3_order_details t1
                 GROUP BY t1.status
             )
-            SELECT COALESCE(order_details_0.status) AS status, order_details_0.total_revenue AS total_revenue
+            SELECT COALESCE(order_details_0.status) AS status,
+                   SUM(order_details_0.total_revenue) AS total_revenue
             FROM order_details_0
+            GROUP BY order_details_0.status
             """,
         )
 
@@ -2426,7 +2429,7 @@ class TestMetricsSQLV3:
         assert response.status_code == 200, response.json()
         result = response.json()
 
-        # Should have SQL output with flattened CTEs
+        # Should have SQL output with flattened CTEs and GROUP BY for consistency
         sql = result["sql"]
         assert_sql_equal(
             sql,
@@ -2447,6 +2450,7 @@ class TestMetricsSQLV3:
             SELECT  COALESCE(order_details_0.status) AS status,
                 SUM(order_details_0.unit_price_sum_55cff00f) / SUM(order_details_0.unit_price_count_55cff00f) AS avg_unit_price
             FROM order_details_0
+            GROUP BY order_details_0.status
             """,
         )
         assert result["columns"] == [
@@ -2498,9 +2502,10 @@ class TestMetricsSQLV3:
             GROUP BY  t1.status
             )
             SELECT  COALESCE(order_details_0.status) AS status,
-                order_details_0.total_revenue AS total_revenue,
-                order_details_0.total_quantity AS total_quantity
+                SUM(order_details_0.total_revenue) AS total_revenue,
+                SUM(order_details_0.total_quantity) AS total_quantity
             FROM order_details_0
+            GROUP BY order_details_0.status
             """,
         )
         assert result["columns"] == [
@@ -2572,10 +2577,11 @@ class TestMetricsSQLV3:
                 GROUP BY t2.category
             )
             SELECT COALESCE(order_details_0.category, page_views_enriched_0.category) AS category,
-                   order_details_0.total_revenue AS total_revenue,
-                   page_views_enriched_0.page_view_count AS page_view_count
+                   SUM(order_details_0.total_revenue) AS total_revenue,
+                   SUM(page_views_enriched_0.page_view_count) AS page_view_count
             FROM order_details_0
             FULL OUTER JOIN page_views_enriched_0 ON order_details_0.category = page_views_enriched_0.category
+            GROUP BY order_details_0.category
             """,
         )
         assert result["columns"] == [
@@ -2656,6 +2662,7 @@ class TestMetricsSQLV3:
                    CAST(COUNT(DISTINCT order_details_0.order_id) AS DOUBLE) / NULLIF(COUNT(DISTINCT page_views_enriched_0.customer_id), 0) AS conversion_rate
             FROM order_details_0
             FULL OUTER JOIN page_views_enriched_0 ON order_details_0.category = page_views_enriched_0.category
+            GROUP BY order_details_0.category
             """,
         )
         # Only the derived metric appears in output (not base metrics)
@@ -3053,13 +3060,14 @@ class TestAdditionalMetricTypes:
 
             SELECT  COALESCE(order_details_0.status) AS status,
                 COALESCE(order_details_0.category) AS category,
-                order_details_0.max_unit_price AS max_unit_price,
-                order_details_0.min_unit_price AS min_unit_price,
-                order_details_0.completed_order_revenue AS completed_order_revenue,
-                order_details_0.total_revenue AS total_revenue,
+                MAX(order_details_0.max_unit_price) AS max_unit_price,
+                MIN(order_details_0.min_unit_price) AS min_unit_price,
+                SUM(order_details_0.completed_order_revenue) AS completed_order_revenue,
+                SUM(order_details_0.total_revenue) AS total_revenue,
                 MAX(order_details_0.max_unit_price) - MIN(order_details_0.min_unit_price) AS price_spread,
                 (MAX(order_details_0.max_unit_price) - MIN(order_details_0.min_unit_price)) / NULLIF(SUM(order_details_0.unit_price_sum_55cff00f) / SUM(order_details_0.unit_price_count_55cff00f), 0) * 100 AS price_spread_pct
             FROM order_details_0
+            GROUP BY order_details_0.status, order_details_0.category
             """,
         )
 
@@ -3353,6 +3361,7 @@ class TestAdditionalMetricTypes:
             SELECT  COALESCE(order_details_0.month_order) AS month_order,
                 (SUM(order_details_0.total_revenue) - LAG(SUM(order_details_0.total_revenue), 1) OVER ( ORDER BY month_order) ) / NULLIF(LAG(SUM(order_details_0.total_revenue), 1) OVER ( ORDER BY month_order) , 0) * 100 AS mom_revenue_change
             FROM order_details_0
+            GROUP BY order_details_0.month_order
             """,
         )
 
