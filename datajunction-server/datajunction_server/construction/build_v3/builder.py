@@ -601,6 +601,7 @@ def build_grain_group_sql(
         grain=full_grain,
         aggregability=grain_group.aggregability,
         metrics=list(metrics_covered),
+        parent_name=grain_group.parent_node.name,
         component_aliases=component_aliases,
     )
 
@@ -881,56 +882,55 @@ def generate_metrics_sql(
     dimensions = measures_result.requested_dimensions
 
     # For cross-fact or cross-aggregability queries, we need to:
-    # 1. Extract CTEs from each grain group and flatten them (with prefixes)
+    # 1. Collect shared CTEs (dedupe by original name across all grain groups)
     # 2. Create a final CTE for each grain group's main SELECT
     # 3. FULL OUTER JOIN them on the common dimensions
     # 4. Apply combiner expressions in the final SELECT
 
+    # Phase 1: Collect all inner CTEs, dedupe by original name
+    # CTEs with the same name are shared (e.g., v3_product dimension used by multiple grain groups)
+    shared_ctes: dict[str, ast.Query] = {}  # original_name -> CTE AST
+
+    for gg in grain_groups:
+        gg_query = gg.query
+        if gg_query.ctes:
+            for inner_cte in gg_query.ctes:
+                cte_name = str(inner_cte.alias) if inner_cte.alias else "unnamed_cte"
+                if cte_name not in shared_ctes:
+                    # First time seeing this CTE - add it
+                    shared_ctes[cte_name] = deepcopy(inner_cte)
+
+    # Phase 2: Build grain group aliases and CTEs
     all_cte_asts: list[ast.Query] = []
     cte_aliases: list[str] = []
 
-    for i, gg in enumerate(grain_groups):
-        alias = f"gg{i}"
+    # Add shared CTEs first (no prefix - they keep original names)
+    for cte_ast in shared_ctes.values():
+        all_cte_asts.append(cte_ast)
+
+    # Track index per parent for naming: {parent}_{index}
+    parent_index_counter: dict[str, int] = {}
+
+    for gg in grain_groups:
+        # Get short parent name (last part after separator)
+        parent_short = gg.parent_name.split(SEPARATOR)[-1]
+        # Get next index for this parent
+        idx = parent_index_counter.get(parent_short, 0)
+        parent_index_counter[parent_short] = idx + 1
+        alias = f"{parent_short}_{idx}"
         cte_aliases.append(alias)
 
         # gg.query is already an AST - no need to parse!
         gg_query = gg.query
 
-        if gg_query.ctes:
-            # Extract existing CTEs with prefixed names to avoid collisions
-            for inner_cte in gg_query.ctes:
-                cte_name = str(inner_cte.alias) if inner_cte.alias else "unnamed_cte"
-                prefixed_name = f"{alias}_{cte_name}"
+        # Build the grain group CTE (main SELECT, no inner CTEs)
+        # Table references already use original CTE names (which are now shared)
+        gg_main = deepcopy(gg_query)
+        gg_main.ctes = []  # Clear inner CTEs - they're now in shared layer
 
-                # Clone the CTE and update its alias to the prefixed name
-                prefixed_cte = deepcopy(inner_cte)
-                prefixed_cte.alias = ast.Name(prefixed_name)
-                all_cte_asts.append(prefixed_cte)
-
-            # Build the grain group CTE (main SELECT with updated table refs)
-            # Clone the query and clear its CTEs
-            gg_main = deepcopy(gg_query)
-            gg_main.ctes = []
-
-            # Update table references in the main SELECT to use prefixed CTE names
-            for inner_cte in gg_query.ctes:
-                original_name = (
-                    str(inner_cte.alias) if inner_cte.alias else "unnamed_cte"
-                )
-                prefixed_name = f"{alias}_{original_name}"
-                # Find and update table references
-                for table in gg_main.find_all(ast.Table):
-                    if hasattr(table, "name") and str(table.name) == original_name:
-                        table.name = ast.Name(prefixed_name)
-
-            # Convert to CTE with the grain group alias
-            gg_main.to_cte(ast.Name(alias), None)
-            all_cte_asts.append(gg_main)
-        else:
-            # No inner CTEs - just convert the query to a CTE directly
-            gg_cte = deepcopy(gg_query)
-            gg_cte.to_cte(ast.Name(alias), None)
-            all_cte_asts.append(gg_cte)
+        # Convert to CTE with the grain group alias
+        gg_main.to_cte(ast.Name(alias), None)
+        all_cte_asts.append(gg_main)
 
     # Build projection as AST expressions
     # Use Any type since projection accepts Union[Aliasable, Expression, Column]

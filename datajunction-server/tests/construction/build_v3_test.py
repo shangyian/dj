@@ -2637,7 +2637,7 @@ class TestMetricsSQLV3:
         Test metrics SQL for a single simple metric (SUM).
 
         Even for single grain groups, the unified generate_metrics_sql
-        wraps the result in a grain group CTE (gg0) for consistency.
+        wraps the result in a grain group CTE (e.g., order_details_0) for consistency.
         """
         response = await client_with_build_v3.get(
             "/sql/metrics/v3/",
@@ -2650,23 +2650,23 @@ class TestMetricsSQLV3:
         assert response.status_code == 200, response.json()
         result = response.json()
 
-        # Should have SQL output with gg0 wrapper
+        # Should have SQL output with shared CTEs and grain group wrapper
         assert_sql_equal(
             result["sql"],
             """
             WITH
-            gg0_v3_order_details AS (
+            v3_order_details AS (
                 SELECT o.status, oi.quantity * oi.unit_price AS line_total
                 FROM default.v3.orders o
                 JOIN default.v3.order_items oi ON o.order_id = oi.order_id
             ),
-            gg0 AS (
+            order_details_0 AS (
                 SELECT t1.status, SUM(t1.line_total) total_revenue
-                FROM gg0_v3_order_details t1
+                FROM v3_order_details t1
                 GROUP BY t1.status
             )
-            SELECT COALESCE(gg0.status) AS status, gg0.total_revenue AS total_revenue
-            FROM gg0
+            SELECT COALESCE(order_details_0.status) AS status, order_details_0.total_revenue AS total_revenue
+            FROM order_details_0
             """,
         )
 
@@ -2711,21 +2711,21 @@ class TestMetricsSQLV3:
             sql,
             """
             WITH
-            gg0_v3_order_details AS (
+            v3_order_details AS (
             SELECT  o.status,
                 oi.unit_price
             FROM default.v3.orders o JOIN default.v3.order_items oi ON o.order_id = oi.order_id
             ),
-            gg0 AS (
+            order_details_0 AS (
             SELECT  t1.status,
                 COUNT(t1.unit_price) unit_price_count_55cff00f,
                 SUM(t1.unit_price) unit_price_sum_55cff00f
-            FROM gg0_v3_order_details t1
+            FROM v3_order_details t1
             GROUP BY  t1.status
             )
-            SELECT  COALESCE(gg0.status) AS status,
-                SUM(gg0.unit_price_sum_55cff00f) / SUM(gg0.unit_price_count_55cff00f) AS avg_unit_price
-            FROM gg0
+            SELECT  COALESCE(order_details_0.status) AS status,
+                SUM(order_details_0.unit_price_sum_55cff00f) / SUM(order_details_0.unit_price_count_55cff00f) AS avg_unit_price
+            FROM order_details_0
             """,
         )
         assert result["columns"] == [
@@ -2763,23 +2763,23 @@ class TestMetricsSQLV3:
             result["sql"],
             """
             WITH
-            gg0_v3_order_details AS (
+            v3_order_details AS (
             SELECT  o.status,
                 oi.quantity,
                 oi.quantity * oi.unit_price AS line_total
             FROM default.v3.orders o JOIN default.v3.order_items oi ON o.order_id = oi.order_id
             ),
-            gg0 AS (
+            order_details_0 AS (
             SELECT  t1.status,
                 SUM(t1.line_total) total_revenue,
                 SUM(t1.quantity) total_quantity
-            FROM gg0_v3_order_details t1
+            FROM v3_order_details t1
             GROUP BY  t1.status
             )
-            SELECT  COALESCE(gg0.status) AS status,
-                gg0.total_revenue AS total_revenue,
-                gg0.total_quantity AS total_quantity
-            FROM gg0
+            SELECT  COALESCE(order_details_0.status) AS status,
+                order_details_0.total_revenue AS total_revenue,
+                order_details_0.total_quantity AS total_quantity
+            FROM order_details_0
             """,
         )
         assert result["columns"] == [
@@ -2825,40 +2825,36 @@ class TestMetricsSQLV3:
             result["sql"],
             """
             WITH
-            gg0_v3_order_details AS (
+            v3_order_details AS (
                 SELECT oi.product_id, oi.quantity * oi.unit_price AS line_total
                 FROM default.v3.orders o
                 JOIN default.v3.order_items oi ON o.order_id = oi.order_id
             ),
-            gg0_v3_product AS (
+            v3_product AS (
                 SELECT product_id, category
                 FROM default.v3.products
             ),
-            gg0 AS (
-                SELECT t2.category, SUM(t1.line_total) total_revenue
-                FROM gg0_v3_order_details t1
-                LEFT OUTER JOIN gg0_v3_product t2 ON t1.product_id = t2.product_id
-                GROUP BY t2.category
-            ),
-            gg1_v3_page_views_enriched AS (
+            v3_page_views_enriched AS (
                 SELECT view_id, product_id
                 FROM default.v3.page_views
             ),
-            gg1_v3_product AS (
-                SELECT product_id, category
-                FROM default.v3.products
+            order_details_0 AS (
+                SELECT t2.category, SUM(t1.line_total) total_revenue
+                FROM v3_order_details t1
+                LEFT OUTER JOIN v3_product t2 ON t1.product_id = t2.product_id
+                GROUP BY t2.category
             ),
-            gg1 AS (
+            page_views_enriched_0 AS (
                 SELECT t2.category, COUNT(t1.view_id) page_view_count
-                FROM gg1_v3_page_views_enriched t1
-                LEFT OUTER JOIN gg1_v3_product t2 ON t1.product_id = t2.product_id
+                FROM v3_page_views_enriched t1
+                LEFT OUTER JOIN v3_product t2 ON t1.product_id = t2.product_id
                 GROUP BY t2.category
             )
-            SELECT COALESCE(gg0.category, gg1.category) AS category,
-                   gg0.total_revenue AS total_revenue,
-                   gg1.page_view_count AS page_view_count
-            FROM gg0
-            FULL OUTER JOIN gg1 ON gg0.category = gg1.category
+            SELECT COALESCE(order_details_0.category, page_views_enriched_0.category) AS category,
+                   order_details_0.total_revenue AS total_revenue,
+                   page_views_enriched_0.page_view_count AS page_view_count
+            FROM order_details_0
+            FULL OUTER JOIN page_views_enriched_0 ON order_details_0.category = page_views_enriched_0.category
             """,
         )
         assert result["columns"] == [
@@ -2910,39 +2906,35 @@ class TestMetricsSQLV3:
             result["sql"],
             """
             WITH
-            gg0_v3_order_details AS (
+            v3_order_details AS (
                 SELECT o.order_id, oi.product_id
                 FROM default.v3.orders o
                 JOIN default.v3.order_items oi ON o.order_id = oi.order_id
             ),
-            gg0_v3_product AS (
+            v3_product AS (
                 SELECT product_id, category
                 FROM default.v3.products
             ),
-            gg0 AS (
-                SELECT t2.category, t1.order_id
-                FROM gg0_v3_order_details t1
-                LEFT OUTER JOIN gg0_v3_product t2 ON t1.product_id = t2.product_id
-                GROUP BY t2.category, t1.order_id
-            ),
-            gg1_v3_page_views_enriched AS (
+            v3_page_views_enriched AS (
                 SELECT customer_id, product_id
                 FROM default.v3.page_views
             ),
-            gg1_v3_product AS (
-                SELECT product_id, category
-                FROM default.v3.products
+            order_details_0 AS (
+                SELECT t2.category, t1.order_id
+                FROM v3_order_details t1
+                LEFT OUTER JOIN v3_product t2 ON t1.product_id = t2.product_id
+                GROUP BY t2.category, t1.order_id
             ),
-            gg1 AS (
+            page_views_enriched_0 AS (
                 SELECT t2.category, t1.customer_id
-                FROM gg1_v3_page_views_enriched t1
-                LEFT OUTER JOIN gg1_v3_product t2 ON t1.product_id = t2.product_id
+                FROM v3_page_views_enriched t1
+                LEFT OUTER JOIN v3_product t2 ON t1.product_id = t2.product_id
                 GROUP BY t2.category, t1.customer_id
             )
-            SELECT COALESCE(gg0.category, gg1.category) AS category,
-                   CAST(COUNT(DISTINCT gg0.order_id) AS DOUBLE) / NULLIF(COUNT(DISTINCT gg1.customer_id), 0) AS conversion_rate
-            FROM gg0
-            FULL OUTER JOIN gg1 ON gg0.category = gg1.category
+            SELECT COALESCE(order_details_0.category, page_views_enriched_0.category) AS category,
+                   CAST(COUNT(DISTINCT order_details_0.order_id) AS DOUBLE) / NULLIF(COUNT(DISTINCT page_views_enriched_0.customer_id), 0) AS conversion_rate
+            FROM order_details_0
+            FULL OUTER JOIN page_views_enriched_0 ON order_details_0.category = page_views_enriched_0.category
             """,
         )
         # Only the derived metric appears in output (not base metrics)
@@ -2989,31 +2981,26 @@ class TestMetricsSQLV3:
             result["sql"],
             """
             WITH
-            gg0_v3_order_details AS (
+            v3_order_details AS (
                 SELECT o.status, oi.quantity, oi.quantity * oi.unit_price AS line_total
                 FROM default.v3.orders o
                 JOIN default.v3.order_items oi ON o.order_id = oi.order_id
             ),
-            gg0 AS (
+            order_details_0 AS (
                 SELECT t1.status, SUM(t1.line_total) total_revenue, SUM(t1.quantity) total_quantity
-                FROM gg0_v3_order_details t1
+                FROM v3_order_details t1
                 GROUP BY t1.status
             ),
-            gg1_v3_order_details AS (
-                SELECT o.order_id, o.status
-                FROM default.v3.orders o
-                JOIN default.v3.order_items oi ON o.order_id = oi.order_id
-            ),
-            gg1 AS (
+            order_details_1 AS (
                 SELECT t1.status, t1.order_id
-                FROM gg1_v3_order_details t1
+                FROM v3_order_details t1
                 GROUP BY t1.status, t1.order_id
             )
-            SELECT COALESCE(gg0.status, gg1.status) AS status,
-                   SUM(gg0.total_revenue) / NULLIF(COUNT(DISTINCT gg1.order_id), 0) AS avg_order_value,
-                   SUM(gg0.total_quantity) / NULLIF(COUNT( DISTINCT gg1.order_id), 0) AS avg_items_per_order
-            FROM gg0
-            FULL OUTER JOIN gg1 ON gg0.status = gg1.status
+            SELECT COALESCE(order_details_0.status, order_details_1.status) AS status,
+                   SUM(order_details_0.total_revenue) / NULLIF(COUNT(DISTINCT order_details_1.order_id), 0) AS avg_order_value,
+                   SUM(order_details_0.total_quantity) / NULLIF(COUNT( DISTINCT order_details_1.order_id), 0) AS avg_items_per_order
+            FROM order_details_0
+            FULL OUTER JOIN order_details_1 ON order_details_0.status = order_details_1.status
             """,
         )
         # Only the derived metrics appear in output (not base metrics)
@@ -3062,110 +3049,69 @@ class TestMetricsSQLV3:
             result["sql"],
             """
             WITH
-            gg0_v3_customer AS (
+            v3_customer AS (
             SELECT  customer_id,
                 name
             FROM default.v3.customers
             ),
-            gg0_v3_order_details AS (
+            v3_order_details AS (
             SELECT  o.customer_id,
                 oi.product_id,
                 oi.quantity * oi.unit_price AS line_total
             FROM default.v3.orders o JOIN default.v3.order_items oi ON o.order_id = oi.order_id
             ),
-            gg0_v3_product AS (
+            v3_product AS (
             SELECT  product_id,
                 category
             FROM default.v3.products
             ),
-            gg0 AS (
-            SELECT  t2.category,
-                t3.name name_customer,
-                SUM(t1.line_total) total_revenue
-            FROM gg0_v3_order_details t1 LEFT OUTER JOIN gg0_v3_product t2 ON t1.product_id = t2.product_id
-            LEFT OUTER JOIN gg0_v3_customer t3 ON t1.customer_id = t3.customer_id
-            GROUP BY  t2.category, t3.name
-            ),
-            gg1_v3_customer AS (
-            SELECT  customer_id,
-                name
-            FROM default.v3.customers
-            ),
-            gg1_v3_order_details AS (
-            SELECT  o.order_id,
-                o.customer_id,
-                oi.product_id
-            FROM default.v3.orders o JOIN default.v3.order_items oi ON o.order_id = oi.order_id
-            ),
-            gg1_v3_product AS (
-            SELECT  product_id,
-                category
-            FROM default.v3.products
-            ),
-            gg1 AS (
-            SELECT  t2.category,
-                t3.name name_customer,
-                t1.order_id
-            FROM gg1_v3_order_details t1 LEFT OUTER JOIN gg1_v3_product t2 ON t1.product_id = t2.product_id
-            LEFT OUTER JOIN gg1_v3_customer t3 ON t1.customer_id = t3.customer_id
-            GROUP BY  t2.category, t3.name, t1.order_id
-            ),
-            gg2_v3_customer AS (
-            SELECT  customer_id,
-                name
-            FROM default.v3.customers
-            ),
-            gg2_v3_page_views_enriched AS (
+            v3_page_views_enriched AS (
             SELECT  view_id,
                 customer_id,
                 product_id
             FROM default.v3.page_views
             ),
-            gg2_v3_product AS (
-            SELECT  product_id,
-                category
-            FROM default.v3.products
+            order_details_0 AS (
+            SELECT  t2.category,
+                t3.name name_customer,
+                SUM(t1.line_total) total_revenue
+            FROM v3_order_details t1 LEFT OUTER JOIN v3_product t2 ON t1.product_id = t2.product_id
+            LEFT OUTER JOIN v3_customer t3 ON t1.customer_id = t3.customer_id
+            GROUP BY  t2.category, t3.name
             ),
-            gg2 AS (
+            order_details_1 AS (
+            SELECT  t2.category,
+                t3.name name_customer,
+                t1.order_id
+            FROM v3_order_details t1 LEFT OUTER JOIN v3_product t2 ON t1.product_id = t2.product_id
+            LEFT OUTER JOIN v3_customer t3 ON t1.customer_id = t3.customer_id
+            GROUP BY  t2.category, t3.name, t1.order_id
+            ),
+            page_views_enriched_0 AS (
             SELECT  t2.category,
                 t3.name name_customer,
                 COUNT(t1.view_id) page_view_count
-            FROM gg2_v3_page_views_enriched t1 LEFT OUTER JOIN gg2_v3_product t2 ON t1.product_id = t2.product_id
-            LEFT OUTER JOIN gg2_v3_customer t3 ON t1.customer_id = t3.customer_id
+            FROM v3_page_views_enriched t1 LEFT OUTER JOIN v3_product t2 ON t1.product_id = t2.product_id
+            LEFT OUTER JOIN v3_customer t3 ON t1.customer_id = t3.customer_id
             GROUP BY  t2.category, t3.name
             ),
-            gg3_v3_customer AS (
-            SELECT  customer_id,
-                name
-            FROM default.v3.customers
-            ),
-            gg3_v3_page_views_enriched AS (
-            SELECT  customer_id,
-                product_id
-            FROM default.v3.page_views
-            ),
-            gg3_v3_product AS (
-            SELECT  product_id,
-                category
-            FROM default.v3.products
-            ),
-            gg3 AS (
+            page_views_enriched_1 AS (
             SELECT  t2.category,
                 t3.name name_customer,
                 t1.customer_id
-            FROM gg3_v3_page_views_enriched t1 LEFT OUTER JOIN gg3_v3_product t2 ON t1.product_id = t2.product_id
-            LEFT OUTER JOIN gg3_v3_customer t3 ON t1.customer_id = t3.customer_id
+            FROM v3_page_views_enriched t1 LEFT OUTER JOIN v3_product t2 ON t1.product_id = t2.product_id
+            LEFT OUTER JOIN v3_customer t3 ON t1.customer_id = t3.customer_id
             GROUP BY  t2.category, t3.name, t1.customer_id
             )
 
-            SELECT  COALESCE(gg0.category, gg1.category, gg2.category, gg3.category) AS category,
-                COALESCE(gg0.name_customer, gg1.name_customer, gg2.name_customer, gg3.name_customer) AS name_customer,
-                CAST(COUNT( DISTINCT gg1.order_id) AS DOUBLE) / NULLIF(COUNT( DISTINCT gg3.customer_id), 0) AS conversion_rate,
-                SUM(gg0.total_revenue) / NULLIF(COUNT( DISTINCT gg3.customer_id), 0) AS revenue_per_visitor,
-                SUM(gg0.total_revenue) / NULLIF(SUM(gg2.page_view_count), 0) AS revenue_per_page_view
-            FROM gg0 FULL OUTER JOIN gg1 ON gg0.category = gg1.category AND gg0.name_customer = gg1.name_customer
-            FULL OUTER JOIN gg2 ON gg0.category = gg2.category AND gg0.name_customer = gg2.name_customer
-            FULL OUTER JOIN gg3 ON gg0.category = gg3.category AND gg0.name_customer = gg3.name_customer
+            SELECT  COALESCE(order_details_0.category, order_details_1.category, page_views_enriched_0.category, page_views_enriched_1.category) AS category,
+                COALESCE(order_details_0.name_customer, order_details_1.name_customer, page_views_enriched_0.name_customer, page_views_enriched_1.name_customer) AS name_customer,
+                CAST(COUNT( DISTINCT order_details_1.order_id) AS DOUBLE) / NULLIF(COUNT( DISTINCT page_views_enriched_1.customer_id), 0) AS conversion_rate,
+                SUM(order_details_0.total_revenue) / NULLIF(COUNT( DISTINCT page_views_enriched_1.customer_id), 0) AS revenue_per_visitor,
+                SUM(order_details_0.total_revenue) / NULLIF(SUM(page_views_enriched_0.page_view_count), 0) AS revenue_per_page_view
+            FROM order_details_0 FULL OUTER JOIN order_details_1 ON order_details_0.category = order_details_1.category AND order_details_0.name_customer = order_details_1.name_customer
+            FULL OUTER JOIN page_views_enriched_0 ON order_details_0.category = page_views_enriched_0.category AND order_details_0.name_customer = page_views_enriched_0.name_customer
+            FULL OUTER JOIN page_views_enriched_1 ON order_details_0.category = page_views_enriched_1.category AND order_details_0.name_customer = page_views_enriched_1.name_customer
             """,
         )
         assert result["columns"] == [
@@ -3373,19 +3319,19 @@ class TestAdditionalMetricTypes:
             result["sql"],
             """
             WITH
-            gg0_v3_order_details AS (
+            v3_order_details AS (
             SELECT  o.status,
                 oi.product_id,
                 oi.unit_price,
                 oi.quantity * oi.unit_price AS line_total
             FROM default.v3.orders o JOIN default.v3.order_items oi ON o.order_id = oi.order_id
             ),
-            gg0_v3_product AS (
+            v3_product AS (
             SELECT  product_id,
                 category
             FROM default.v3.products
             ),
-            gg0 AS (
+            order_details_0 AS (
             SELECT  t1.status,
                 t2.category,
                 MAX(t1.unit_price) max_unit_price,
@@ -3394,19 +3340,19 @@ class TestAdditionalMetricTypes:
                 SUM(t1.line_total) total_revenue,
                 COUNT(t1.unit_price) unit_price_count_55cff00f,
                 SUM(t1.unit_price) unit_price_sum_55cff00f
-            FROM gg0_v3_order_details t1 LEFT OUTER JOIN gg0_v3_product t2 ON t1.product_id = t2.product_id
+            FROM v3_order_details t1 LEFT OUTER JOIN v3_product t2 ON t1.product_id = t2.product_id
             GROUP BY  t1.status, t2.category
             )
 
-            SELECT  COALESCE(gg0.status) AS status,
-                COALESCE(gg0.category) AS category,
-                gg0.max_unit_price AS max_unit_price,
-                gg0.min_unit_price AS min_unit_price,
-                gg0.completed_order_revenue AS completed_order_revenue,
-                gg0.total_revenue AS total_revenue,
-                MAX(gg0.max_unit_price) - MIN(gg0.min_unit_price) AS price_spread,
-                (MAX(gg0.max_unit_price) - MIN(gg0.min_unit_price)) / NULLIF(SUM(gg0.unit_price_sum_55cff00f) / SUM(gg0.unit_price_count_55cff00f), 0) * 100 AS price_spread_pct
-            FROM gg0
+            SELECT  COALESCE(order_details_0.status) AS status,
+                COALESCE(order_details_0.category) AS category,
+                order_details_0.max_unit_price AS max_unit_price,
+                order_details_0.min_unit_price AS min_unit_price,
+                order_details_0.completed_order_revenue AS completed_order_revenue,
+                order_details_0.total_revenue AS total_revenue,
+                MAX(order_details_0.max_unit_price) - MIN(order_details_0.min_unit_price) AS price_spread,
+                (MAX(order_details_0.max_unit_price) - MIN(order_details_0.min_unit_price)) / NULLIF(SUM(order_details_0.unit_price_sum_55cff00f) / SUM(order_details_0.unit_price_count_55cff00f), 0) * 100 AS price_spread_pct
+            FROM order_details_0
             """,
         )
 
@@ -3547,42 +3493,32 @@ class TestAdditionalMetricTypes:
             result["sql"],
             """
             WITH
-            gg0_v3_page_views_enriched AS (
+            v3_page_views_enriched AS (
             SELECT  view_id,
                 product_id
             FROM default.v3.page_views
             ),
-            gg0_v3_product AS (
+            v3_product AS (
             SELECT  product_id,
                 category
             FROM default.v3.products
             ),
-            gg0 AS (
+            page_views_enriched_0 AS (
             SELECT  t2.category,
                 COUNT(t1.view_id) page_view_count
-            FROM gg0_v3_page_views_enriched t1 LEFT OUTER JOIN gg0_v3_product t2 ON t1.product_id = t2.product_id
+            FROM v3_page_views_enriched t1 LEFT OUTER JOIN v3_product t2 ON t1.product_id = t2.product_id
             GROUP BY  t2.category
             ),
-            gg1_v3_page_views_enriched AS (
-            SELECT  session_id,
-                product_id
-            FROM default.v3.page_views
-            ),
-            gg1_v3_product AS (
-            SELECT  product_id,
-                category
-            FROM default.v3.products
-            ),
-            gg1 AS (
+            page_views_enriched_1 AS (
             SELECT  t2.category,
                 t1.session_id
-            FROM gg1_v3_page_views_enriched t1 LEFT OUTER JOIN gg1_v3_product t2 ON t1.product_id = t2.product_id
+            FROM v3_page_views_enriched t1 LEFT OUTER JOIN v3_product t2 ON t1.product_id = t2.product_id
             GROUP BY  t2.category, t1.session_id
             )
 
-            SELECT  COALESCE(gg0.category, gg1.category) AS category,
-                SUM(gg0.page_view_count) / NULLIF(COUNT( DISTINCT gg1.session_id), 0) AS pages_per_session
-            FROM gg0 FULL OUTER JOIN gg1 ON gg0.category = gg1.category
+            SELECT  COALESCE(page_views_enriched_0.category, page_views_enriched_1.category) AS category,
+                SUM(page_views_enriched_0.page_view_count) / NULLIF(COUNT( DISTINCT page_views_enriched_1.session_id), 0) AS pages_per_session
+            FROM page_views_enriched_0 FULL OUTER JOIN page_views_enriched_1 ON page_views_enriched_0.category = page_views_enriched_1.category
             """,
         )
 
@@ -3688,26 +3624,26 @@ class TestAdditionalMetricTypes:
             result["sql"],
             """
             WITH
-            gg0_v3_date AS (
+            v3_date AS (
             SELECT  date_id,
                 month
             FROM default.v3.dates
             ),
-            gg0_v3_order_details AS (
+            v3_order_details AS (
             SELECT  o.order_date,
                 oi.quantity * oi.unit_price AS line_total
             FROM default.v3.orders o JOIN default.v3.order_items oi ON o.order_id = oi.order_id
             ),
-            gg0 AS (
+            order_details_0 AS (
             SELECT  t2.month month_order,
                 SUM(t1.line_total) total_revenue
-            FROM gg0_v3_order_details t1 LEFT OUTER JOIN gg0_v3_date t2 ON t1.order_date = t2.date_id
+            FROM v3_order_details t1 LEFT OUTER JOIN v3_date t2 ON t1.order_date = t2.date_id
             GROUP BY  t2.month
             )
 
-            SELECT  COALESCE(gg0.month_order) AS month_order,
-                (SUM(gg0.total_revenue) - LAG(SUM(gg0.total_revenue), 1) OVER ( ORDER BY month_order) ) / NULLIF(LAG(SUM(gg0.total_revenue), 1) OVER ( ORDER BY month_order) , 0) * 100 AS mom_revenue_change
-            FROM gg0
+            SELECT  COALESCE(order_details_0.month_order) AS month_order,
+                (SUM(order_details_0.total_revenue) - LAG(SUM(order_details_0.total_revenue), 1) OVER ( ORDER BY month_order) ) / NULLIF(LAG(SUM(order_details_0.total_revenue), 1) OVER ( ORDER BY month_order) , 0) * 100 AS mom_revenue_change
+            FROM order_details_0
             """,
         )
 

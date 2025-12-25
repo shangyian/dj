@@ -142,6 +142,7 @@ class GrainGroupSQL:
     ]  # Column names in GROUP BY (beyond requested dims for LIMITED/NONE)
     aggregability: Aggregability
     metrics: list[str]  # Metric names covered by this grain group
+    parent_name: str  # Name of the parent node (fact/transform) for this grain group
     # Mapping from component name (hashed) to actual SQL alias in the output
     # Used by metrics SQL to correctly reference component columns
     component_aliases: dict[str, str] = field(default_factory=dict)
