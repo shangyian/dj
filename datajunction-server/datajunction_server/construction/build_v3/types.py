@@ -132,6 +132,9 @@ class GrainGroupSQL:
     - LIMITED: aggregates to requested dimensions + level columns
     - NONE: stays at native grain (primary key)
 
+    Merged grain groups (is_merged=True) contain components from multiple aggregability
+    levels and output raw values. Aggregations are applied in the final SELECT.
+
     The query is stored as an AST object. Use the `sql` property to render to string.
     """
 
@@ -146,6 +149,13 @@ class GrainGroupSQL:
     # Mapping from component name (hashed) to actual SQL alias in the output
     # Used by metrics SQL to correctly reference component columns
     component_aliases: dict[str, str] = field(default_factory=dict)
+
+    # Merge tracking: when True, aggregations happen in final SELECT, not in CTE
+    is_merged: bool = False
+
+    # For merged groups: original aggregability per component (component.name -> Aggregability)
+    # Used by generate_metrics_sql() to apply correct aggregation in final SELECT
+    component_aggregabilities: dict[str, Aggregability] = field(default_factory=dict)
 
     @property
     def sql(self) -> str:
@@ -338,12 +348,23 @@ class GrainGroup:
     - FULL: requested dimensions only
     - LIMITED: requested dimensions + level columns (e.g., customer_id for COUNT DISTINCT)
     - NONE: native grain (primary key of parent node)
+
+    Grain groups from the same parent can be merged into a single CTE at the
+    finest grain. When merged, is_merged=True and original component aggregabilities
+    are preserved in component_aggregabilities for proper aggregation in final SELECT.
     """
 
     parent_node: Node
     aggregability: Aggregability
     grain_columns: list[str]  # Columns to GROUP BY (beyond requested dimensions)
     components: list[tuple[Node, MetricComponent]]  # (metric_node, component) pairs
+
+    # Merge tracking: when True, aggregations happen in final SELECT, not in CTE
+    is_merged: bool = False
+
+    # For merged groups: tracks original aggregability per component
+    # Maps component.name -> original Aggregability
+    component_aggregabilities: dict[str, Aggregability] = field(default_factory=dict)
 
     @property
     def grain_key(self) -> tuple[str, Aggregability, tuple[str, ...]]:

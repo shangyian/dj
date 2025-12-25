@@ -40,6 +40,7 @@ from datajunction_server.construction.build_v3.helpers import (
     make_name,
     parse_dimension_ref,
     analyze_grain_groups,
+    merge_grain_groups,
     replace_dimension_refs_in_ast,
     replace_component_refs_in_ast,
 )
@@ -450,20 +451,46 @@ def build_grain_group_sql(
             continue
         seen_components.add(component.name)
 
-        # For NONE aggregability, we output raw columns, not aggregations
+        # For NONE aggregability, output raw columns (no aggregation possible)
         if grain_group.aggregability == Aggregability.NONE:
-            # Just output the column reference, no aggregation
-            # The actual aggregation (MEDIAN, etc.) happens in metrics SQL
-            if component.column:
+            if component.expression:
                 col_ast = ast.Column(
-                    name=ast.Name(component.column),
+                    name=ast.Name(component.expression),
                     _table=None,
                 )
-                component_alias = component.column
+                component_alias = component.expression
                 component_expressions.append((component_alias, col_ast))
                 component_metadata.append(
                     (component_alias, component, metric_node, False),
                 )
+                component_aliases[component.name] = component_alias
+            continue
+
+        # For merged grain groups, handle based on original component aggregability
+        if grain_group.is_merged:
+            orig_agg = grain_group.component_aggregabilities.get(
+                component.name,
+                Aggregability.FULL,
+            )
+            if orig_agg == Aggregability.LIMITED:
+                # LIMITED: grain column is already in GROUP BY, no output needed
+                # The grain column (e.g., order_id) will be used for COUNT DISTINCT
+                # in the final SELECT
+                continue
+            else:
+                # FULL: apply aggregation at finest grain, will be re-aggregated in final SELECT
+                num_components = components_per_metric.get(metric_node.name, 1)
+                is_simple = num_components == 1
+                if is_simple:
+                    component_alias = metric_node.name.split(SEPARATOR)[-1]
+                else:
+                    component_alias = component.name
+                expr_ast = build_component_expression(component)
+                component_expressions.append((component_alias, expr_ast))
+                component_metadata.append(
+                    (component_alias, component, metric_node, is_simple),
+                )
+                component_aliases[component.name] = component_alias
             continue
 
         # Skip LIMITED aggregability components with no aggregation
@@ -488,7 +515,10 @@ def build_grain_group_sql(
         component_aliases[component.name] = component_alias
 
     # Determine grain columns for this group
-    if grain_group.aggregability == Aggregability.NONE:
+    if grain_group.is_merged:
+        # Merged: use finest grain (all grain columns from merged groups)
+        effective_grain_columns = grain_group.grain_columns
+    elif grain_group.aggregability == Aggregability.NONE:
         # NONE: use native grain (PK columns)
         effective_grain_columns = grain_group.grain_columns
     elif grain_group.aggregability == Aggregability.LIMITED:
@@ -553,7 +583,7 @@ def build_grain_group_sql(
             columns_metadata.append(
                 ColumnMetadata(
                     name=comp_alias,
-                    semantic_name=f"{metric_node.name}:{component.column}",
+                    semantic_name=f"{metric_node.name}:{component.expression}",
                     type="number",
                     semantic_type="metric_input",  # Raw input for non-aggregatable metric
                 ),
@@ -603,6 +633,8 @@ def build_grain_group_sql(
         metrics=list(metrics_covered),
         parent_name=grain_group.parent_node.name,
         component_aliases=component_aliases,
+        is_merged=grain_group.is_merged,
+        component_aggregabilities=grain_group.component_aggregabilities,
     )
 
 
@@ -701,6 +733,11 @@ def process_metric_group(
     # Extract just the column names from dimensions for grain analysis
     dim_column_names = [parse_dimension_ref(d).column_name for d in ctx.dimensions]
     grain_groups = analyze_grain_groups(metric_group, dim_column_names)
+
+    # Merge compatible grain groups from same parent into single CTEs
+    # This optimization reduces duplicate JOINs by outputting raw values
+    # at finest grain, with aggregations applied in final SELECT
+    grain_groups = merge_grain_groups(grain_groups)
 
     # Resolve dimensions (find join paths) - shared across grain groups
     resolved_dimensions = resolve_dimensions(ctx, parent_node)
@@ -862,6 +899,81 @@ def compute_metric_layers(
     return layers
 
 
+def _build_merged_metric_expression(
+    decomposed: DecomposedMetricInfo,
+    cte_alias: str,
+    component_aggregabilities: dict[str, Aggregability],
+    component_aliases: dict[str, str],
+    grain_columns: list[str],
+) -> ast.Expression:
+    """
+    Build an aggregation expression for a metric in a merged grain group.
+
+    For merged grain groups:
+    - FULL components: CTE has pre-aggregated values at finest grain → re-aggregate with SUM
+    - LIMITED components: CTE has grain columns → use COUNT DISTINCT on grain column
+
+    For single-component metrics:
+        FULL: SUM(cte.pre_agg_column) - re-aggregate the pre-aggregated value
+        LIMITED: COUNT(DISTINCT cte.grain_column) - count distinct on grain column
+
+    For multi-component metrics:
+        Use the combiner expression but replace component refs appropriately
+    """
+    if len(decomposed.components) == 1:
+        comp = decomposed.components[0]
+        orig_agg = component_aggregabilities.get(comp.name, Aggregability.FULL)
+
+        if orig_agg == Aggregability.LIMITED:
+            # LIMITED: COUNT DISTINCT on the grain column (e.g., order_id)
+            # The grain column comes from the component's rule.level
+            grain_col = comp.rule.level[0] if comp.rule.level else comp.expression
+            distinct_col = ast.Column(
+                name=ast.Name(grain_col),
+                _table=ast.Table(ast.Name(cte_alias)),
+            )
+            agg_name = comp.aggregation or "COUNT"
+            return ast.Function(
+                ast.Name(agg_name),
+                args=[distinct_col],
+                quantifier=ast.SetQuantifier.Distinct,
+            )
+        else:
+            # FULL: re-aggregate the pre-aggregated column with SUM
+            # (SUM of SUMs, SUM of COUNTs, etc.)
+            actual_col = component_aliases.get(comp.name, comp.name)
+            col_ref = ast.Column(
+                name=ast.Name(actual_col),
+                _table=ast.Table(ast.Name(cte_alias)),
+            )
+            # Use merge function (usually SUM) to re-aggregate
+            merge_func = comp.merge or "SUM"
+            return ast.Function(ast.Name(merge_func), args=[col_ref])
+
+    else:
+        # Multi-component: use combiner expression with proper column references
+        # The combiner expects component names - map them to actual columns
+        comp_alias_map: dict[str, tuple[str, str]] = {}
+
+        for comp in decomposed.components:
+            orig_agg = component_aggregabilities.get(comp.name, Aggregability.FULL)
+            if orig_agg == Aggregability.LIMITED:
+                # LIMITED: use grain column
+                grain_col = comp.rule.level[0] if comp.rule.level else comp.expression
+                comp_alias_map[comp.name] = (cte_alias, grain_col)
+            else:
+                # FULL: use the pre-aggregated column
+                actual_col = component_aliases.get(comp.name, comp.name)
+                comp_alias_map[comp.name] = (cte_alias, actual_col)
+
+        # Use the combiner AST and replace component references
+        from copy import deepcopy
+
+        expr_ast = deepcopy(decomposed.combiner_ast)
+        replace_component_refs_in_ast(expr_ast, comp_alias_map)
+        return expr_ast
+
+
 def generate_metrics_sql(
     ctx: BuildContext,
     measures_result: GeneratedMeasuresSQL,
@@ -1003,7 +1115,51 @@ def generate_metrics_sql(
             decomposed = decomposed_metrics.get(metric_name)
             short_name = metric_name.split(SEPARATOR)[-1]
 
-            if decomposed and len(decomposed.components) > 1:
+            if not decomposed or not decomposed.components:
+                # No decomposition info - use column from metadata
+                col_name = next(
+                    (c.name for c in gg.columns if c.semantic_name == metric_name),
+                    short_name,
+                )
+                expr_ast: ast.Expression = ast.Column(
+                    name=ast.Name(col_name),
+                    _table=ast.Table(ast.Name(alias)),
+                )
+                metric_expr_asts[metric_name] = (expr_ast, short_name)
+                continue
+
+            # For merged grain groups, build aggregation expressions
+            # FULL components are pre-aggregated at finest grain → re-aggregate
+            # LIMITED components are grain columns → COUNT DISTINCT
+            if gg.is_merged:
+                expr_ast = _build_merged_metric_expression(
+                    decomposed,
+                    alias,
+                    gg.component_aggregabilities,
+                    gg.component_aliases,
+                    gg.grain,
+                )
+                for comp in decomposed.components:
+                    orig_agg = gg.component_aggregabilities.get(
+                        comp.name,
+                        Aggregability.FULL,
+                    )
+                    if orig_agg == Aggregability.LIMITED:
+                        # LIMITED: grain column
+                        grain_col = (
+                            comp.rule.level[0] if comp.rule.level else comp.expression
+                        )
+                        component_columns[comp.name] = (alias, grain_col)
+                    else:
+                        # FULL: pre-aggregated column
+                        actual_col = gg.component_aliases.get(comp.name, comp.name)
+                        component_columns[comp.name] = (alias, actual_col)
+                replace_dimension_refs_in_ast(expr_ast, dimension_aliases)
+                metric_expr_asts[metric_name] = (expr_ast, short_name)
+                continue
+
+            # Non-merged: use pre-aggregated columns
+            if len(decomposed.components) > 1:
                 # Multi-component metric
                 comp_alias_map: dict[str, tuple[str, str]] = {}
                 for comp in decomposed.components:
@@ -1016,7 +1172,7 @@ def generate_metrics_sql(
                 replace_dimension_refs_in_ast(expr_ast, dimension_aliases)
                 metric_expr_asts[metric_name] = (expr_ast, short_name)
 
-            elif decomposed and decomposed.components:
+            else:
                 comp = decomposed.components[0]
                 if decomposed.aggregability == Aggregability.LIMITED:
                     actual_col = comp.expression
@@ -1035,17 +1191,6 @@ def generate_metrics_sql(
                     )
 
                 component_columns[comp.name] = (alias, actual_col)
-                metric_expr_asts[metric_name] = (expr_ast, short_name)
-            else:
-                # No decomposition info - use column from metadata
-                col_name = next(
-                    (c.name for c in gg.columns if c.semantic_name == metric_name),
-                    short_name,
-                )
-                expr_ast = ast.Column(
-                    name=ast.Name(col_name),
-                    _table=ast.Table(ast.Name(alias)),
-                )
                 metric_expr_asts[metric_name] = (expr_ast, short_name)
 
     # Process derived metrics (not in any grain group)
@@ -1128,8 +1273,29 @@ def generate_metrics_sql(
         ],
     )
 
+    # Check if any grain group is merged - if so, we need GROUP BY in final SELECT
+    any_merged = any(gg.is_merged for gg in grain_groups)
+
+    # Build GROUP BY clause if needed (when merged grain groups require final aggregation)
+    group_by: list[ast.Expression] = []
+    if any_merged and dim_col_aliases:
+        # Group by the dimension columns (using first CTE alias for column references)
+        group_by.extend(
+            [
+                ast.Column(
+                    name=ast.Name(dim_col),
+                    _table=ast.Table(ast.Name(cte_aliases[0])),
+                )
+                for dim_col in dim_col_aliases
+            ],
+        )
+
     # Build the final SELECT
-    select_ast = ast.Select(projection=projection, from_=from_clause)
+    select_ast = ast.Select(
+        projection=projection,
+        from_=from_clause,
+        group_by=group_by,
+    )
 
     # Build the final Query with all CTEs
     final_query = ast.Query(select=select_ast, ctes=all_cte_asts)

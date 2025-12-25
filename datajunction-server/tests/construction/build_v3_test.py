@@ -630,9 +630,9 @@ class TestMultipleMetrics:
         - total_quantity: SUM - FULL aggregability
         - order_count: COUNT(DISTINCT order_id) - LIMITED aggregability
 
-        This produces 2 grain groups:
-        1. FULL: total_revenue, total_quantity at [status]
-        2. LIMITED: order_count at [status, order_id]
+        With grain group merging, this produces 1 merged grain group at the finest grain.
+        All metrics from the same parent are merged into one CTE with raw values.
+        Aggregations are applied in the final metrics SQL layer.
         """
         response = await client_with_build_v3.get(
             "/sql/measures/v3/",
@@ -645,80 +645,45 @@ class TestMultipleMetrics:
         assert response.status_code == 200
         result = response.json()
 
-        # Should have 2 grain groups (FULL + LIMITED)
-        assert len(result["grain_groups"]) == 2
+        # With merging, should have 1 merged grain group at finest grain (LIMITED)
+        assert len(result["grain_groups"]) == 1
 
-        # Find grain groups by aggregability
-        gg_full = next(
-            gg for gg in result["grain_groups"] if gg["aggregability"] == "full"
-        )
-        gg_limited = next(
-            gg for gg in result["grain_groups"] if gg["aggregability"] == "limited"
-        )
+        gg = result["grain_groups"][0]
 
-        # Validate FULL grain group (total_revenue, total_quantity)
-        assert gg_full["grain"] == ["status"]
-        assert sorted(gg_full["metrics"]) == ["v3.total_quantity", "v3.total_revenue"]
-        assert gg_full["columns"] == [
-            {
-                "name": "status",
-                "type": "string",
-                "semantic_entity": "v3.order_details.status",
-                "semantic_type": "dimension",
-            },
-            {
-                "name": "total_revenue",
-                "type": "number",
-                "semantic_entity": "v3.total_revenue",
-                "semantic_type": "metric",
-            },
-            {
-                "name": "total_quantity",
-                "type": "number",
-                "semantic_entity": "v3.total_quantity",
-                "semantic_type": "metric",
-            },
+        # Merged group has LIMITED aggregability (worst case)
+        assert gg["aggregability"] == "limited"
+        assert gg["grain"] == ["order_id", "status"]
+        assert sorted(gg["metrics"]) == [
+            "v3.order_count",
+            "v3.total_quantity",
+            "v3.total_revenue",
         ]
+
+        # Columns: dimension + grain column + 3 raw metric columns
+        assert len(gg["columns"]) == 4
+        assert gg["columns"][0] == {
+            "name": "status",
+            "type": "string",
+            "semantic_entity": "v3.order_details.status",
+            "semantic_type": "dimension",
+        }
+        assert gg["columns"][1] == {
+            "name": "order_id",
+            "type": "int",
+            "semantic_entity": "v3.order_details.order_id",
+            "semantic_type": "dimension",
+        }
+
+        # Raw metric columns (for later aggregation)
         assert_sql_equal(
-            gg_full["sql"],
+            gg["sql"],
             """
             WITH v3_order_details AS (
-                SELECT o.status, oi.quantity, oi.quantity * oi.unit_price AS line_total
+                SELECT o.order_id, o.status, oi.quantity, oi.quantity * oi.unit_price AS line_total
                 FROM default.v3.orders o
                 JOIN default.v3.order_items oi ON o.order_id = oi.order_id
             )
-            SELECT t1.status, SUM(t1.line_total) total_revenue, SUM(t1.quantity) total_quantity
-            FROM v3_order_details t1
-            GROUP BY t1.status
-            """,
-        )
-
-        # Validate LIMITED grain group (order_count at finer grain)
-        assert gg_limited["grain"] == ["order_id", "status"]
-        assert gg_limited["metrics"] == ["v3.order_count"]
-        assert gg_limited["columns"] == [
-            {
-                "name": "status",
-                "type": "string",
-                "semantic_entity": "v3.order_details.status",
-                "semantic_type": "dimension",
-            },
-            {
-                "name": "order_id",
-                "type": "int",
-                "semantic_entity": "v3.order_details.order_id",
-                "semantic_type": "dimension",
-            },
-        ]
-        assert_sql_equal(
-            gg_limited["sql"],
-            """
-            WITH v3_order_details AS (
-                SELECT o.order_id, o.status
-                FROM default.v3.orders o
-                JOIN default.v3.order_items oi ON o.order_id = oi.order_id
-            )
-            SELECT t1.status, t1.order_id
+            SELECT t1.status, t1.order_id, SUM(t1.line_total) total_revenue, SUM(t1.quantity) total_quantity
             FROM v3_order_details t1
             GROUP BY t1.status, t1.order_id
             """,
@@ -1156,7 +1121,8 @@ class TestMultipleMetrics:
         - From order_details: total_revenue (FULL), order_count (LIMITED)
         - From page_views_enriched: visitor_count (LIMITED), page_view_count (FULL)
 
-        Using v3.product.category since both facts link to product (no role needed).
+        With grain group merging, each parent produces ONE merged grain group
+        with raw values at finest grain. Aggregations are applied in metrics SQL.
         """
         response = await client_with_build_v3.get(
             "/sql/measures/v3/",
@@ -1173,80 +1139,37 @@ class TestMultipleMetrics:
         assert response.status_code == 200
         result = response.json()
 
-        # Should have 4 grain groups:
-        # 1. total_revenue (FULL from order_details)
-        # 2. order_count (LIMITED from order_details with order_id)
-        # 3. visitor_count (LIMITED from page_views with customer_id)
-        # 4. page_view_count (FULL from page_views)
-        assert len(result["grain_groups"]) == 4
+        # With merging, should have 2 grain groups (one per parent):
+        # 1. order_details (merged: total_revenue + order_count) at LIMITED grain
+        # 2. page_views_enriched (merged: visitor_count + page_view_count) at LIMITED grain
+        assert len(result["grain_groups"]) == 2
 
-        # Find grain groups by metric for predictable assertions
-        gg_by_metric = {gg["metrics"][0]: gg for gg in result["grain_groups"]}
-
-        # Validate grain group for total_revenue (FULL from order_details)
-        gg_revenue = gg_by_metric["v3.total_revenue"]
-        assert gg_revenue["aggregability"] == "full"
-        assert gg_revenue["grain"] == ["category"]
-        assert gg_revenue["metrics"] == ["v3.total_revenue"]
-        assert gg_revenue["columns"] == [
-            {
-                "name": "category",
-                "type": "string",
-                "semantic_entity": "v3.product.category",
-                "semantic_type": "dimension",
-            },
-            {
-                "name": "total_revenue",
-                "type": "number",
-                "semantic_entity": "v3.total_revenue",
-                "semantic_type": "metric",
-            },
-        ]
-        assert_sql_equal(
-            gg_revenue["sql"],
-            """
-            WITH
-            v3_order_details AS (
-                SELECT oi.product_id, oi.quantity * oi.unit_price AS line_total
-                FROM default.v3.orders o
-                JOIN default.v3.order_items oi ON o.order_id = oi.order_id
-            ),
-            v3_product AS (
-                SELECT product_id, category
-                FROM default.v3.products
-            )
-            SELECT t2.category, SUM(t1.line_total) total_revenue
-            FROM v3_order_details t1
-            LEFT OUTER JOIN v3_product t2 ON t1.product_id = t2.product_id
-            GROUP BY t2.category
-            """,
+        # Find grain groups by parent name
+        gg_order_details = next(
+            gg
+            for gg in result["grain_groups"]
+            if "v3.order_count" in gg["metrics"] or "v3.total_revenue" in gg["metrics"]
+        )
+        gg_page_views = next(
+            gg
+            for gg in result["grain_groups"]
+            if "v3.visitor_count" in gg["metrics"]
+            or "v3.page_view_count" in gg["metrics"]
         )
 
-        # Validate grain group for order_count (LIMITED from order_details)
-        gg_orders = gg_by_metric["v3.order_count"]
-        assert gg_orders["aggregability"] == "limited"
-        assert gg_orders["grain"] == ["category", "order_id"]
-        assert gg_orders["metrics"] == ["v3.order_count"]
-        assert gg_orders["columns"] == [
-            {
-                "name": "category",
-                "type": "string",
-                "semantic_entity": "v3.product.category",
-                "semantic_type": "dimension",
-            },
-            {
-                "name": "order_id",
-                "type": "int",
-                "semantic_entity": "v3.order_details.order_id",
-                "semantic_type": "dimension",
-            },
+        # Validate merged grain group for order_details
+        assert gg_order_details["aggregability"] == "limited"
+        assert gg_order_details["grain"] == ["category", "order_id"]
+        assert sorted(gg_order_details["metrics"]) == [
+            "v3.order_count",
+            "v3.total_revenue",
         ]
         assert_sql_equal(
-            gg_orders["sql"],
+            gg_order_details["sql"],
             """
             WITH
             v3_order_details AS (
-                SELECT o.order_id, oi.product_id
+                SELECT o.order_id, oi.product_id, oi.quantity * oi.unit_price AS line_total
                 FROM default.v3.orders o
                 JOIN default.v3.order_items oi ON o.order_id = oi.order_id
             ),
@@ -1254,86 +1177,36 @@ class TestMultipleMetrics:
                 SELECT product_id, category
                 FROM default.v3.products
             )
-            SELECT t2.category, t1.order_id
+            SELECT t2.category, t1.order_id, SUM(t1.line_total) total_revenue
             FROM v3_order_details t1
             LEFT OUTER JOIN v3_product t2 ON t1.product_id = t2.product_id
             GROUP BY t2.category, t1.order_id
             """,
         )
 
-        # Validate grain group for visitor_count (LIMITED from page_views)
-        gg_visitors = gg_by_metric["v3.visitor_count"]
-        assert gg_visitors["aggregability"] == "limited"
-        assert gg_visitors["grain"] == ["category", "customer_id"]
-        assert gg_visitors["metrics"] == ["v3.visitor_count"]
-        assert gg_visitors["columns"] == [
-            {
-                "name": "category",
-                "type": "string",
-                "semantic_entity": "v3.product.category",
-                "semantic_type": "dimension",
-            },
-            {
-                "name": "customer_id",
-                "type": "int",
-                "semantic_entity": "v3.page_views_enriched.customer_id",
-                "semantic_type": "dimension",
-            },
+        # Validate merged grain group for page_views_enriched
+        assert gg_page_views["aggregability"] == "limited"
+        assert gg_page_views["grain"] == ["category", "customer_id"]
+        assert sorted(gg_page_views["metrics"]) == [
+            "v3.page_view_count",
+            "v3.visitor_count",
         ]
         assert_sql_equal(
-            gg_visitors["sql"],
+            gg_page_views["sql"],
             """
             WITH
             v3_page_views_enriched AS (
-                SELECT customer_id, product_id
+                SELECT view_id, customer_id, product_id
                 FROM default.v3.page_views
             ),
             v3_product AS (
                 SELECT product_id, category
                 FROM default.v3.products
             )
-            SELECT t2.category, t1.customer_id
+            SELECT t2.category, t1.customer_id, COUNT(t1.view_id) page_view_count
             FROM v3_page_views_enriched t1
             LEFT OUTER JOIN v3_product t2 ON t1.product_id = t2.product_id
             GROUP BY t2.category, t1.customer_id
-            """,
-        )
-
-        # Validate grain group for page_view_count (FULL from page_views)
-        gg_pageviews = gg_by_metric["v3.page_view_count"]
-        assert gg_pageviews["aggregability"] == "full"
-        assert gg_pageviews["grain"] == ["category"]
-        assert gg_pageviews["metrics"] == ["v3.page_view_count"]
-        assert gg_pageviews["columns"] == [
-            {
-                "name": "category",
-                "type": "string",
-                "semantic_entity": "v3.product.category",
-                "semantic_type": "dimension",
-            },
-            {
-                "name": "page_view_count",
-                "type": "number",
-                "semantic_entity": "v3.page_view_count",
-                "semantic_type": "metric",
-            },
-        ]
-        assert_sql_equal(
-            gg_pageviews["sql"],
-            """
-            WITH
-            v3_page_views_enriched AS (
-                SELECT view_id, product_id
-                FROM default.v3.page_views
-            ),
-            v3_product AS (
-                SELECT product_id, category
-                FROM default.v3.products
-            )
-            SELECT t2.category, COUNT(t1.view_id) page_view_count
-            FROM v3_page_views_enriched t1
-            LEFT OUTER JOIN v3_product t2 ON t1.product_id = t2.product_id
-            GROUP BY t2.category
             """,
         )
 
@@ -1867,7 +1740,7 @@ class TestAllMetrics:
         - customer_count: APPROX_COUNT_DISTINCT - FULL
         - order_count: COUNT(DISTINCT order_id) - LIMITED
 
-        This produces 2 grain groups.
+        With grain group merging, this produces 1 merged grain group at finest grain.
         """
         response = await client_with_build_v3.get(
             "/sql/measures/v3/",
@@ -1884,86 +1757,21 @@ class TestAllMetrics:
         assert response.status_code == 200
         result = response.json()
 
-        # Should have 2 grain groups: FULL and LIMITED
-        assert len(result["grain_groups"]) == 2
+        # With merging, should have 1 merged grain group at finest grain (LIMITED)
+        assert len(result["grain_groups"]) == 1
 
-        # Find grain groups by aggregability
-        gg_full = next(
-            gg for gg in result["grain_groups"] if gg["aggregability"] == "full"
-        )
-        gg_limited = next(
-            gg for gg in result["grain_groups"] if gg["aggregability"] == "limited"
-        )
+        gg = result["grain_groups"][0]
 
-        # Validate FULL grain group (total_revenue, total_quantity, customer_count)
-        assert gg_full["aggregability"] == "full"
-        assert sorted(gg_full["grain"]) == ["category", "name", "status"]
-        assert sorted(gg_full["metrics"]) == [
+        # Merged group has LIMITED aggregability (worst case)
+        assert gg["aggregability"] == "limited"
+        assert sorted(gg["grain"]) == ["category", "name", "order_id", "status"]
+        assert sorted(gg["metrics"]) == [
             "v3.customer_count",
+            "v3.order_count",
             "v3.total_quantity",
             "v3.total_revenue",
         ]
-        assert "_DOT_" not in gg_full["sql"]
-
-        assert_sql_equal(
-            gg_full["sql"],
-            """
-            WITH
-            v3_customer AS (
-                SELECT customer_id, name
-                FROM default.v3.customers
-            ),
-            v3_order_details AS (
-                SELECT o.customer_id, o.status, oi.product_id, oi.quantity,
-                       oi.quantity * oi.unit_price AS line_total
-                FROM default.v3.orders o
-                JOIN default.v3.order_items oi ON o.order_id = oi.order_id
-            ),
-            v3_product AS (
-                SELECT product_id, category
-                FROM default.v3.products
-            )
-            SELECT t1.status, t2.name, t3.category,
-                   SUM(t1.line_total) total_revenue,
-                   SUM(t1.quantity) total_quantity,
-                   hll_sketch_agg(t1.customer_id) customer_count
-            FROM v3_order_details t1
-            LEFT OUTER JOIN v3_customer t2 ON t1.customer_id = t2.customer_id
-            LEFT OUTER JOIN v3_product t3 ON t1.product_id = t3.product_id
-            GROUP BY t1.status, t2.name, t3.category
-            """,
-        )
-
-        # Validate LIMITED grain group (order_count)
-        assert gg_limited["aggregability"] == "limited"
-        assert sorted(gg_limited["grain"]) == ["category", "name", "order_id", "status"]
-        assert gg_limited["metrics"] == ["v3.order_count"]
-        assert "_DOT_" not in gg_limited["sql"]
-
-        assert_sql_equal(
-            gg_limited["sql"],
-            """
-            WITH
-            v3_customer AS (
-                SELECT customer_id, name
-                FROM default.v3.customers
-            ),
-            v3_order_details AS (
-                SELECT o.order_id, o.customer_id, o.status, oi.product_id
-                FROM default.v3.orders o
-                JOIN default.v3.order_items oi ON o.order_id = oi.order_id
-            ),
-            v3_product AS (
-                SELECT product_id, category
-                FROM default.v3.products
-            )
-            SELECT t1.status, t2.name, t3.category, t1.order_id
-            FROM v3_order_details t1
-            LEFT OUTER JOIN v3_customer t2 ON t1.customer_id = t2.customer_id
-            LEFT OUTER JOIN v3_product t3 ON t1.product_id = t3.product_id
-            GROUP BY t1.status, t2.name, t3.category, t1.order_id
-            """,
-        )
+        assert "_DOT_" not in gg["sql"]
 
         # Validate requested_dimensions
         assert result["requested_dimensions"] == [
@@ -1986,7 +1794,7 @@ class TestAllMetrics:
         - total_revenue: SUM - FULL aggregability
         - order_count: COUNT(DISTINCT order_id) - LIMITED aggregability
 
-        This produces 2 grain groups.
+        With grain group merging, this produces 1 merged grain group.
         """
         response = await client_with_build_v3.get(
             "/sql/measures/v3/",
@@ -2003,107 +1811,20 @@ class TestAllMetrics:
         assert response.status_code == 200
         result = response.json()
 
-        # Should have 2 grain groups (FULL + LIMITED)
-        assert len(result["grain_groups"]) == 2
+        # With merging, should have 1 merged grain group at finest grain
+        assert len(result["grain_groups"]) == 1
 
-        # Find grain groups by aggregability
-        gg_full = next(
-            gg for gg in result["grain_groups"] if gg["aggregability"] == "full"
-        )
-        gg_limited = next(
-            gg for gg in result["grain_groups"] if gg["aggregability"] == "limited"
-        )
+        gg = result["grain_groups"][0]
 
-        # Validate FULL grain group (total_revenue)
-        assert gg_full["grain"] == ["country_from", "country_to", "month_order"]
-        assert gg_full["metrics"] == ["v3.total_revenue"]
-        assert gg_full["columns"] == [
-            {
-                "name": "month_order",
-                "type": "int",
-                "semantic_entity": "v3.date.month[order]",
-                "semantic_type": "dimension",
-            },
-            {
-                "name": "country_from",
-                "type": "string",
-                "semantic_entity": "v3.location.country[from]",
-                "semantic_type": "dimension",
-            },
-            {
-                "name": "country_to",
-                "type": "string",
-                "semantic_entity": "v3.location.country[to]",
-                "semantic_type": "dimension",
-            },
-            {
-                "name": "total_revenue",
-                "semantic_entity": "v3.total_revenue",
-                "semantic_type": "metric",
-                "type": "number",
-            },
-        ]
-        assert_sql_equal(
-            gg_full["sql"],
-            """
-            WITH
-            v3_date AS (
-                SELECT date_id, month
-                FROM default.v3.dates
-            ),
-            v3_location AS (
-                SELECT location_id, country
-                FROM default.v3.locations
-            ),
-            v3_order_details AS (
-                SELECT o.order_date, o.from_location_id, o.to_location_id,
-                       oi.quantity * oi.unit_price AS line_total
-                FROM default.v3.orders o
-                JOIN default.v3.order_items oi ON o.order_id = oi.order_id
-            )
-            SELECT t2.month month_order, t3.country country_from, t4.country country_to,
-                   SUM(t1.line_total) total_revenue
-            FROM v3_order_details t1
-            LEFT OUTER JOIN v3_date t2 ON t1.order_date = t2.date_id
-            LEFT OUTER JOIN v3_location t3 ON t1.from_location_id = t3.location_id
-            LEFT OUTER JOIN v3_location t4 ON t1.to_location_id = t4.location_id
-            GROUP BY t2.month, t3.country, t4.country
-            """,
-        )
-
-        # Validate LIMITED grain group (order_count at finer grain)
-        assert gg_limited["grain"] == [
+        # Merged group has LIMITED aggregability
+        assert gg["aggregability"] == "limited"
+        assert sorted(gg["grain"]) == [
             "country_from",
             "country_to",
             "month_order",
             "order_id",
         ]
-        assert gg_limited["metrics"] == ["v3.order_count"]
-        assert_sql_equal(
-            gg_limited["sql"],
-            """
-            WITH
-            v3_date AS (
-                SELECT date_id, month
-                FROM default.v3.dates
-            ),
-            v3_location AS (
-                SELECT location_id, country
-                FROM default.v3.locations
-            ),
-            v3_order_details AS (
-                SELECT o.order_id, o.order_date, o.from_location_id, o.to_location_id
-                FROM default.v3.orders o
-                JOIN default.v3.order_items oi ON o.order_id = oi.order_id
-            )
-            SELECT t2.month month_order, t3.country country_from, t4.country country_to, t1.order_id
-            FROM v3_order_details t1
-            LEFT OUTER JOIN v3_date t2 ON t1.order_date = t2.date_id
-            LEFT OUTER JOIN v3_location t3 ON t1.from_location_id = t3.location_id
-            LEFT OUTER JOIN v3_location t4 ON t1.to_location_id = t4.location_id
-            GROUP BY t2.month, t3.country, t4.country, t1.order_id
-            """,
-        )
+        assert sorted(gg["metrics"]) == ["v3.order_count", "v3.total_revenue"]
 
         # Validate requested_dimensions
         assert result["requested_dimensions"] == [
@@ -2977,30 +2698,28 @@ class TestMetricsSQLV3:
         assert response.status_code == 200, response.json()
         result = response.json()
 
+        # With merged grain groups:
+        # - CTE aggregates FULL components at finest grain (order_id level)
+        # - Final SELECT re-aggregates to requested grain (status level) with GROUP BY
         assert_sql_equal(
             result["sql"],
             """
             WITH
             v3_order_details AS (
-                SELECT o.status, oi.quantity, oi.quantity * oi.unit_price AS line_total
+                SELECT o.order_id, o.status, oi.quantity, oi.quantity * oi.unit_price AS line_total
                 FROM default.v3.orders o
                 JOIN default.v3.order_items oi ON o.order_id = oi.order_id
             ),
             order_details_0 AS (
-                SELECT t1.status, SUM(t1.line_total) total_revenue, SUM(t1.quantity) total_quantity
-                FROM v3_order_details t1
-                GROUP BY t1.status
-            ),
-            order_details_1 AS (
-                SELECT t1.status, t1.order_id
+                SELECT t1.status, t1.order_id, SUM(t1.line_total) total_revenue, SUM(t1.quantity) total_quantity
                 FROM v3_order_details t1
                 GROUP BY t1.status, t1.order_id
             )
-            SELECT COALESCE(order_details_0.status, order_details_1.status) AS status,
-                   SUM(order_details_0.total_revenue) / NULLIF(COUNT(DISTINCT order_details_1.order_id), 0) AS avg_order_value,
-                   SUM(order_details_0.total_quantity) / NULLIF(COUNT( DISTINCT order_details_1.order_id), 0) AS avg_items_per_order
+            SELECT COALESCE(order_details_0.status) AS status,
+                   SUM(order_details_0.total_revenue) / NULLIF(COUNT(DISTINCT order_details_0.order_id), 0) AS avg_order_value,
+                   SUM(order_details_0.total_quantity) / NULLIF(COUNT(DISTINCT order_details_0.order_id), 0) AS avg_items_per_order
             FROM order_details_0
-            FULL OUTER JOIN order_details_1 ON order_details_0.status = order_details_1.status
+            GROUP BY order_details_0.status
             """,
         )
         # Only the derived metrics appear in output (not base metrics)
@@ -3045,6 +2764,8 @@ class TestMetricsSQLV3:
         assert response.status_code == 200, response.json()
         result = response.json()
 
+        # With merged grain groups, we get one CTE per parent
+        # with raw values and aggregations applied in the final SELECT
         assert_sql_equal(
             result["sql"],
             """
@@ -3055,7 +2776,8 @@ class TestMetricsSQLV3:
             FROM default.v3.customers
             ),
             v3_order_details AS (
-            SELECT  o.customer_id,
+            SELECT  o.order_id,
+                o.customer_id,
                 oi.product_id,
                 oi.quantity * oi.unit_price AS line_total
             FROM default.v3.orders o JOIN default.v3.order_items oi ON o.order_id = oi.order_id
@@ -3074,15 +2796,8 @@ class TestMetricsSQLV3:
             order_details_0 AS (
             SELECT  t2.category,
                 t3.name name_customer,
+                t1.order_id,
                 SUM(t1.line_total) total_revenue
-            FROM v3_order_details t1 LEFT OUTER JOIN v3_product t2 ON t1.product_id = t2.product_id
-            LEFT OUTER JOIN v3_customer t3 ON t1.customer_id = t3.customer_id
-            GROUP BY  t2.category, t3.name
-            ),
-            order_details_1 AS (
-            SELECT  t2.category,
-                t3.name name_customer,
-                t1.order_id
             FROM v3_order_details t1 LEFT OUTER JOIN v3_product t2 ON t1.product_id = t2.product_id
             LEFT OUTER JOIN v3_customer t3 ON t1.customer_id = t3.customer_id
             GROUP BY  t2.category, t3.name, t1.order_id
@@ -3090,28 +2805,20 @@ class TestMetricsSQLV3:
             page_views_enriched_0 AS (
             SELECT  t2.category,
                 t3.name name_customer,
+                t1.customer_id,
                 COUNT(t1.view_id) page_view_count
-            FROM v3_page_views_enriched t1 LEFT OUTER JOIN v3_product t2 ON t1.product_id = t2.product_id
-            LEFT OUTER JOIN v3_customer t3 ON t1.customer_id = t3.customer_id
-            GROUP BY  t2.category, t3.name
-            ),
-            page_views_enriched_1 AS (
-            SELECT  t2.category,
-                t3.name name_customer,
-                t1.customer_id
             FROM v3_page_views_enriched t1 LEFT OUTER JOIN v3_product t2 ON t1.product_id = t2.product_id
             LEFT OUTER JOIN v3_customer t3 ON t1.customer_id = t3.customer_id
             GROUP BY  t2.category, t3.name, t1.customer_id
             )
 
-            SELECT  COALESCE(order_details_0.category, order_details_1.category, page_views_enriched_0.category, page_views_enriched_1.category) AS category,
-                COALESCE(order_details_0.name_customer, order_details_1.name_customer, page_views_enriched_0.name_customer, page_views_enriched_1.name_customer) AS name_customer,
-                CAST(COUNT( DISTINCT order_details_1.order_id) AS DOUBLE) / NULLIF(COUNT( DISTINCT page_views_enriched_1.customer_id), 0) AS conversion_rate,
-                SUM(order_details_0.total_revenue) / NULLIF(COUNT( DISTINCT page_views_enriched_1.customer_id), 0) AS revenue_per_visitor,
+            SELECT  COALESCE(order_details_0.category, page_views_enriched_0.category) AS category,
+                COALESCE(order_details_0.name_customer, page_views_enriched_0.name_customer) AS name_customer,
+                CAST(COUNT( DISTINCT order_details_0.order_id) AS DOUBLE) / NULLIF(COUNT( DISTINCT page_views_enriched_0.customer_id), 0) AS conversion_rate,
+                SUM(order_details_0.total_revenue) / NULLIF(COUNT( DISTINCT page_views_enriched_0.customer_id), 0) AS revenue_per_visitor,
                 SUM(order_details_0.total_revenue) / NULLIF(SUM(page_views_enriched_0.page_view_count), 0) AS revenue_per_page_view
-            FROM order_details_0 FULL OUTER JOIN order_details_1 ON order_details_0.category = order_details_1.category AND order_details_0.name_customer = order_details_1.name_customer
-            FULL OUTER JOIN page_views_enriched_0 ON order_details_0.category = page_views_enriched_0.category AND order_details_0.name_customer = page_views_enriched_0.name_customer
-            FULL OUTER JOIN page_views_enriched_1 ON order_details_0.category = page_views_enriched_1.category AND order_details_0.name_customer = page_views_enriched_1.name_customer
+            FROM order_details_0 FULL OUTER JOIN page_views_enriched_0 ON order_details_0.category = page_views_enriched_0.category AND order_details_0.name_customer = page_views_enriched_0.name_customer
+            GROUP BY  order_details_0.category, order_details_0.name_customer
             """,
         )
         assert result["columns"] == [
@@ -3477,6 +3184,9 @@ class TestAdditionalMetricTypes:
 
         v3.pages_per_session = v3.page_view_count / v3.session_count
         Both base metrics are from page_views_enriched.
+
+        With grain group merging, there's one CTE with raw values
+        and aggregations are applied in the final SELECT.
         """
         response = await client_with_build_v3.get(
             "/sql/metrics/v3/",
@@ -3489,12 +3199,15 @@ class TestAdditionalMetricTypes:
         assert response.status_code == 200, response.json()
         result = response.json()
 
+        # With merged grain groups, we get a single CTE with raw values
+        # and aggregations in the final SELECT
         assert_sql_equal(
             result["sql"],
             """
             WITH
             v3_page_views_enriched AS (
             SELECT  view_id,
+                session_id,
                 product_id
             FROM default.v3.page_views
             ),
@@ -3505,20 +3218,16 @@ class TestAdditionalMetricTypes:
             ),
             page_views_enriched_0 AS (
             SELECT  t2.category,
+                t1.session_id,
                 COUNT(t1.view_id) page_view_count
-            FROM v3_page_views_enriched t1 LEFT OUTER JOIN v3_product t2 ON t1.product_id = t2.product_id
-            GROUP BY  t2.category
-            ),
-            page_views_enriched_1 AS (
-            SELECT  t2.category,
-                t1.session_id
             FROM v3_page_views_enriched t1 LEFT OUTER JOIN v3_product t2 ON t1.product_id = t2.product_id
             GROUP BY  t2.category, t1.session_id
             )
 
-            SELECT  COALESCE(page_views_enriched_0.category, page_views_enriched_1.category) AS category,
-                SUM(page_views_enriched_0.page_view_count) / NULLIF(COUNT( DISTINCT page_views_enriched_1.session_id), 0) AS pages_per_session
-            FROM page_views_enriched_0 FULL OUTER JOIN page_views_enriched_1 ON page_views_enriched_0.category = page_views_enriched_1.category
+            SELECT  COALESCE(page_views_enriched_0.category) AS category,
+                SUM(page_views_enriched_0.page_view_count) / NULLIF(COUNT( DISTINCT page_views_enriched_0.session_id), 0) AS pages_per_session
+            FROM page_views_enriched_0
+            GROUP BY  page_views_enriched_0.category
             """,
         )
 

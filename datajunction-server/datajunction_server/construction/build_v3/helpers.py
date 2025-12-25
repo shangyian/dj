@@ -1257,6 +1257,105 @@ def analyze_grain_groups(
     return grain_groups
 
 
+def merge_grain_groups(grain_groups: list[GrainGroup]) -> list[GrainGroup]:
+    """
+    Merge compatible grain groups from the same parent into single CTEs.
+
+    Grain groups can be merged if they share the same parent node. The merged
+    group uses the finest grain (union of all grain columns) and outputs raw
+    columns instead of pre-aggregated values. Aggregations are then applied
+    in the final SELECT.
+
+    This optimization reduces duplicate CTEs and JOINs when multiple metrics
+    with different aggregabilities come from the same parent.
+
+    Args:
+        grain_groups: List of grain groups to potentially merge
+
+    Returns:
+        List of grain groups with compatible groups merged
+    """
+    from collections import defaultdict
+
+    # Group by parent node name
+    by_parent: dict[str, list[GrainGroup]] = defaultdict(list)
+    for gg in grain_groups:
+        by_parent[gg.parent_node.name].append(gg)
+
+    merged_groups: list[GrainGroup] = []
+
+    for parent_name, parent_groups in by_parent.items():
+        if len(parent_groups) == 1:
+            # Only one group for this parent - no merge needed
+            merged_groups.append(parent_groups[0])
+        else:
+            # Multiple groups for same parent - merge them
+            merged = _merge_parent_grain_groups(parent_groups)
+            merged_groups.append(merged)
+
+    # Sort for deterministic output
+    agg_order = {Aggregability.FULL: 0, Aggregability.LIMITED: 1, Aggregability.NONE: 2}
+    merged_groups.sort(
+        key=lambda g: (
+            g.parent_node.name,
+            agg_order.get(g.aggregability, 3),
+            g.grain_columns,
+        ),
+    )
+
+    return merged_groups
+
+
+def _merge_parent_grain_groups(groups: list[GrainGroup]) -> GrainGroup:
+    """
+    Merge multiple grain groups from the same parent into one.
+
+    The merged group:
+    - Uses the finest grain (union of all grain columns)
+    - Has aggregability = worst case (NONE > LIMITED > FULL)
+    - Contains all components from all groups
+    - Has is_merged=True to signal that aggregations happen in final SELECT
+    - Tracks original component aggregabilities for proper final aggregation
+    """
+    if not groups:
+        raise ValueError("Cannot merge empty list of grain groups")
+
+    parent_node = groups[0].parent_node
+
+    # Collect all components and track their original aggregabilities
+    all_components: list[tuple[Node, MetricComponent]] = []
+    component_aggregabilities: dict[str, Aggregability] = {}
+
+    for gg in groups:
+        for metric_node, component in gg.components:
+            all_components.append((metric_node, component))
+            # Track original aggregability for each component
+            component_aggregabilities[component.name] = gg.aggregability
+
+    # Compute finest grain (union of all grain columns)
+    finest_grain_set: set[str] = set()
+    for gg in groups:
+        finest_grain_set.update(gg.grain_columns)
+    finest_grain = sorted(finest_grain_set)
+
+    # Determine worst-case aggregability
+    # NONE > LIMITED > FULL (NONE is worst, forces finest grain)
+    agg_order = {Aggregability.FULL: 0, Aggregability.LIMITED: 1, Aggregability.NONE: 2}
+    worst_agg = max(
+        groups,
+        key=lambda g: agg_order.get(g.aggregability, 0),
+    ).aggregability
+
+    return GrainGroup(
+        parent_node=parent_node,
+        aggregability=worst_agg,
+        grain_columns=finest_grain,
+        components=all_components,
+        is_merged=True,
+        component_aggregabilities=component_aggregabilities,
+    )
+
+
 def compute_metric_layers(
     ctx: BuildContext,
     decomposed_metrics: dict[str, DecomposedMetricInfo],
