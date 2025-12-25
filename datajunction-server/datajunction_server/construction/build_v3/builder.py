@@ -436,6 +436,10 @@ def build_grain_group_sql(
     # Track which components we've already added (deduplicate by component name)
     seen_components: set[str] = set()
 
+    # Track mapping from component name to actual SQL alias
+    # This is needed for metrics SQL to correctly reference component columns
+    component_aliases: dict[str, str] = {}
+
     for metric_node, component in grain_group.components:
         metrics_covered.add(metric_node.name)
 
@@ -476,6 +480,10 @@ def build_grain_group_sql(
         expr_ast = build_component_expression(component)
         component_expressions.append((component_alias, expr_ast))
         component_metadata.append((component_alias, component, metric_node, is_simple))
+
+        # Track the mapping from component name to actual SQL alias
+        # This is needed for metrics SQL to correctly reference component columns
+        component_aliases[component.name] = component_alias
 
     # Determine grain columns for this group
     if grain_group.aggregability == Aggregability.NONE:
@@ -591,6 +599,7 @@ def build_grain_group_sql(
         grain=full_grain,
         aggregability=grain_group.aggregability,
         metrics=list(metrics_covered),
+        component_aliases=component_aliases,
     )
 
 
@@ -980,15 +989,18 @@ def generate_metrics_sql(
 
             if decomposed and len(decomposed.components) > 1:
                 # Multi-component - apply combiner with table alias prefix
+                # Use component_aliases to get the actual column name in the CTE
+                # (may differ from component.name if component was shared with a single-component metric)
                 combiner_expr = decomposed.combiner
-                # Prefix component references with table alias
                 for comp in decomposed.components:
+                    # Get the actual alias from the grain group, or fall back to comp.name
+                    actual_col = gg.component_aliases.get(comp.name, comp.name)
                     combiner_expr = combiner_expr.replace(
                         comp.name,
-                        f"{alias}.{comp.name}",
+                        f"{alias}.{actual_col}",
                     )
                     # Track component for derived metric resolution
-                    component_columns[comp.name] = (alias, comp.name)
+                    component_columns[comp.name] = (alias, actual_col)
 
                 # Store expression for derived metrics
                 base_metric_exprs[metric_name] = combiner_expr

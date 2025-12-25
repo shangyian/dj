@@ -3443,6 +3443,58 @@ BUILD_V3 = (  # type: ignore
             "mode": "published",
         },
     ),
+    # Additional Base Metrics - MIN/MAX aggregations
+    (
+        "/nodes/metric/",
+        {
+            "name": "v3.max_unit_price",
+            "description": "Maximum unit price (FULL aggregability with MAX merge rule)",
+            "query": "SELECT MAX(unit_price) FROM v3.order_details",
+            "mode": "published",
+        },
+    ),
+    (
+        "/nodes/metric/",
+        {
+            "name": "v3.min_unit_price",
+            "description": "Minimum unit price (FULL aggregability with MIN merge rule)",
+            "query": "SELECT MIN(unit_price) FROM v3.order_details",
+            "mode": "published",
+        },
+    ),
+    # Conditional Aggregation (SUM with CASE WHEN)
+    (
+        "/nodes/metric/",
+        {
+            "name": "v3.completed_order_revenue",
+            "description": "Revenue from completed orders only (conditional aggregation)",
+            "query": "SELECT SUM(CASE WHEN status = 'completed' THEN line_total ELSE 0 END) FROM v3.order_details",
+            "mode": "published",
+        },
+    ),
+    # Multiple Aggregations in One Metric (MAX - MIN)
+    (
+        "/nodes/metric/",
+        {
+            "name": "v3.price_spread",
+            "description": "Difference between max and min unit price",
+            "query": "SELECT MAX(unit_price) - MIN(unit_price) FROM v3.order_details",
+            "mode": "published",
+        },
+    ),
+    # =========================================================================
+    # Complex Derived Metric: Combines multiple base metrics
+    # Uses price_spread (multi-component) and avg_unit_price (also multi-component)
+    # This tests derived metric that references a multi-component metric
+    (
+        "/nodes/metric/",
+        {
+            "name": "v3.price_spread_pct",
+            "description": "Price spread as percentage of average price",
+            "query": "SELECT (v3.max_unit_price - v3.min_unit_price) / NULLIF(v3.avg_unit_price, 0) * 100",
+            "mode": "published",
+        },
+    ),
     # =========================================================================
     # Derived Metrics - Period-over-Period (Window Functions)
     # These have aggregability: NONE due to window functions

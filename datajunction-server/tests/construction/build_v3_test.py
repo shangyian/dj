@@ -3200,3 +3200,492 @@ class TestMetricsSQLV3:
                 "semantic_type": "metric",
             },
         ]
+
+
+class TestAdditionalMetricTypes:
+    """
+    Tests for additional metric types:
+    - MIN/MAX aggregations
+    - Conditional aggregations (CASE WHEN)
+    - Same-fact derived metrics
+    - Metrics with no dimensions
+    """
+
+    @pytest.mark.asyncio
+    async def test_all_additional_metrics_combined(self, client_with_build_v3):
+        """
+        Test MIN, MAX, conditional, and standard SUM metrics with multiple dimensions.
+
+        Metrics from order_details:
+        - v3.max_unit_price: MAX aggregation
+        - v3.min_unit_price: MIN aggregation
+        - v3.completed_order_revenue: SUM with CASE WHEN
+        - v3.total_revenue: SUM (standard)
+
+        Dimensions:
+        - v3.order_details.status (local)
+        - v3.product.category (joined)
+        """
+        response = await client_with_build_v3.get(
+            "/sql/measures/v3/",
+            params={
+                "metrics": [
+                    "v3.max_unit_price",
+                    "v3.min_unit_price",
+                    "v3.completed_order_revenue",
+                    "v3.total_revenue",
+                ],
+                "dimensions": [
+                    "v3.order_details.status",
+                    "v3.product.category",
+                ],
+            },
+        )
+
+        assert response.status_code == 200, response.json()
+        result = response.json()
+
+        # All FULL aggregability, should be one grain group
+        assert len(result["grain_groups"]) == 1
+
+        gg = result["grain_groups"][0]
+        assert gg["aggregability"] == "full"
+        assert set(gg["grain"]) == {"category", "status"}
+        assert set(gg["metrics"]) == {
+            "v3.max_unit_price",
+            "v3.min_unit_price",
+            "v3.completed_order_revenue",
+            "v3.total_revenue",
+        }
+
+        assert_sql_equal(
+            gg["sql"],
+            """
+            WITH
+            v3_order_details AS (
+            SELECT  o.status,
+                oi.product_id,
+                oi.unit_price,
+                oi.quantity * oi.unit_price AS line_total
+            FROM default.v3.orders o JOIN default.v3.order_items oi ON o.order_id = oi.order_id
+            ),
+            v3_product AS (
+            SELECT  product_id,
+                category
+            FROM default.v3.products
+            )
+
+            SELECT  t1.status,
+                t2.category,
+                MAX(t1.unit_price) max_unit_price,
+                MIN(t1.unit_price) min_unit_price,
+                SUM(CASE WHEN t1.status = 'completed' THEN t1.line_total ELSE 0 END) completed_order_revenue,
+                SUM(t1.line_total) total_revenue
+            FROM v3_order_details t1 LEFT OUTER JOIN v3_product t2 ON t1.product_id = t2.product_id
+            GROUP BY  t1.status, t2.category
+            """,
+        )
+
+        assert gg["columns"] == [
+            {
+                "name": "status",
+                "type": "string",
+                "semantic_entity": "v3.order_details.status",
+                "semantic_type": "dimension",
+            },
+            {
+                "name": "category",
+                "type": "string",
+                "semantic_entity": "v3.product.category",
+                "semantic_type": "dimension",
+            },
+            {
+                "name": "max_unit_price",
+                "type": "number",
+                "semantic_entity": "v3.max_unit_price",
+                "semantic_type": "metric",
+            },
+            {
+                "name": "min_unit_price",
+                "type": "number",
+                "semantic_entity": "v3.min_unit_price",
+                "semantic_type": "metric",
+            },
+            {
+                "name": "completed_order_revenue",
+                "type": "number",
+                "semantic_entity": "v3.completed_order_revenue",
+                "semantic_type": "metric",
+            },
+            {
+                "name": "total_revenue",
+                "type": "number",
+                "semantic_entity": "v3.total_revenue",
+                "semantic_type": "metric",
+            },
+        ]
+
+    @pytest.mark.asyncio
+    async def test_all_additional_metrics_metrics_sql(self, client_with_build_v3):
+        """
+        Test all additional metrics through the metrics SQL endpoint.
+        """
+        response = await client_with_build_v3.get(
+            "/sql/metrics/v3/",
+            params={
+                "metrics": [
+                    "v3.max_unit_price",
+                    "v3.min_unit_price",
+                    "v3.completed_order_revenue",
+                    "v3.total_revenue",
+                ],
+                "dimensions": [
+                    "v3.order_details.status",
+                    "v3.product.category",
+                ],
+            },
+        )
+
+        assert response.status_code == 200, response.json()
+        result = response.json()
+
+        assert_sql_equal(
+            result["sql"],
+            """
+            WITH
+            gg0_v3_order_details AS (
+            SELECT  o.status,
+                oi.product_id,
+                oi.unit_price,
+                oi.quantity * oi.unit_price AS line_total
+            FROM default.v3.orders o JOIN default.v3.order_items oi ON o.order_id = oi.order_id
+            ),
+            gg0_v3_product AS (
+            SELECT  product_id,
+                category
+            FROM default.v3.products
+            ),
+            gg0 AS (
+            SELECT  t1.status,
+                t2.category,
+                MAX(t1.unit_price) max_unit_price,
+                MIN(t1.unit_price) min_unit_price,
+                SUM(CASE WHEN t1.status = 'completed' THEN t1.line_total ELSE 0 END) completed_order_revenue,
+                SUM(t1.line_total) total_revenue
+            FROM gg0_v3_order_details t1 LEFT OUTER JOIN gg0_v3_product t2 ON t1.product_id = t2.product_id
+            GROUP BY  t1.status, t2.category
+            )
+
+            SELECT  COALESCE(gg0.status) AS status,
+                COALESCE(gg0.category) AS category,
+                gg0.completed_order_revenue AS completed_order_revenue,
+                gg0.max_unit_price AS max_unit_price,
+                gg0.min_unit_price AS min_unit_price,
+                gg0.total_revenue AS total_revenue
+            FROM gg0
+            """,
+        )
+
+        assert result["columns"] == [
+            {
+                "name": "status",
+                "type": "string",
+                "semantic_entity": "v3.order_details.status",
+                "semantic_type": "dimension",
+            },
+            {
+                "name": "category",
+                "type": "string",
+                "semantic_entity": "v3.product.category",
+                "semantic_type": "dimension",
+            },
+            {
+                "name": "completed_order_revenue",
+                "type": "number",
+                "semantic_entity": "v3.completed_order_revenue",
+                "semantic_type": "metric",
+            },
+            {
+                "name": "max_unit_price",
+                "type": "number",
+                "semantic_entity": "v3.max_unit_price",
+                "semantic_type": "metric",
+            },
+            {
+                "name": "min_unit_price",
+                "type": "number",
+                "semantic_entity": "v3.min_unit_price",
+                "semantic_type": "metric",
+            },
+            {
+                "name": "total_revenue",
+                "type": "number",
+                "semantic_entity": "v3.total_revenue",
+                "semantic_type": "metric",
+            },
+        ]
+
+    @pytest.mark.asyncio
+    async def test_metrics_with_no_dimensions(self, client_with_build_v3):
+        """
+        Test requesting metrics with no dimensions (global aggregation).
+        """
+        response = await client_with_build_v3.get(
+            "/sql/measures/v3/",
+            params={
+                "metrics": [
+                    "v3.total_revenue",
+                    "v3.max_unit_price",
+                    "v3.min_unit_price",
+                ],
+                "dimensions": [],
+            },
+        )
+
+        assert response.status_code == 200, response.json()
+        result = response.json()
+
+        assert len(result["grain_groups"]) == 1
+        gg = result["grain_groups"][0]
+        assert gg["grain"] == []
+        assert gg["aggregability"] == "full"
+
+        assert_sql_equal(
+            gg["sql"],
+            """
+            WITH
+            v3_order_details AS (
+            SELECT  oi.unit_price,
+                oi.quantity * oi.unit_price AS line_total
+            FROM default.v3.orders o JOIN default.v3.order_items oi ON o.order_id = oi.order_id
+            )
+
+            SELECT  SUM(t1.line_total) total_revenue,
+                MAX(t1.unit_price) max_unit_price,
+                MIN(t1.unit_price) min_unit_price
+            FROM v3_order_details t1
+            """,
+        )
+
+        assert gg["columns"] == [
+            {
+                "name": "total_revenue",
+                "type": "number",
+                "semantic_entity": "v3.total_revenue",
+                "semantic_type": "metric",
+            },
+            {
+                "name": "max_unit_price",
+                "type": "number",
+                "semantic_entity": "v3.max_unit_price",
+                "semantic_type": "metric",
+            },
+            {
+                "name": "min_unit_price",
+                "type": "number",
+                "semantic_entity": "v3.min_unit_price",
+                "semantic_type": "metric",
+            },
+        ]
+
+    @pytest.mark.asyncio
+    async def test_pages_per_session_same_fact_derived(self, client_with_build_v3):
+        """
+        Test same-fact derived metric.
+
+        v3.pages_per_session = v3.page_view_count / v3.session_count
+        Both base metrics are from page_views_enriched.
+        """
+        response = await client_with_build_v3.get(
+            "/sql/metrics/v3/",
+            params={
+                "metrics": ["v3.pages_per_session"],
+                "dimensions": ["v3.product.category"],
+            },
+        )
+
+        assert response.status_code == 200, response.json()
+        result = response.json()
+
+        assert_sql_equal(
+            result["sql"],
+            """
+            WITH
+            gg0_v3_page_views_enriched AS (
+            SELECT  view_id,
+                product_id
+            FROM default.v3.page_views
+            ),
+            gg0_v3_product AS (
+            SELECT  product_id,
+                category
+            FROM default.v3.products
+            ),
+            gg0 AS (
+            SELECT  t2.category,
+                COUNT(t1.view_id) page_view_count
+            FROM gg0_v3_page_views_enriched t1 LEFT OUTER JOIN gg0_v3_product t2 ON t1.product_id = t2.product_id
+            GROUP BY  t2.category
+            ),
+            gg1_v3_page_views_enriched AS (
+            SELECT  session_id,
+                product_id
+            FROM default.v3.page_views
+            ),
+            gg1_v3_product AS (
+            SELECT  product_id,
+                category
+            FROM default.v3.products
+            ),
+            gg1 AS (
+            SELECT  t2.category,
+                t1.session_id
+            FROM gg1_v3_page_views_enriched t1 LEFT OUTER JOIN gg1_v3_product t2 ON t1.product_id = t2.product_id
+            GROUP BY  t2.category, t1.session_id
+            )
+
+            SELECT  COALESCE(gg0.category, gg1.category) AS category,
+                SUM(gg0.page_view_count) / NULLIF(COUNT( DISTINCT gg1.session_id), 0) AS pages_per_session
+            FROM gg0 FULL OUTER JOIN gg1 ON gg0.category = gg1.category
+            """,
+        )
+
+        assert result["columns"] == [
+            {
+                "name": "category",
+                "type": "string",
+                "semantic_entity": "v3.product.category",
+                "semantic_type": "dimension",
+            },
+            {
+                "name": "pages_per_session",
+                "type": "number",
+                "semantic_entity": "v3.pages_per_session",
+                "semantic_type": "metric",
+            },
+        ]
+
+    @pytest.mark.asyncio
+    async def test_period_over_period_measures(self, client_with_build_v3):
+        """
+        Test period-over-period metrics through measures SQL.
+
+        v3.wow_revenue_change is a derived metric with LAG() window function.
+        Measures SQL outputs the base metric (total_revenue) at the requested grain.
+        """
+        response = await client_with_build_v3.get(
+            "/sql/measures/v3/",
+            params={
+                "metrics": ["v3.wow_revenue_change"],
+                "dimensions": ["v3.date.week[order]"],
+            },
+        )
+
+        assert response.status_code == 200, response.json()
+        result = response.json()
+
+        # Should have one grain group for the base metric
+        assert len(result["grain_groups"]) == 1
+
+        gg = result["grain_groups"][0]
+        assert gg["aggregability"] == "full"
+        assert gg["grain"] == ["week_order"]
+        assert gg["metrics"] == ["v3.total_revenue"]
+
+        assert_sql_equal(
+            gg["sql"],
+            """
+            WITH
+            v3_date AS (
+            SELECT  date_id,
+                week
+            FROM default.v3.dates
+            ),
+            v3_order_details AS (
+            SELECT  o.order_date,
+                oi.quantity * oi.unit_price AS line_total
+            FROM default.v3.orders o JOIN default.v3.order_items oi ON o.order_id = oi.order_id
+            )
+
+            SELECT  t2.week week_order,
+                SUM(t1.line_total) total_revenue
+            FROM v3_order_details t1 LEFT OUTER JOIN v3_date t2 ON t1.order_date = t2.date_id
+            GROUP BY  t2.week
+            """,
+        )
+
+        assert gg["columns"] == [
+            {
+                "name": "week_order",
+                "type": "int",
+                "semantic_entity": "v3.date.week[order]",
+                "semantic_type": "dimension",
+            },
+            {
+                "name": "total_revenue",
+                "type": "number",
+                "semantic_entity": "v3.total_revenue",
+                "semantic_type": "metric",
+            },
+        ]
+
+    @pytest.mark.asyncio
+    async def test_mom_revenue_change_metrics_sql(self, client_with_build_v3):
+        """
+        Test month-over-month revenue change through metrics SQL.
+
+        v3.mom_revenue_change uses LAG() window function to compare
+        current month revenue with previous month.
+        """
+        response = await client_with_build_v3.get(
+            "/sql/metrics/v3/",
+            params={
+                "metrics": ["v3.mom_revenue_change"],
+                "dimensions": ["v3.date.month[order]"],
+            },
+        )
+
+        assert response.status_code == 200, response.json()
+        result = response.json()
+
+        assert_sql_equal(
+            result["sql"],
+            """
+            WITH
+            gg0_v3_date AS (
+            SELECT  date_id,
+                month
+            FROM default.v3.dates
+            ),
+            gg0_v3_order_details AS (
+            SELECT  o.order_date,
+                oi.quantity * oi.unit_price AS line_total
+            FROM default.v3.orders o JOIN default.v3.order_items oi ON o.order_id = oi.order_id
+            ),
+            gg0 AS (
+            SELECT  t2.month month_order,
+                SUM(t1.line_total) total_revenue
+            FROM gg0_v3_order_details t1 LEFT OUTER JOIN gg0_v3_date t2 ON t1.order_date = t2.date_id
+            GROUP BY  t2.month
+            )
+
+            SELECT  COALESCE(gg0.month_order) AS month_order,
+                (SUM(gg0.total_revenue) - LAG(SUM(gg0.total_revenue), 1) OVER ( ORDER BY v3.date.month) ) / NULLIF(LAG(SUM(gg0.total_revenue), 1) OVER ( ORDER BY v3.date.month) , 0) * 100 AS mom_revenue_change
+            FROM gg0
+            """,
+        )
+
+        assert result["columns"] == [
+            {
+                "name": "month_order",
+                "type": "string",
+                "semantic_entity": "v3.date.month[order]",
+                "semantic_type": "dimension",
+            },
+            {
+                "name": "mom_revenue_change",
+                "type": "number",
+                "semantic_entity": "v3.mom_revenue_change",
+                "semantic_type": "metric",
+            },
+        ]
