@@ -692,6 +692,33 @@ class TestMultipleMetrics:
         # Validate requested_dimensions
         assert result["requested_dimensions"] == ["v3.order_details.status"]
 
+        # Validate components are included for materialization planning
+        assert "components" in gg
+        assert len(gg["components"]) == 3
+
+        # Sort by name for deterministic comparison
+        components = sorted(gg["components"], key=lambda c: c["name"])
+
+        # total_quantity component
+        assert components[0]["name"] == "line_total_sum_e1f61696"
+        assert components[0]["expression"] == "line_total"
+        assert components[0]["aggregation"] == "SUM"
+        assert components[0]["merge"] == "SUM"
+        assert components[0]["aggregability"] == "full"
+
+        # order_count component (LIMITED - grain column)
+        assert components[1]["name"] == "order_id_distinct_f93d50ab"
+        assert components[1]["expression"] == "order_id"
+        assert components[1]["aggregation"] is None  # Grain column, no aggregation
+        assert components[1]["aggregability"] == "limited"
+
+        # total_revenue component
+        assert components[2]["name"] == "quantity_sum_06b64d2e"
+        assert components[2]["expression"] == "quantity"
+        assert components[2]["aggregation"] == "SUM"
+        assert components[2]["merge"] == "SUM"
+        assert components[2]["aggregability"] == "full"
+
     @pytest.mark.asyncio
     async def test_multiple_metrics_with_dimension_join(self, client_with_build_v3):
         """

@@ -222,7 +222,8 @@ def build_select_ast(
     for resolved_dim in resolved_dimensions:
         if resolved_dim.join_path:
             for link in resolved_dim.join_path.links:
-                dim_node = link.dimension
+                # Look up full node from ctx.nodes to avoid lazy loading
+                dim_node = ctx.nodes.get(link.dimension.name, link.dimension)
                 if dim_node and dim_node.type != NodeType.SOURCE:
                     if dim_node not in nodes_for_ctes:
                         nodes_for_ctes.append(dim_node)
@@ -247,7 +248,13 @@ def build_select_ast(
                         needed_columns_by_node[dim_node.name] = dim_cols
 
     # Build CTEs for all non-source nodes with column filtering
+    import time
+
+    cte_start = time.time()
     ctes = collect_node_ctes(ctx, nodes_for_ctes, needed_columns_by_node)
+    logger.warning(
+        f"[PERF] collect_node_ctes took {(time.time() - cte_start) * 1000:.2f}ms for {len(nodes_for_ctes)} nodes",
+    )
 
     # Build FROM clause with main table (use materialized table if available)
     table_parts, _ = get_table_reference_parts_with_materialization(ctx, parent_node)
@@ -297,7 +304,7 @@ def build_select_ast(
 
 async def decompose_and_group_metrics(
     ctx: BuildContext,
-) -> list[MetricGroup]:
+) -> tuple[list[MetricGroup], dict[str, DecomposedMetricInfo]]:
     """
     Decompose metrics and group them by parent node (fact/transform).
 
@@ -308,11 +315,15 @@ async def decompose_and_group_metrics(
     for each underlying fact.
 
     Returns:
-        List of MetricGroup, one per unique parent node, with decomposed metrics.
+        Tuple of:
+        - List of MetricGroup, one per unique parent node, with decomposed metrics.
+        - Dict of metric_name -> DecomposedMetricInfo for reuse by callers.
     """
     # Map parent node name -> list of DecomposedMetricInfo
     parent_groups: dict[str, list[DecomposedMetricInfo]] = {}
     parent_nodes: dict[str, Node] = {}
+    # Cache of all decomposed metrics to avoid redundant work
+    all_decomposed: dict[str, DecomposedMetricInfo] = {}
 
     for metric_name in ctx.metrics:
         metric_node = get_metric_node(ctx, metric_name)
@@ -324,22 +335,63 @@ async def decompose_and_group_metrics(
             for base_metric in base_metric_nodes:
                 # Get the fact/transform parent of the base metric
                 parent_node = get_parent_node(ctx, base_metric)
-
-                # Decompose the BASE metric (not the derived one)
-                decomposed = await decompose_metric(ctx.session, base_metric)
-
                 parent_name = parent_node.name
+
+                # Check if already decomposed (e.g., shared base metric)
+                if base_metric.name in all_decomposed:
+                    decomposed = all_decomposed[base_metric.name]
+                else:
+                    # Decompose the BASE metric (not the derived one) - use cache!
+                    decomposed = await decompose_metric(
+                        ctx.session,
+                        base_metric,
+                        nodes_cache=ctx.nodes,
+                        parent_map=ctx.parent_map,
+                    )
+                    all_decomposed[base_metric.name] = decomposed
+
+                # Always ensure parent group exists and add if not already present
                 if parent_name not in parent_groups:
                     parent_groups[parent_name] = []
                     parent_nodes[parent_name] = parent_node
 
-                parent_groups[parent_name].append(decomposed)
+                # Only add to parent group if not already there
+                if decomposed not in parent_groups[parent_name]:
+                    parent_groups[parent_name].append(decomposed)
+
+            # Also decompose the derived metric itself and cache it
+            if metric_name not in all_decomposed:
+                derived_decomposed = await decompose_metric(
+                    ctx.session,
+                    metric_node,
+                    nodes_cache=ctx.nodes,
+                    parent_map=ctx.parent_map,
+                )
+                all_decomposed[metric_name] = derived_decomposed
         else:
             # Base metric - use direct parent
             parent_node = get_parent_node(ctx, metric_node)
-            decomposed = await decompose_metric(ctx.session, metric_node)
-
             parent_name = parent_node.name
+
+            if metric_name in all_decomposed:
+                # Already decomposed - just ensure it's in the parent group
+                decomposed = all_decomposed[metric_name]
+                if parent_name not in parent_groups:
+                    parent_groups[parent_name] = []
+                    parent_nodes[parent_name] = parent_node
+                if decomposed not in parent_groups[parent_name]:
+                    parent_groups[parent_name].append(decomposed)
+                continue
+
+            # Use cache to avoid DB queries!
+            decomposed = await decompose_metric(
+                ctx.session,
+                metric_node,
+                nodes_cache=ctx.nodes,
+                parent_map=ctx.parent_map,
+            )
+            all_decomposed[metric_node.name] = decomposed
+
             if parent_name not in parent_groups:
                 parent_groups[parent_name] = []
                 parent_nodes[parent_name] = parent_node
@@ -347,10 +399,11 @@ async def decompose_and_group_metrics(
             parent_groups[parent_name].append(decomposed)
 
     # Build MetricGroup objects
-    return [
+    metric_groups = [
         MetricGroup(parent_node=parent_nodes[name], decomposed_metrics=metrics)
         for name, metrics in parent_groups.items()
     ]
+    return metric_groups, all_decomposed
 
 
 # =============================================================================
@@ -376,6 +429,10 @@ def build_grain_group_sql(
     Returns:
         GrainGroupSQL with SQL and metadata for this grain group
     """
+    import time
+
+    start_total = time.time()
+
     parent_node = grain_group.parent_node
 
     # Build list of component expressions with their aliases
@@ -388,6 +445,9 @@ def build_grain_group_sql(
     # Track which components we've already added (deduplicate by component name)
     seen_components: set[str] = set()
 
+    # Collect unique MetricComponent objects for the API response
+    unique_components: list[MetricComponent] = []
+
     # Track mapping from component name to actual SQL alias
     # This is needed for metrics SQL to correctly reference component columns
     component_aliases: dict[str, str] = {}
@@ -399,6 +459,9 @@ def build_grain_group_sql(
         if component.name in seen_components:
             continue
         seen_components.add(component.name)
+
+        # Collect unique components for API response
+        unique_components.append(component)
 
         # For NONE aggregability, output raw columns (no aggregation possible)
         if grain_group.aggregability == Aggregability.NONE:
@@ -475,6 +538,7 @@ def build_grain_group_sql(
         effective_grain_columns = []
 
     # Build AST
+    start_ast = time.time()
     query_ast = build_select_ast(
         ctx,
         metric_expressions=component_expressions,
@@ -482,6 +546,8 @@ def build_grain_group_sql(
         parent_node=parent_node,
         grain_columns=effective_grain_columns,
     )
+    ast_time = (time.time() - start_ast) * 1000
+    logger.warning(f"[PERF] build_select_ast took {ast_time:.2f}ms")
 
     # Build column metadata
     columns_metadata = []
@@ -581,6 +647,7 @@ def build_grain_group_sql(
         component_aliases=component_aliases,
         is_merged=grain_group.is_merged,
         component_aggregabilities=grain_group.component_aggregabilities,
+        components=unique_components,
     )
 
 
@@ -619,6 +686,11 @@ async def build_measures_sql(
         GeneratedMeasuresSQL with one GrainGroupSQL per aggregation level,
         plus context and decomposed metrics for efficient reuse by build_metrics_sql
     """
+    import time
+
+    timings = {}
+    total_start = time.time()
+
     # Create context
     ctx = BuildContext(
         session=session,
@@ -630,34 +702,47 @@ async def build_measures_sql(
     )
 
     # Load all required nodes (single DB round trip)
+    start = time.time()
     await load_nodes(ctx)
+    timings["load_nodes"] = (time.time() - start) * 1000
 
     # Validate we have at least one metric
     if not ctx.metrics:
         raise DJInvalidInputException("At least one metric is required")
 
     # Decompose metrics and group by parent node
-    metric_groups = await decompose_and_group_metrics(ctx)
+    # Also returns the decomposed metrics to avoid redundant work
+    start = time.time()
+    metric_groups, decomposed_metrics = await decompose_and_group_metrics(ctx)
+    timings["decompose_and_group"] = (time.time() - start) * 1000
 
     # Process each metric group into grain group SQLs
     # Cross-fact metrics produce separate grain groups (one per parent node)
+    start = time.time()
     all_grain_group_sqls: list[GrainGroupSQL] = []
     for metric_group in metric_groups:
         grain_group_sqls = process_metric_group(ctx, metric_group)
         all_grain_group_sqls.extend(grain_group_sqls)
+    timings["process_metric_groups"] = (time.time() - start) * 1000
 
-    # Decompose all metrics for metrics SQL to reuse
-    # This includes both requested metrics AND base metrics from grain groups
-    decomposed_metrics: dict[str, DecomposedMetricInfo] = {}
-
-    # Decompose requested metrics
+    # Decompose any requested metrics not already decomposed (e.g., derived metrics)
+    # Uses cache to avoid DB queries
+    start = time.time()
     for metric_name in metrics:
-        metric_node = ctx.nodes.get(metric_name)
-        if metric_node:
-            decomposed = await decompose_metric(session, metric_node)
-            decomposed_metrics[metric_name] = decomposed
+        if metric_name not in decomposed_metrics:
+            metric_node = ctx.nodes.get(metric_name)
+            if metric_node:
+                decomposed = await decompose_metric(
+                    session,
+                    metric_node,
+                    nodes_cache=ctx.nodes,
+                    parent_map=ctx.parent_map,
+                )
+                decomposed_metrics[metric_name] = decomposed
+    timings["decompose_remaining"] = (time.time() - start) * 1000
 
-    # Also decompose base metrics from grain groups (for component mapping)
+    # Also decompose any base metrics from grain groups not yet decomposed
+    start = time.time()
     all_grain_group_metrics = set()
     for gg in all_grain_group_sqls:
         all_grain_group_metrics.update(gg.metrics)
@@ -666,8 +751,17 @@ async def build_measures_sql(
         if metric_name not in decomposed_metrics:
             metric_node = ctx.nodes.get(metric_name)
             if metric_node:
-                decomposed = await decompose_metric(session, metric_node)
+                decomposed = await decompose_metric(
+                    session,
+                    metric_node,
+                    nodes_cache=ctx.nodes,
+                    parent_map=ctx.parent_map,
+                )
                 decomposed_metrics[metric_name] = decomposed
+    timings["decompose_grain_group_metrics"] = (time.time() - start) * 1000
+
+    timings["total"] = (time.time() - total_start) * 1000
+    logger.warning(f"[PERF] build_measures_sql timings: {timings}")
 
     return GeneratedMeasuresSQL(
         grain_groups=all_grain_group_sqls,
@@ -698,6 +792,10 @@ def process_metric_group(
     Returns:
         List of GrainGroupSQL, one per aggregability level
     """
+    import time
+
+    timings = {}
+
     parent_node = metric_group.parent_node
 
     # Count components per metric to determine naming strategy
@@ -707,18 +805,25 @@ def process_metric_group(
 
     # Analyze grain groups - split by aggregability
     # Extract just the column names from dimensions for grain analysis
+    start = time.time()
     dim_column_names = [parse_dimension_ref(d).column_name for d in ctx.dimensions]
     grain_groups = analyze_grain_groups(metric_group, dim_column_names)
+    timings["analyze_grain_groups"] = (time.time() - start) * 1000
 
     # Merge compatible grain groups from same parent into single CTEs
     # This optimization reduces duplicate JOINs by outputting raw values
     # at finest grain, with aggregations applied in final SELECT
+    start = time.time()
     grain_groups = merge_grain_groups(grain_groups)
+    timings["merge_grain_groups"] = (time.time() - start) * 1000
 
     # Resolve dimensions (find join paths) - shared across grain groups
+    start = time.time()
     resolved_dimensions = resolve_dimensions(ctx, parent_node)
+    timings["resolve_dimensions"] = (time.time() - start) * 1000
 
     # Build SQL for each grain group
+    start = time.time()
     grain_group_sqls: list[GrainGroupSQL] = []
     for grain_group in grain_groups:
         # Reset alias registry for each grain group to avoid conflicts
@@ -732,6 +837,9 @@ def process_metric_group(
             components_per_metric,
         )
         grain_group_sqls.append(grain_group_sql)
+    timings["build_grain_group_sql"] = (time.time() - start) * 1000
+
+    logger.warning(f"[PERF] process_metric_group({parent_node.name}): {timings}")
 
     return grain_group_sqls
 

@@ -172,6 +172,29 @@ async def get_sql(
     )
 
 
+class ComponentResponse(BaseModel):
+    """Response model for a metric component in measures SQL."""
+
+    name: str  # Component name (e.g., "unit_price_sum")
+    expression: str  # The raw SQL expression (e.g., "unit_price")
+    aggregation: Optional[str] = None  # Phase 1: "SUM", "COUNT", etc.
+    merge: Optional[str] = (
+        None  # Phase 2 (re-aggregation): "SUM", "COUNT_DISTINCT", etc.
+    )
+    aggregability: str  # "FULL", "LIMITED", or "NONE"
+
+
+class MetricFormulaResponse(BaseModel):
+    """Response model for a metric's combiner formula."""
+
+    name: str  # Full metric name (e.g., "v3.avg_unit_price")
+    short_name: str  # Short name (e.g., "avg_unit_price")
+    combiner: str  # Formula combining components (e.g., "SUM(unit_price_sum) / SUM(unit_price_count)")
+    components: List[str]  # Component names used in this metric
+    is_derived: bool  # True if metric is derived from other metrics
+    parent_name: Optional[str] = None  # Source fact/transform node name
+
+
 class GrainGroupResponse(BaseModel):
     """Response model for a single grain group in measures SQL."""
 
@@ -180,12 +203,17 @@ class GrainGroupResponse(BaseModel):
     grain: List[str]
     aggregability: str
     metrics: List[str]
+    components: List[
+        ComponentResponse
+    ]  # Metric components for materialization planning
+    parent_name: str  # Source fact/transform node name
 
 
 class MeasuresSQLResponse(BaseModel):
     """Response model for V3 measures SQL with multiple grain groups."""
 
     grain_groups: List[GrainGroupResponse]
+    metric_formulas: List[MetricFormulaResponse]  # How metrics combine components
     dialect: Optional[str] = None
     requested_dimensions: List[str]
 
@@ -230,6 +258,43 @@ async def get_measures_sql_v3(
         use_materialized=use_materialized,
     )
 
+    # Build metric formulas from decomposed metrics
+    metric_formulas = []
+    if result.decomposed_metrics:
+        for metric_name, decomposed in result.decomposed_metrics.items():
+            # Get the combiner expression (the first projection from the derived AST)
+            combiner_str = decomposed.combiner
+            if decomposed.derived_ast and decomposed.derived_ast.select.projection:
+                # Use the AST to get a cleaner representation
+                combiner_str = str(decomposed.derived_ast.select.projection[0])
+
+            # Determine parent node name from the first grain group that contains this metric
+            parent_name = None
+            for gg in result.grain_groups:
+                if metric_name in gg.metrics:
+                    parent_name = gg.parent_name
+                    break
+
+            # Check if this is a derived metric (references other metrics)
+            is_derived = False
+            if result.ctx:
+                parent_names = result.ctx.parent_map.get(metric_name, [])
+                is_derived = decomposed.is_derived_for_parents(
+                    parent_names,
+                    result.ctx.nodes,
+                )
+
+            metric_formulas.append(
+                MetricFormulaResponse(
+                    name=metric_name,
+                    short_name=metric_name.split(".")[-1],
+                    combiner=combiner_str,
+                    components=[comp.name for comp in decomposed.components],
+                    is_derived=is_derived,
+                    parent_name=parent_name,
+                ),
+            )
+
     return MeasuresSQLResponse(
         grain_groups=[
             GrainGroupResponse(
@@ -248,9 +313,23 @@ async def get_measures_sql_v3(
                 if hasattr(gg.aggregability, "value")
                 else str(gg.aggregability),
                 metrics=gg.metrics,
+                components=[
+                    ComponentResponse(
+                        name=comp.name,
+                        expression=comp.expression,
+                        aggregation=comp.aggregation,
+                        merge=comp.merge,
+                        aggregability=comp.rule.type.value
+                        if hasattr(comp.rule.type, "value")
+                        else str(comp.rule.type),
+                    )
+                    for comp in gg.components
+                ],
+                parent_name=gg.parent_name,
             )
             for gg in result.grain_groups
         ],
+        metric_formulas=metric_formulas,
         dialect=str(result.dialect) if result.dialect else None,
         requested_dimensions=result.requested_dimensions,
     )

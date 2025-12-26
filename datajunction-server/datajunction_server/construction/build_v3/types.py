@@ -161,6 +161,10 @@ class GrainGroupSQL:
     # Used by generate_metrics_sql() to apply correct aggregation in final SELECT
     component_aggregabilities: dict[str, Aggregability] = field(default_factory=dict)
 
+    # Metric components included in this grain group (for materialization planning)
+    # Each component has: name, expression, aggregation (phase 1), merge (phase 2), rule
+    components: list[MetricComponent] = field(default_factory=list)
+
     @property
     def sql(self) -> str:
         """Render the query AST to SQL string."""

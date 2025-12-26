@@ -851,10 +851,22 @@ def collect_node_ctes(
 
     Returns list of (cte_name, query_ast) tuples in dependency order.
     """
+    import time
+
+    timings = {}
+
     # Collect all node names that need CTEs (including transitive dependencies)
+    collect_start = time.time()
     all_node_names: set[str] = set()
+    mat_check_time = 0.0
+    parse_check_time = 0.0
+    ref_extract_time = 0.0
+    call_count = 0
 
     def collect_refs(node: Node, visited: set[str]) -> None:
+        nonlocal mat_check_time, parse_check_time, ref_extract_time, call_count
+        call_count += 1
+
         if node.name in visited:
             return
         visited.add(node.name)
@@ -863,7 +875,10 @@ def collect_node_ctes(
             return  # Sources don't become CTEs
 
         # Skip materialized nodes - they use physical tables, not CTEs
-        if should_use_materialized_table(ctx, node):
+        mat_start = time.time()
+        is_mat = should_use_materialized_table(ctx, node)
+        mat_check_time += (time.time() - mat_start) * 1000
+        if is_mat:
             return
 
         all_node_names.add(node.name)
@@ -871,8 +886,14 @@ def collect_node_ctes(
         if node.current and node.current.query:
             try:
                 # Use cached parsed query for reference extraction
+                parse_start = time.time()
                 query_ast = ctx.get_parsed_query(node)
+                parse_check_time += (time.time() - parse_start) * 1000
+
+                ref_start = time.time()
                 refs = get_table_references_from_ast(query_ast)
+                ref_extract_time += (time.time() - ref_start) * 1000
+
                 for ref in refs:
                     ref_node = ctx.nodes.get(ref)
                     if ref_node:
@@ -883,9 +904,15 @@ def collect_node_ctes(
     # Collect from all starting nodes
     for node in nodes_to_include:
         collect_refs(node, set())
+    timings["collect_refs"] = (time.time() - collect_start) * 1000
+    logger.warning(
+        f"[PERF] collect_refs detail: calls={call_count} mat_check={mat_check_time:.1f}ms parse={parse_check_time:.1f}ms ref_extract={ref_extract_time:.1f}ms",
+    )
 
     # Topologically sort all collected nodes
+    sort_start = time.time()
     sorted_nodes = topological_sort_nodes(ctx, all_node_names)
+    timings["topo_sort"] = (time.time() - sort_start) * 1000
 
     # Build CTE name mapping
     cte_names: dict[str, str] = {}
@@ -894,6 +921,7 @@ def collect_node_ctes(
 
     # Build CTEs in dependency order
     ctes: list[tuple[str, ast.Query]] = []
+    parse_time = 0.0
     for node in sorted_nodes:
         if node.type == NodeType.SOURCE:
             continue
@@ -905,17 +933,24 @@ def collect_node_ctes(
         if not node.current or not node.current.query:
             continue
 
-        # Parse the node's query
-        query_ast = parse(node.current.query)
+        # Get parsed query from cache (uses deepcopy internally to avoid mutation)
+        parse_start = time.time()
+        from copy import deepcopy
+
+        query_ast = deepcopy(ctx.get_parsed_query(node))
+        parse_time += (time.time() - parse_start) * 1000
 
         cte_name = cte_names[node.name]
 
         # Flatten any inner CTEs to avoid nested WITH clauses
         # Returns extracted CTEs and mapping of old names -> prefixed names
+        flatten_start = time.time()
         inner_ctes, inner_cte_renames = flatten_inner_ctes(query_ast, cte_name)
+        flatten_time = (time.time() - flatten_start) * 1000
 
         # Rewrite table references in extracted inner CTEs
         # (they may reference sources or materialized nodes -> physical table names)
+        rewrite_start = time.time()
         for inner_cte_name, inner_cte_query in inner_ctes:
             rewrite_table_references(
                 inner_cte_query,
@@ -934,17 +969,27 @@ def collect_node_ctes(
             cte_names,
             inner_cte_renames,
         )
+        rewrite_time = (time.time() - rewrite_start) * 1000
 
         # Apply column filtering if specified
         needed_cols = None
         if needed_columns_by_node:
             needed_cols = needed_columns_by_node.get(node.name)
 
+        filter_start = time.time()
         if needed_cols:
             query_ast = filter_cte_projection(query_ast, needed_cols)
+        filter_time = (time.time() - filter_start) * 1000
+
+        if flatten_time + rewrite_time + filter_time > 10:  # Only log if > 10ms
+            logger.warning(
+                f"[PERF] CTE {node.name}: flatten={flatten_time:.1f}ms rewrite={rewrite_time:.1f}ms filter={filter_time:.1f}ms",
+            )
 
         ctes.append((cte_name, query_ast))
 
+    timings["parse"] = parse_time
+    logger.warning(f"[PERF] collect_node_ctes: {timings} for {len(sorted_nodes)} nodes")
     return ctes
 
 
@@ -1241,9 +1286,11 @@ def build_join_clause(
         join_type_str = "FULL OUTER"
 
     # Build the right table reference (use materialized table if available)
+    # Look up full node from ctx.nodes to avoid lazy loading
+    dim_node = ctx.nodes.get(link.dimension.name, link.dimension)
     right_table_parts, _ = get_table_reference_parts_with_materialization(
         ctx,
-        link.dimension,
+        dim_node,
     )
     right_table_name = make_name(SEPARATOR.join(right_table_parts))
 
@@ -1308,6 +1355,9 @@ def get_metric_expression_ast(ctx: BuildContext, metric_node: Node) -> ast.Expre
 async def decompose_metric(
     session: AsyncSession,
     metric_node: Node,
+    *,
+    nodes_cache: dict[str, Node] | None = None,
+    parent_map: dict[str, list[str]] | None = None,
 ) -> DecomposedMetricInfo:
     """
     Decompose a metric into its constituent components.
@@ -1317,6 +1367,14 @@ async def decompose_metric(
     - AVG(x) -> [sum_x component, count_x component]
     - COUNT(DISTINCT x) -> [distinct_x component with LIMITED aggregability]
 
+    Args:
+        session: Database session
+        metric_node: The metric node to decompose
+        nodes_cache: Optional dict of node_name -> Node. If provided along with
+            parent_map, avoids database queries by using cached data.
+        parent_map: Optional dict of child_name -> list of parent_names.
+            Required if nodes_cache is provided.
+
     Returns:
         DecomposedMetricInfo with components, combiner expression, and aggregability
     """
@@ -1325,9 +1383,14 @@ async def decompose_metric(
             f"Metric {metric_node.name} has no current revision",
         )
 
-    # Use the existing MetricComponentExtractor
+    # Use the MetricComponentExtractor with optional cache
     extractor = MetricComponentExtractor(metric_node.current.id)
-    components, derived_ast = await extractor.extract(session)
+    components, derived_ast = await extractor.extract(
+        session,
+        nodes_cache=nodes_cache,
+        parent_map=parent_map,
+        metric_node=metric_node,
+    )
 
     # Extract combiner expression from the derived query AST
     # The first projection element is the metric expression with component references
