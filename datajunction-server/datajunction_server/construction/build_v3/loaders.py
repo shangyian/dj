@@ -285,13 +285,11 @@ async def preload_join_paths(
 
 async def load_nodes(ctx: BuildContext) -> None:
     """
-    Load all nodes needed for SQL generation with minimal database queries.
+    Load all nodes needed for SQL generation
 
     Query 1: Find all upstream node names using lightweight recursive CTE
     Query 2: Batch load all those nodes with eager loading
     Query 3-4: Find join paths and batch load dimension links
-
-    Total: ~4 queries regardless of graph size.
     """
     # Collect initial node names (metrics + explicit dimension nodes)
     initial_node_names = set(ctx.metrics)
@@ -304,8 +302,7 @@ async def load_nodes(ctx: BuildContext) -> None:
             initial_node_names.add(dim_ref.node_name)
             target_dim_names.add(dim_ref.node_name)
 
-    # Query 1: Find ALL upstream node names AND parent relationships using lightweight recursive CTE
-    # This includes all transitive dependencies (sources, transforms, dimensions)
+    # Find all upstream nodes using a recursive CTE query
     all_node_names, parent_map = await find_upstream_node_names(
         ctx.session,
         list(initial_node_names),
