@@ -12,6 +12,7 @@ Database operations are in loaders.py.
 """
 
 from __future__ import annotations
+from copy import deepcopy
 
 import logging
 from typing import Optional, cast
@@ -851,12 +852,7 @@ def collect_node_ctes(
 
     Returns list of (cte_name, query_ast) tuples in dependency order.
     """
-    import time
-
-    timings = {}
-
     # Collect all node names that need CTEs (including transitive dependencies)
-    collect_start = time.time()
     all_node_names: set[str] = set()
     mat_check_time = 0.0
     parse_check_time = 0.0
@@ -875,9 +871,7 @@ def collect_node_ctes(
             return  # Sources don't become CTEs
 
         # Skip materialized nodes - they use physical tables, not CTEs
-        mat_start = time.time()
         is_mat = should_use_materialized_table(ctx, node)
-        mat_check_time += (time.time() - mat_start) * 1000
         if is_mat:
             return
 
@@ -886,13 +880,9 @@ def collect_node_ctes(
         if node.current and node.current.query:
             try:
                 # Use cached parsed query for reference extraction
-                parse_start = time.time()
                 query_ast = ctx.get_parsed_query(node)
-                parse_check_time += (time.time() - parse_start) * 1000
 
-                ref_start = time.time()
                 refs = get_table_references_from_ast(query_ast)
-                ref_extract_time += (time.time() - ref_start) * 1000
 
                 for ref in refs:
                     ref_node = ctx.nodes.get(ref)
@@ -901,18 +891,14 @@ def collect_node_ctes(
             except Exception:
                 pass
 
-    # Collect from all starting nodes
+    # Collect from all starting nodes with SHARED visited set
+    # This prevents re-parsing nodes that are shared dependencies
+    shared_visited: set[str] = set()
     for node in nodes_to_include:
-        collect_refs(node, set())
-    timings["collect_refs"] = (time.time() - collect_start) * 1000
-    logger.warning(
-        f"[PERF] collect_refs detail: calls={call_count} mat_check={mat_check_time:.1f}ms parse={parse_check_time:.1f}ms ref_extract={ref_extract_time:.1f}ms",
-    )
+        collect_refs(node, shared_visited)
 
     # Topologically sort all collected nodes
-    sort_start = time.time()
     sorted_nodes = topological_sort_nodes(ctx, all_node_names)
-    timings["topo_sort"] = (time.time() - sort_start) * 1000
 
     # Build CTE name mapping
     cte_names: dict[str, str] = {}
@@ -921,7 +907,6 @@ def collect_node_ctes(
 
     # Build CTEs in dependency order
     ctes: list[tuple[str, ast.Query]] = []
-    parse_time = 0.0
     for node in sorted_nodes:
         if node.type == NodeType.SOURCE:
             continue
@@ -934,23 +919,16 @@ def collect_node_ctes(
             continue
 
         # Get parsed query from cache (uses deepcopy internally to avoid mutation)
-        parse_start = time.time()
-        from copy import deepcopy
-
         query_ast = deepcopy(ctx.get_parsed_query(node))
-        parse_time += (time.time() - parse_start) * 1000
 
         cte_name = cte_names[node.name]
 
         # Flatten any inner CTEs to avoid nested WITH clauses
         # Returns extracted CTEs and mapping of old names -> prefixed names
-        flatten_start = time.time()
         inner_ctes, inner_cte_renames = flatten_inner_ctes(query_ast, cte_name)
-        flatten_time = (time.time() - flatten_start) * 1000
 
         # Rewrite table references in extracted inner CTEs
         # (they may reference sources or materialized nodes -> physical table names)
-        rewrite_start = time.time()
         for inner_cte_name, inner_cte_query in inner_ctes:
             rewrite_table_references(
                 inner_cte_query,
@@ -969,27 +947,17 @@ def collect_node_ctes(
             cte_names,
             inner_cte_renames,
         )
-        rewrite_time = (time.time() - rewrite_start) * 1000
 
         # Apply column filtering if specified
         needed_cols = None
         if needed_columns_by_node:
             needed_cols = needed_columns_by_node.get(node.name)
 
-        filter_start = time.time()
         if needed_cols:
             query_ast = filter_cte_projection(query_ast, needed_cols)
-        filter_time = (time.time() - filter_start) * 1000
-
-        if flatten_time + rewrite_time + filter_time > 10:  # Only log if > 10ms
-            logger.warning(
-                f"[PERF] CTE {node.name}: flatten={flatten_time:.1f}ms rewrite={rewrite_time:.1f}ms filter={filter_time:.1f}ms",
-            )
 
         ctes.append((cte_name, query_ast))
 
-    timings["parse"] = parse_time
-    logger.warning(f"[PERF] collect_node_ctes: {timings} for {len(sorted_nodes)} nodes")
     return ctes
 
 

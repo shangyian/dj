@@ -10,10 +10,10 @@ import logging
 
 from sqlalchemy import select, text, bindparam
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload, joinedload
+from sqlalchemy.orm import selectinload, joinedload, load_only
 
 from datajunction_server.database.dimensionlink import DimensionLink
-from datajunction_server.database.node import Node, NodeRevision
+from datajunction_server.database.node import Node, NodeRevision, Column
 from datajunction_server.models.node_type import NodeType
 
 from datajunction_server.construction.build_v3.types import BuildContext
@@ -106,16 +106,16 @@ async def find_join_paths_batch(
     session: AsyncSession,
     source_revision_ids: set[int],
     target_dimension_names: set[str],
-    max_depth: int = 5,
+    max_depth: int = 100,  # High limit - early termination handles most cases
 ) -> dict[tuple[int, str, str], list[int]]:
     """
     Find join paths from multiple source nodes to all target dimension nodes
-    using a single recursive CTE query.
+    using a single recursive CTE query with early termination.
 
     Args:
         source_revision_ids: Set of source node revision IDs to find paths from
         target_dimension_names: Set of dimension node names to find paths to
-        max_depth: Maximum path depth to search
+        max_depth: Safety limit (default 100, but early termination kicks in first)
 
     Returns a dict mapping (source_revision_id, dimension_node_name, role_path)
     to the list of DimensionLink IDs forming the path.
@@ -123,12 +123,14 @@ async def find_join_paths_batch(
     The role_path is a "->" separated string of roles at each step.
     Empty roles are represented as empty strings.
 
-    This is O(1) database calls instead of O(sources * nodes * depth) individual queries.
+    Key optimization: Once a path reaches a target dimension, it stops exploring
+    from that node (no point continuing past a target).
     """
     if not target_dimension_names or not source_revision_ids:
         return {}
 
-    # Single recursive CTE to find all paths from all sources at once
+    # Single recursive CTE with early termination
+    # Once we reach a target dimension, don't continue exploring from it
     recursive_query = text("""
         WITH RECURSIVE paths AS (
             -- Base case: first level dimension links from any source node
@@ -138,7 +140,8 @@ async def find_join_paths_batch(
                 n.name as dim_name,
                 CAST(dl.id AS TEXT) as path,
                 COALESCE(dl.role, '') as role_path,
-                1 as depth
+                1 as depth,
+                CASE WHEN n.name IN :target_names THEN 1 ELSE 0 END as is_target
             FROM dimensionlink dl
             JOIN node n ON dl.dimension_id = n.id
             WHERE dl.node_revision_id IN :source_revision_ids
@@ -146,23 +149,26 @@ async def find_join_paths_batch(
             UNION ALL
 
             -- Recursive case: follow dimension_links from each dimension node
+            -- STOP exploring from nodes that are already targets (early termination)
             SELECT
                 paths.source_rev_id as source_rev_id,
                 dl2.id as link_id,
                 n2.name as dim_name,
                 paths.path || ',' || CAST(dl2.id AS TEXT) as path,
                 paths.role_path || '->' || COALESCE(dl2.role, '') as role_path,
-                paths.depth + 1 as depth
+                paths.depth + 1 as depth,
+                CASE WHEN n2.name IN :target_names THEN 1 ELSE 0 END as is_target
             FROM paths
             JOIN node prev_node ON paths.dim_name = prev_node.name
             JOIN noderevision nr ON prev_node.current_version = nr.version AND nr.node_id = prev_node.id
             JOIN dimensionlink dl2 ON dl2.node_revision_id = nr.id
             JOIN node n2 ON dl2.dimension_id = n2.id
             WHERE paths.depth < :max_depth
+              AND paths.is_target = 0  -- Don't continue from target nodes
         )
         SELECT source_rev_id, dim_name, path, role_path, depth
         FROM paths
-        WHERE dim_name IN :target_names
+        WHERE is_target = 1
         ORDER BY depth ASC
     """).bindparams(
         bindparam("source_revision_ids", expanding=True),
@@ -216,7 +222,6 @@ async def load_dimension_links_batch(
                     joinedload(NodeRevision.availability),
                 ),
             ),
-            joinedload(DimensionLink.node_revision),
         )
     )
     result = await session.execute(stmt)
@@ -239,19 +244,16 @@ async def preload_join_paths(
 
     This is O(2) queries regardless of how many source nodes we have.
     """
-    import time
 
     if not target_dimension_names or not source_revision_ids:
         return
 
     # Find all paths from all sources using recursive CTE (single query)
-    start = time.time()
     path_ids = await find_join_paths_batch(
         ctx.session,
         source_revision_ids,
         target_dimension_names,
     )
-    find_time = (time.time() - start) * 1000
 
     # Collect all link IDs we need to load
     all_link_ids: set[int] = set()
@@ -259,13 +261,7 @@ async def preload_join_paths(
         all_link_ids.update(link_id_list)
 
     # Batch load all DimensionLinks (single query)
-    start = time.time()
     link_dict = await load_dimension_links_batch(ctx.session, all_link_ids)
-    load_time = (time.time() - start) * 1000
-
-    logger.warning(
-        f"[PERF] preload_join_paths: find={find_time:.2f}ms, load={load_time:.2f}ms ({len(all_link_ids)} links)",
-    )
 
     # Store in context, keyed by (source_revision_id, dim_name, role_path)
     for (source_rev_id, dim_name, role_path), link_id_list in path_ids.items():
@@ -297,10 +293,6 @@ async def load_nodes(ctx: BuildContext) -> None:
 
     Total: ~4 queries regardless of graph size.
     """
-    import time
-
-    timings = {}
-
     # Collect initial node names (metrics + explicit dimension nodes)
     initial_node_names = set(ctx.metrics)
 
@@ -314,12 +306,10 @@ async def load_nodes(ctx: BuildContext) -> None:
 
     # Query 1: Find ALL upstream node names AND parent relationships using lightweight recursive CTE
     # This includes all transitive dependencies (sources, transforms, dimensions)
-    start = time.time()
     all_node_names, parent_map = await find_upstream_node_names(
         ctx.session,
         list(initial_node_names),
     )
-    timings["query1_upstream_names"] = (time.time() - start) * 1000
 
     # Store parent map in context for later use (e.g., get_parent_node)
     ctx.parent_map = parent_map
@@ -330,26 +320,38 @@ async def load_nodes(ctx: BuildContext) -> None:
     logger.debug(f"[BuildV3] Found {len(all_node_names)} nodes to load")
 
     # Query 2: Batch load all nodes with appropriate eager loading
-    # NOTE: parents and dimension_links are NOT loaded here - parent relationships
-    # come from Query 1's parent_map, dimension_links from Queries 3-4
-    start = time.time()
     stmt = (
         select(Node)
         .where(Node.name.in_(all_node_names))
         .where(Node.deactivated_at.is_(None))
         .options(
-            selectinload(Node.current).options(
-                selectinload(NodeRevision.columns),
-                selectinload(NodeRevision.catalog),
+            load_only(
+                Node.name,
+                Node.type,
+                Node.current_version,
+            ),
+            joinedload(Node.current).options(
+                load_only(
+                    NodeRevision.name,
+                    NodeRevision.query,
+                    NodeRevision.schema_,
+                    NodeRevision.table,
+                ),
+                selectinload(NodeRevision.columns).options(
+                    load_only(
+                        Column.name,
+                        Column.type,
+                    ),
+                ),
+                joinedload(NodeRevision.catalog),
                 selectinload(NodeRevision.required_dimensions),
-                selectinload(NodeRevision.availability),  # For materialization support
+                joinedload(NodeRevision.availability),  # For materialization support
             ),
         )
     )
 
     result = await ctx.session.execute(stmt)
     nodes = result.scalars().unique().all()
-    timings["query2_batch_load"] = (time.time() - start) * 1000
 
     # Cache all loaded nodes
     for node in nodes:
@@ -387,9 +389,5 @@ async def load_nodes(ctx: BuildContext) -> None:
 
     logger.debug(f"[BuildV3] Loaded {len(ctx.nodes)} nodes")
 
-    # Queries 3-4: Preload join paths for ALL parent nodes in a single batch
-    start = time.time()
+    # Preload join paths for ALL parent nodes in a single batch
     await preload_join_paths(ctx, parent_revision_ids, target_dim_names)
-    timings["query3_4_join_paths"] = (time.time() - start) * 1000
-
-    logger.warning(f"[PERF] load_nodes: {timings} (loaded {len(ctx.nodes)} nodes)")
