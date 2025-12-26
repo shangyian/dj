@@ -35,6 +35,10 @@ class BuildContext:
     dialect: Dialect = Dialect.SPARK
     alias_registry: AliasRegistry = field(default_factory=AliasRegistry)
 
+    # Whether to use materialized tables when available (default: True)
+    # Set to False when building SQL for materialization to avoid circular references
+    use_materialized: bool = True
+
     # Loaded data (populated by load_nodes)
     nodes: dict[str, Node] = field(default_factory=dict)
 

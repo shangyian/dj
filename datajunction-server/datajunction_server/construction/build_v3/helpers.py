@@ -274,6 +274,152 @@ def get_table_reference_parts(node: Node) -> list[str]:
 
 
 # =============================================================================
+# Materialization Utilities
+# =============================================================================
+
+
+def has_available_materialization(node: Node) -> bool:
+    """
+    Check if a node has an available materialized table.
+
+    A materialized table is available if:
+    1. The node has an availability state attached
+    2. The availability state indicates the data is available
+
+    Args:
+        node: The node to check
+
+    Returns:
+        True if a materialized table is available, False otherwise
+    """
+    if not node.current:
+        return False
+
+    availability = node.current.availability
+    if not availability:
+        return False
+
+    # The is_available method on AvailabilityState checks criteria
+    # For now, we just check that availability exists
+    # TODO: Add criteria checking when BuildCriteria is integrated
+    return availability.is_available()
+
+
+def get_materialized_table_parts(node: Node) -> list[str] | None:
+    """
+    Get the table reference parts for a materialized table.
+
+    Returns [catalog, schema, table] if the node has materialization,
+    or None if it doesn't.
+
+    Args:
+        node: The node to get materialization for
+
+    Returns:
+        List of table name parts, or None if no materialization
+    """
+    if not node.current or not node.current.availability:
+        return None
+
+    availability = node.current.availability
+    parts = []
+
+    # Note: availability.catalog is always present
+    # availability.schema_ and table are required
+    if availability.catalog:
+        parts.append(availability.catalog)
+    if availability.schema_:
+        parts.append(availability.schema_)
+    if availability.table:
+        parts.append(availability.table)
+
+    return parts if parts else None
+
+
+def should_use_materialized_table(
+    ctx: "BuildContext",  # Forward reference
+    node: Node,
+) -> bool:
+    """
+    Determine if we should use a materialized table for a node.
+
+    Considerations:
+    1. ctx.use_materialized must be True (default)
+    2. The node must have an available materialization
+    3. Source nodes always use their physical table (not considered "materialization")
+
+    Args:
+        ctx: Build context
+        node: Node to check
+
+    Returns:
+        True if materialization should be used, False otherwise
+    """
+    # Source nodes always use physical tables (not materialization)
+    if node.type == NodeType.SOURCE:
+        return False
+
+    # Check if materialization is enabled in context
+    if not ctx.use_materialized:
+        return False
+
+    # Check if node has available materialization
+    return has_available_materialization(node)
+
+
+def get_table_reference_parts_with_materialization(
+    ctx: "BuildContext",  # Forward reference
+    node: Node,
+) -> tuple[list[str], bool]:
+    """
+    Get table reference parts, considering materialization.
+
+    For source nodes: Always returns physical table [catalog, schema, table]
+    For other nodes:
+      - If materialized and use_materialized=True: Returns [catalog, schema, table]
+      - Otherwise: Returns [cte_name] for CTE reference
+
+    Args:
+        ctx: Build context
+        node: Node to get reference for
+
+    Returns:
+        Tuple of (table_parts, is_materialized)
+        - table_parts: List of name parts
+        - is_materialized: True if using materialized table (not CTE)
+    """
+    rev = node.current
+    if not rev:
+        raise DJInvalidInputException(f"Node {node.name} has no current revision")
+
+    # For source nodes, always use physical table
+    if node.type == NodeType.SOURCE:
+        parts = []
+        if rev.catalog:
+            parts.append(rev.catalog.name)
+        if rev.schema_:
+            parts.append(rev.schema_)
+        if rev.table:
+            parts.append(rev.table)
+        else:
+            parts.append(node.name)
+        return (parts, True)  # Sources are considered "materialized" (physical)
+
+    # For non-source nodes, check for materialization
+    if should_use_materialized_table(ctx, node):
+        mat_parts = get_materialized_table_parts(node)
+        if mat_parts:
+            logger.debug(
+                f"[BuildV3] Using materialized table for {node.name}: "
+                f"{'.'.join(mat_parts)}",
+            )
+            return (mat_parts, True)
+
+    # Fall back to CTE reference
+    return ([amenable_name(node.name)], False)
+
+
+# =============================================================================
 # AST/CTE Utilities
 # =============================================================================
 
@@ -524,6 +670,7 @@ def rewrite_table_references(
     Rewrite table references in a query AST.
 
     - Source nodes -> physical table names (catalog.schema.table)
+    - Materialized nodes -> physical materialized table names
     - Transform/dimension nodes -> CTE names
     - Inner CTE names -> prefixed CTE names with alias to original name
       e.g., `FROM base` -> `FROM prefix_base base` (keeps column refs like base.col working)
@@ -557,11 +704,14 @@ def rewrite_table_references(
         # Then check if it's a node reference
         ref_node = ctx.nodes.get(table_name)
         if ref_node:
-            if ref_node.type == NodeType.SOURCE:
-                # Replace with physical table name
-                physical_name = get_physical_table_name(ref_node)
-                if physical_name:
-                    table.name = ast.Name(physical_name)
+            # Use the unified function that handles source, materialized, and CTE cases
+            table_parts, is_physical = get_table_reference_parts_with_materialization(
+                ctx,
+                ref_node,
+            )
+            if is_physical:
+                # Source or materialized - use physical table name
+                table.name = ast.Name(SEPARATOR.join(table_parts))
             elif table_name in cte_names:
                 # Replace with CTE name
                 table.name = ast.Name(cte_names[table_name])
@@ -689,6 +839,7 @@ def collect_node_ctes(
 
     This handles the full dependency chain:
     - Source nodes -> replaced with physical table names (catalog.schema.table)
+    - Materialized nodes -> replaced with materialized table names (no CTE)
     - Transform/dimension nodes -> recursive CTEs with dependencies resolved
     - Inner CTEs within transforms -> flattened and prefixed to avoid collisions
 
@@ -710,6 +861,10 @@ def collect_node_ctes(
 
         if node.type == NodeType.SOURCE:
             return  # Sources don't become CTEs
+
+        # Skip materialized nodes - they use physical tables, not CTEs
+        if should_use_materialized_table(ctx, node):
+            return
 
         all_node_names.add(node.name)
 
@@ -743,6 +898,10 @@ def collect_node_ctes(
         if node.type == NodeType.SOURCE:
             continue
 
+        # Skip materialized nodes (they use physical tables directly)
+        if should_use_materialized_table(ctx, node):
+            continue
+
         if not node.current or not node.current.query:
             continue
 
@@ -756,15 +915,25 @@ def collect_node_ctes(
         inner_ctes, inner_cte_renames = flatten_inner_ctes(query_ast, cte_name)
 
         # Rewrite table references in extracted inner CTEs
-        # (they may reference sources that need -> physical table names)
+        # (they may reference sources or materialized nodes -> physical table names)
         for inner_cte_name, inner_cte_query in inner_ctes:
-            rewrite_table_references(inner_cte_query, ctx, cte_names, inner_cte_renames)
+            rewrite_table_references(
+                inner_cte_query,
+                ctx,
+                cte_names,
+                inner_cte_renames,
+            )
 
         ctes.extend(inner_ctes)
 
         # Rewrite table references in main query
-        # (sources -> physical tables, transforms -> CTE names, inner CTEs -> prefixed names)
-        rewrite_table_references(query_ast, ctx, cte_names, inner_cte_renames)
+        # (sources -> physical tables, materialized -> physical, others -> CTE names)
+        rewrite_table_references(
+            query_ast,
+            ctx,
+            cte_names,
+            inner_cte_renames,
+        )
 
         # Apply column filtering if specified
         needed_cols = None
@@ -1071,8 +1240,11 @@ def build_join_clause(
     elif link.join_type == JoinType.FULL:
         join_type_str = "FULL OUTER"
 
-    # Build the right table reference
-    right_table_parts = get_table_reference_parts(link.dimension)
+    # Build the right table reference (use materialized table if available)
+    right_table_parts, _ = get_table_reference_parts_with_materialization(
+        ctx,
+        link.dimension,
+    )
     right_table_name = make_name(SEPARATOR.join(right_table_parts))
 
     # Create the join

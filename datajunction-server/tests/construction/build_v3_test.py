@@ -659,7 +659,7 @@ class TestMultipleMetrics:
             "v3.total_revenue",
         ]
 
-        # Columns: dimension + grain column + 3 raw metric columns
+        # Columns: dimension grain column 3 raw metric columns
         assert len(gg["columns"]) == 4
         assert gg["columns"][0] == {
             "name": "status",
@@ -904,7 +904,7 @@ class TestMultipleMetrics:
         assert response.status_code == 200
         result = response.json()
 
-        # Should have exactly two grain groups (different aggregability + different facts)
+        # Should have exactly two grain groups (different aggregability different facts)
         assert len(result["grain_groups"]) == 2
 
         # Find grain groups by metric for predictable assertions
@@ -1140,8 +1140,8 @@ class TestMultipleMetrics:
         result = response.json()
 
         # With merging, should have 2 grain groups (one per parent):
-        # 1. order_details (merged: total_revenue + order_count) at LIMITED grain
-        # 2. page_views_enriched (merged: visitor_count + page_view_count) at LIMITED grain
+        # 1. order_details (merged: total_revenue order_count) at LIMITED grain
+        # 2. page_views_enriched (merged: visitor_count page_view_count) at LIMITED grain
         assert len(result["grain_groups"]) == 2
 
         # Find grain groups by parent name
@@ -1319,7 +1319,7 @@ class TestMultipleMetrics:
         # Validate metrics covered
         assert gg["metrics"] == ["v3.avg_unit_price"]
 
-        # Validate columns: 1 dimension + 2 metric components = 3 columns
+        # Validate columns: 1 dimension 2 metric components = 3 columns
         assert len(gg["columns"]) == 3
         assert gg["columns"][0] == {
             "name": "status",
@@ -1363,7 +1363,7 @@ class TestMultipleMetrics:
         Test mixing single-component metrics with multi-component metrics.
 
         - total_revenue: single component (SUM) → semantic_type: "metric"
-        - avg_unit_price: multi-component (COUNT + SUM) → semantic_type: "metric_component"
+        - avg_unit_price: multi-component (COUNT SUM) → semantic_type: "metric_component"
 
         Both are FULL aggregability, so there's only 1 grain group.
         """
@@ -1392,7 +1392,7 @@ class TestMultipleMetrics:
         # Validate metrics covered (sorted)
         assert sorted(gg["metrics"]) == ["v3.avg_unit_price", "v3.total_revenue"]
 
-        # Validate columns: 1 dimension + 1 single-component metric + 2 multi-component metrics = 4 columns
+        # Validate columns: 1 dimension 1 single-component metric 2 multi-component metrics = 4 columns
         assert len(gg["columns"]) == 4
         assert gg["columns"][0] == {
             "name": "status",
@@ -1447,7 +1447,7 @@ class TestMultipleMetrics:
         """
         Test metrics that share components.
 
-        - avg_unit_price: decomposes into COUNT(unit_price) + SUM(unit_price)
+        - avg_unit_price: decomposes into COUNT(unit_price) SUM(unit_price)
         - total_unit_price: is just SUM(unit_price) (single component)
 
         Component deduplication is active: SUM(unit_price) appears only ONCE.
@@ -1481,7 +1481,7 @@ class TestMultipleMetrics:
         # Validate metrics covered (sorted)
         assert sorted(gg["metrics"]) == ["v3.avg_unit_price", "v3.total_unit_price"]
 
-        # Validate columns: 1 dimension + 2 metric columns (WITH sharing) = 3 columns
+        # Validate columns: 1 dimension 2 metric columns (WITH sharing) = 3 columns
         # SUM(unit_price) is deduplicated - appears once for both avg_unit_price and total_unit_price
         assert len(gg["columns"]) == 3
         assert gg["columns"][0] == {
@@ -1642,9 +1642,9 @@ class TestAllMetrics:
 
     # Derived metrics - cross-fact ratios
     CROSS_FACT_DERIVED = [
-        "v3.conversion_rate",  # orders / visitors (order_details + page_views)
-        "v3.revenue_per_visitor",  # revenue / visitors (order_details + page_views)
-        "v3.revenue_per_page_view",  # revenue / page_views (order_details + page_views)
+        "v3.conversion_rate",  # orders / visitors (order_details page_views)
+        "v3.revenue_per_visitor",  # revenue / visitors (order_details page_views)
+        "v3.revenue_per_page_view",  # revenue / page_views (order_details page_views)
     ]
 
     # Derived metrics - period-over-period (window functions, aggregability: NONE)
@@ -2046,7 +2046,7 @@ class TestAllMetrics:
         assert gg["grain"] == ["city_from", "city_home", "city_to"]
         assert gg["metrics"] == ["v3.total_revenue"]
 
-        # Validate columns - 3 dimensions + 1 metric
+        # Validate columns - 3 dimensions 1 metric
         assert len(gg["columns"]) == 4
         assert gg["columns"][0]["semantic_entity"] == "v3.location.city[from]"
         assert gg["columns"][0]["name"] == "city_from"
@@ -2136,7 +2136,7 @@ class TestAllMetrics:
         # Validate aggregability
         assert gg["aggregability"] == "full"
 
-        # Should have 5 dimensions + 3 metrics = 8 columns
+        # Should have 5 dimensions 3 metrics = 8 columns
         assert len(gg["columns"]) == 8
 
         # Check all dimension semantic entities
@@ -3379,3 +3379,180 @@ class TestAdditionalMetricTypes:
                 "semantic_type": "metric",
             },
         ]
+
+
+class TestMaterialization:
+    """Tests for materialization support - using physical tables instead of CTEs."""
+
+    @pytest.mark.asyncio
+    async def test_materialized_transform_uses_physical_table(
+        self,
+        client_with_build_v3,
+    ):
+        """
+        Test that a materialized transform uses the physical table instead of CTE.
+
+        Setup:
+        1. Add availability state to v3.order_details transform
+        2. Generate SQL for a metric using that transform
+        3. Verify the SQL references the materialized table, not a CTE
+        """
+        # Add availability state to the order_details transform
+        response = await client_with_build_v3.post(
+            "/data/v3.order_details/availability/",
+            json={
+                "catalog": "analytics",
+                "schema_": "warehouse",
+                "table": "order_details_materialized",
+                "valid_through_ts": 9999999999,
+            },
+        )
+        assert response.status_code == 200, response.json()
+
+        # Now generate SQL - should use materialized table
+        response = await client_with_build_v3.get(
+            "/sql/measures/v3/",
+            params={
+                "metrics": ["v3.total_revenue"],
+                "dimensions": ["v3.order_details.status"],
+            },
+        )
+
+        assert response.status_code == 200, response.json()
+        data = response.json()
+
+        # Get the SQL
+        assert len(data["grain_groups"]) == 1
+        sql = data["grain_groups"][0]["sql"]
+
+        # The SQL should reference the materialized table directly
+        # NOT have a CTE for v3_order_details
+        assert "analytics.warehouse.order_details_materialized" in sql
+        assert "v3_order_details AS" not in sql, (
+            "Should not have CTE for materialized transform"
+        )
+
+    @pytest.mark.asyncio
+    async def test_non_materialized_transform_uses_cte(
+        self,
+        client_with_build_v3,
+    ):
+        """
+        Test that a non-materialized transform uses CTE as usual.
+
+        v3.page_views_enriched has no materialization, so it should
+        generate a CTE.
+        """
+        response = await client_with_build_v3.get(
+            "/sql/measures/v3/",
+            params={
+                "metrics": ["v3.page_view_count"],
+                "dimensions": ["v3.product.category"],
+            },
+        )
+
+        assert response.status_code == 200, response.json()
+        data = response.json()
+
+        # Get the SQL
+        assert len(data["grain_groups"]) == 1
+        sql = data["grain_groups"][0]["sql"]
+
+        # Should have CTE for page_views_enriched
+        assert "v3_page_views_enriched AS" in sql
+
+    @pytest.mark.asyncio
+    async def test_materialized_dimension_uses_physical_table(
+        self,
+        client_with_build_v3,
+    ):
+        """
+        Test that a materialized dimension uses physical table in joins.
+        """
+        # Add availability to the product dimension
+        response = await client_with_build_v3.post(
+            "/data/v3.product/availability/",
+            json={
+                "catalog": "analytics",
+                "schema_": "dim",
+                "table": "product_dim",
+                "valid_through_ts": 9999999999,
+            },
+        )
+        assert response.status_code == 200, response.json()
+
+        # Generate SQL that joins to product dimension
+        response = await client_with_build_v3.get(
+            "/sql/measures/v3/",
+            params={
+                "metrics": ["v3.total_revenue"],
+                "dimensions": ["v3.product.category"],
+            },
+        )
+
+        assert response.status_code == 200, response.json()
+        data = response.json()
+
+        sql = data["grain_groups"][0]["sql"]
+        assert_sql_equal(
+            sql,
+            """
+            WITH v3_order_details AS (
+              SELECT
+                oi.product_id,
+            	oi.quantity * oi.unit_price AS line_total
+              FROM default.v3.orders o JOIN default.v3.order_items oi ON o.order_id = oi.order_id
+            )
+            SELECT
+              t2.category,
+              SUM(t1.line_total) total_revenue
+            FROM v3_order_details t1
+            LEFT OUTER JOIN analytics.dim.product_dim t2 ON t1.product_id = t2.product_id
+            GROUP BY
+              t2.category
+            """,
+        )
+
+    @pytest.mark.asyncio
+    async def test_use_materialized_false_ignores_materialization(
+        self,
+        client_with_build_v3,
+    ):
+        """
+        Test that when building SQL for materialization itself,
+        we don't use the materialized table (would cause circular reference).
+
+        This tests the use_materialized=False flag.
+        """
+        # First materialize order_details
+        response = await client_with_build_v3.post(
+            "/data/v3.order_details/availability/",
+            json={
+                "catalog": "analytics",
+                "schema_": "warehouse",
+                "table": "order_details_mat",
+                "valid_through_ts": 9999999999,
+            },
+        )
+        assert response.status_code == 200
+
+        # Generate SQL with use_materialized=False
+        # This would be used when generating SQL to refresh the materialization
+        response = await client_with_build_v3.get(
+            "/sql/measures/v3/",
+            params={
+                "metrics": ["v3.total_revenue"],
+                "dimensions": ["v3.order_details.status"],
+                "use_materialized": "false",  # Query param as string
+            },
+        )
+
+        assert response.status_code == 200, response.json()
+        data = response.json()
+
+        sql = data["grain_groups"][0]["sql"]
+
+        # Should have CTE for order_details (not use materialized table)
+        assert "v3_order_details AS" in sql
+        # Should NOT reference the materialized table
+        assert "order_details_mat" not in sql

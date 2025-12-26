@@ -200,6 +200,7 @@ async def get_measures_sql_v3(
     metrics: List[str] = Query([]),
     dimensions: List[str] = Query([]),
     filters: List[str] = Query([]),
+    use_materialized: bool = Query(True),
     *,
     session: AsyncSession = Depends(get_session),
     current_user: User = Depends(get_current_user),
@@ -211,6 +212,11 @@ async def get_measures_sql_v3(
     with one SQL query per grain group. Different aggregability levels
     (FULL, LIMITED, NONE) produce different grain groups.
 
+    Args:
+        use_materialized: If True (default), use materialized tables when available.
+            Set to False when generating SQL for materialization refresh to avoid
+            circular references.
+
     Use cases:
     - Materialization: Each grain group can be materialized separately
     - Live queries: Pass to /sql/metrics/v3/ to get a single combined query
@@ -221,6 +227,7 @@ async def get_measures_sql_v3(
         dimensions=dimensions,
         filters=filters,
         dialect=Dialect.SPARK,
+        use_materialized=use_materialized,
     )
 
     return MeasuresSQLResponse(

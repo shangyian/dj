@@ -35,7 +35,7 @@ from datajunction_server.construction.build_v3.helpers import (
     get_base_metrics_for_derived,
     get_column_type,
     collect_node_ctes,
-    get_table_reference_parts,
+    get_table_reference_parts_with_materialization,
     make_name,
     parse_dimension_ref,
     analyze_grain_groups,
@@ -249,8 +249,8 @@ def build_select_ast(
     # Build CTEs for all non-source nodes with column filtering
     ctes = collect_node_ctes(ctx, nodes_for_ctes, needed_columns_by_node)
 
-    # Build FROM clause with main table
-    table_parts = get_table_reference_parts(parent_node)
+    # Build FROM clause with main table (use materialized table if available)
+    table_parts, _ = get_table_reference_parts_with_materialization(ctx, parent_node)
     table_name = make_name(SEPARATOR.join(table_parts))
 
     # Create relation with joins
@@ -590,6 +590,7 @@ async def build_measures_sql(
     dimensions: list[str],
     filters: list[str] | None = None,
     dialect: Dialect = Dialect.SPARK,
+    use_materialized: bool = True,
 ) -> GeneratedMeasuresSQL:
     """
     Build measures SQL for a set of metrics and dimensions.
@@ -610,6 +611,9 @@ async def build_measures_sql(
         dimensions: List of dimension names (format: "node.column" or "node.column[role]")
         filters: Optional list of filter expressions
         dialect: SQL dialect for output
+        use_materialized: If True (default), use materialized tables when available.
+            Set to False when generating SQL for materialization refresh to avoid
+            circular references.
 
     Returns:
         GeneratedMeasuresSQL with one GrainGroupSQL per aggregation level,
@@ -622,6 +626,7 @@ async def build_measures_sql(
         dimensions=dimensions,
         filters=filters or [],
         dialect=dialect,
+        use_materialized=use_materialized,
     )
 
     # Load all required nodes (single DB round trip)

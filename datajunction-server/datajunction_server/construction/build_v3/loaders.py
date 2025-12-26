@@ -208,6 +208,9 @@ async def load_dimension_links_batch(
                 joinedload(Node.current).options(
                     selectinload(NodeRevision.columns),
                     joinedload(NodeRevision.catalog),
+                    selectinload(
+                        NodeRevision.availability,
+                    ),  # For materialization support
                     selectinload(NodeRevision.dimension_links).options(
                         joinedload(DimensionLink.dimension),
                     ),
@@ -322,6 +325,7 @@ async def load_nodes(ctx: BuildContext) -> None:
                 selectinload(NodeRevision.columns),
                 selectinload(NodeRevision.catalog),
                 selectinload(NodeRevision.required_dimensions),
+                selectinload(NodeRevision.availability),  # For materialization support
             ),
         )
     )
