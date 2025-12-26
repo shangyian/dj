@@ -44,6 +44,8 @@ from datajunction_server.construction.build_v3.helpers import (
     replace_component_refs_in_ast,
     get_short_name,
     extract_join_columns_for_node,
+    get_dimension_table_alias,
+    make_column_ref,
 )
 from datajunction_server.construction.build_v3.types import (
     BuildContext,
@@ -130,24 +132,10 @@ def build_select_ast(
 
     # Add dimension columns to projection
     for resolved_dim in resolved_dimensions:
-        # Determine table alias for this dimension's column
-        if resolved_dim.is_local:
-            table_alias = main_alias
-        elif resolved_dim.join_path:
-            # Use alias of the final dimension in the path, keyed by (name, role)
-            final_dim_name = resolved_dim.join_path.target_node_name
-            dim_key = (final_dim_name, resolved_dim.role)
-            table_alias = dim_aliases.get(dim_key, main_alias)
-        else:
-            table_alias = main_alias
+        table_alias = get_dimension_table_alias(resolved_dim, main_alias, dim_aliases)
 
         # Build column reference with table alias
-        col_ref = ast.Column(
-            name=ast.Name(
-                resolved_dim.column_name,
-                namespace=ast.Name(table_alias),
-            ),
-        )
+        col_ref = make_column_ref(resolved_dim.column_name, table_alias)
 
         # Register and apply clean alias
         clean_alias = ctx.alias_registry.register(resolved_dim.original_ref)
@@ -160,12 +148,7 @@ def build_select_ast(
     # These are added to the output so the result can be re-aggregated
     grain_col_refs: list[ast.Column] = []
     for grain_col in grain_columns:
-        col_ref = ast.Column(
-            name=ast.Name(
-                grain_col,
-                namespace=ast.Name(main_alias),
-            ),
-        )
+        col_ref = make_column_ref(grain_col, main_alias)
         grain_col_refs.append(col_ref)
         projection.append(col_ref)
 
@@ -195,34 +178,12 @@ def build_select_ast(
     # Build GROUP BY (use same column references as projection, without aliases)
     group_by: list[ast.Expression] = []
     for resolved_dim in resolved_dimensions:
-        if resolved_dim.is_local:
-            table_alias = main_alias
-        elif resolved_dim.join_path:
-            final_dim_name = resolved_dim.join_path.target_node_name
-            dim_key = (final_dim_name, resolved_dim.role)
-            table_alias = dim_aliases.get(dim_key, main_alias)
-        else:
-            table_alias = main_alias
-
-        group_by.append(
-            ast.Column(
-                name=ast.Name(
-                    resolved_dim.column_name,
-                    namespace=ast.Name(table_alias),
-                ),
-            ),
-        )
+        table_alias = get_dimension_table_alias(resolved_dim, main_alias, dim_aliases)
+        group_by.append(make_column_ref(resolved_dim.column_name, table_alias))
 
     # Add grain columns to GROUP BY for LIMITED aggregability
     for grain_col in grain_columns:
-        group_by.append(
-            ast.Column(
-                name=ast.Name(
-                    grain_col,
-                    namespace=ast.Name(main_alias),
-                ),
-            ),
-        )
+        group_by.append(make_column_ref(grain_col, main_alias))
 
     # Collect all nodes that need CTEs and their needed columns
     nodes_for_ctes: list[Node] = []
@@ -442,10 +403,7 @@ def build_grain_group_sql(
         # For NONE aggregability, output raw columns (no aggregation possible)
         if grain_group.aggregability == Aggregability.NONE:
             if component.expression:
-                col_ast = ast.Column(
-                    name=ast.Name(component.expression),
-                    _table=None,
-                )
+                col_ast = make_column_ref(component.expression)
                 component_alias = component.expression
                 component_expressions.append((component_alias, col_ast))
                 component_metadata.append(
@@ -973,10 +931,7 @@ def _build_metric_aggregation(
 
         if orig_agg == Aggregability.LIMITED:
             # COUNT DISTINCT on grain column
-            distinct_col = ast.Column(
-                name=ast.Name(col_name),
-                _table=ast.Table(ast.Name(cte_alias)),
-            )
+            distinct_col = make_column_ref(col_name, cte_alias)
             agg_name = comp.aggregation or "COUNT"
             return ast.Function(
                 ast.Name(agg_name),
@@ -985,10 +940,7 @@ def _build_metric_aggregation(
             )
         else:
             # Re-aggregate with merge function
-            col_ref = ast.Column(
-                name=ast.Name(col_name),
-                _table=ast.Table(ast.Name(cte_alias)),
-            )
+            col_ref = make_column_ref(col_name, cte_alias)
             merge_func = comp.merge or "SUM"
             return ast.Function(ast.Name(merge_func), args=[col_ref])
 
@@ -1086,8 +1038,7 @@ def generate_metrics_sql(
     for original_dim_ref, dim_col in dim_info:
         # Build COALESCE(gg0.col, gg1.col, ...) AS col
         coalesce_args: list[ast.Expression] = [
-            ast.Column(name=ast.Name(dim_col), _table=ast.Table(ast.Name(alias)))
-            for alias in cte_aliases
+            make_column_ref(dim_col, alias) for alias in cte_aliases
         ]
         coalesce_func = ast.Function(ast.Name("COALESCE"), args=coalesce_args)
         aliased_coalesce = coalesce_func.set_alias(ast.Name(dim_col))
@@ -1146,10 +1097,7 @@ def generate_metrics_sql(
                     (c.name for c in gg.columns if c.semantic_name == metric_name),
                     short_name,
                 )
-                expr_ast: ast.Expression = ast.Column(
-                    name=ast.Name(col_name),
-                    _table=ast.Table(ast.Name(alias)),
-                )
+                expr_ast: ast.Expression = make_column_ref(col_name, alias)
                 metric_expr_asts[metric_name] = (expr_ast, short_name)
                 continue
 
@@ -1209,14 +1157,8 @@ def generate_metrics_sql(
         # Build join condition: gg0.dim1 = ggN.dim1 AND gg0.dim2 = ggN.dim2 ...
         conditions: list[ast.Expression] = []
         for dim_col in dim_col_aliases:
-            left_col = ast.Column(
-                name=ast.Name(dim_col),
-                _table=ast.Table(ast.Name(cte_aliases[0])),
-            )
-            right_col = ast.Column(
-                name=ast.Name(dim_col),
-                _table=ast.Table(ast.Name(cte_aliases[i])),
-            )
+            left_col = make_column_ref(dim_col, cte_aliases[0])
+            right_col = make_column_ref(dim_col, cte_aliases[i])
             conditions.append(ast.BinaryOp.Eq(left_col, right_col))
 
         # Combine conditions with AND
@@ -1251,13 +1193,7 @@ def generate_metrics_sql(
     group_by: list[ast.Expression] = []
     if dim_col_aliases:
         group_by.extend(
-            [
-                ast.Column(
-                    name=ast.Name(dim_col),
-                    _table=ast.Table(ast.Name(cte_aliases[0])),
-                )
-                for dim_col in dim_col_aliases
-            ],
+            [make_column_ref(dim_col, cte_aliases[0]) for dim_col in dim_col_aliases],
         )
 
     # Build the final SELECT

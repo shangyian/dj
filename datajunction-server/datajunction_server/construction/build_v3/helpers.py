@@ -58,6 +58,30 @@ def get_short_name(full_name: str) -> str:
     return full_name.split(SEPARATOR)[-1]
 
 
+def make_column_ref(col_name: str, table_alias: str | None = None) -> ast.Column:
+    """
+    Build a column reference AST node with optional table alias.
+
+    Args:
+        col_name: The column name
+        table_alias: Optional table/CTE alias to qualify the column
+
+    Returns:
+        ast.Column node that renders to SQL
+
+    Generated SQL examples:
+        make_column_ref("status")           -> status
+        make_column_ref("status", "t1")     -> t1.status
+        make_column_ref("category", "gg0")  -> gg0.category
+    """
+    if table_alias:
+        return ast.Column(
+            name=ast.Name(col_name),
+            _table=ast.Table(ast.Name(table_alias)),
+        )
+    return ast.Column(name=ast.Name(col_name))
+
+
 def extract_join_columns_for_node(join_sql: str, node_name: str) -> set[str]:
     """
     Extract column names from join SQL that belong to a specific node.
@@ -87,6 +111,31 @@ def extract_join_columns_for_node(join_sql: str, node_name: str) -> set[str]:
             if col_id.startswith(prefix):
                 result.add(get_short_name(col_id))
     return result
+
+
+def get_dimension_table_alias(
+    resolved_dim: ResolvedDimension,
+    main_alias: str,
+    dim_aliases: dict[tuple[str, Optional[str]], str],
+) -> str:
+    """
+    Get the table alias for a resolved dimension's column.
+
+    Args:
+        resolved_dim: The resolved dimension
+        main_alias: The alias for the main/parent table
+        dim_aliases: Map of (node_name, role) -> table_alias for dimension joins
+
+    Returns:
+        The appropriate table alias to use for this dimension's column
+    """
+    if resolved_dim.is_local:
+        return main_alias
+    elif resolved_dim.join_path:
+        final_dim_name = resolved_dim.join_path.target_node_name
+        dim_key = (final_dim_name, resolved_dim.role)
+        return dim_aliases.get(dim_key, main_alias)
+    return main_alias
 
 
 def get_column_type(node: Node, column_name: str) -> str:
