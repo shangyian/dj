@@ -789,7 +789,6 @@ class TestMultipleMetrics:
             SELECT t2.name, SUM(t1.line_total) total_revenue, SUM(t1.quantity) total_quantity
             FROM v3_order_details t1
             LEFT OUTER JOIN v3_customer t2 ON t1.customer_id = t2.customer_id
-            WHERE  t2.name = 'Abcd'
             GROUP BY t2.name
             """,
         )
