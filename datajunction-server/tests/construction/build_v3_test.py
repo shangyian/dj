@@ -789,6 +789,40 @@ class TestMultipleMetrics:
             SELECT t2.name, SUM(t1.line_total) total_revenue, SUM(t1.quantity) total_quantity
             FROM v3_order_details t1
             LEFT OUTER JOIN v3_customer t2 ON t1.customer_id = t2.customer_id
+            WHERE  t2.name = 'Abcd'
+            GROUP BY t2.name
+            """,
+        )
+
+        response = await client_with_build_v3.get(
+            "/sql/measures/v3/",
+            params={
+                "metrics": ["v3.total_revenue", "v3.total_quantity"],
+                "dimensions": ["v3.customer.name"],
+                "filters": ["v3.customer.name = 'Abcd'"],
+            },
+        )
+        result = response.json()
+        gg = result["grain_groups"][0]
+
+        # Validate SQL
+        assert_sql_equal(
+            gg["sql"],
+            """
+            WITH
+            v3_customer AS (
+                SELECT customer_id, name
+                FROM default.v3.customers
+            ),
+            v3_order_details AS (
+                SELECT o.customer_id, oi.quantity, oi.quantity * oi.unit_price AS line_total
+                FROM default.v3.orders o
+                JOIN default.v3.order_items oi ON o.order_id = oi.order_id
+            )
+            SELECT t2.name, SUM(t1.line_total) total_revenue, SUM(t1.quantity) total_quantity
+            FROM v3_order_details t1
+            LEFT OUTER JOIN v3_customer t2 ON t1.customer_id = t2.customer_id
+            WHERE  t2.name = 'Abcd'
             GROUP BY t2.name
             """,
         )
@@ -3583,3 +3617,138 @@ class TestMaterialization:
         assert "v3_order_details AS" in sql
         # Should NOT reference the materialized table
         assert "order_details_mat" not in sql
+
+
+# =============================================================================
+# Filter Tests
+# =============================================================================
+
+
+@pytest.mark.asyncio
+class TestFiltersV3:
+    """Tests for filter support in V3 SQL generation."""
+
+    async def test_simple_filter_on_local_column(self, client_with_build_v3):
+        """Test a simple filter on a local (fact) column."""
+        response = await client_with_build_v3.get(
+            "/sql/measures/v3/",
+            params={
+                "metrics": ["v3.total_revenue"],
+                "dimensions": ["v3.order_details.status"],
+                "filters": ["status = 'completed'"],
+            },
+        )
+
+        assert response.status_code == 200, response.json()
+        data = response.json()
+        sql = data["grain_groups"][0]["sql"]
+
+        # Should have WHERE clause with the filter
+        assert "WHERE" in sql
+        assert "status" in sql
+        assert "'completed'" in sql
+
+    async def test_filter_on_dimension_column(self, client_with_build_v3):
+        """Test a filter on a joined dimension column."""
+        response = await client_with_build_v3.get(
+            "/sql/measures/v3/",
+            params={
+                "metrics": ["v3.total_revenue"],
+                "dimensions": ["v3.product.category"],
+                "filters": ["v3.product.category = 'Electronics'"],
+            },
+        )
+
+        assert response.status_code == 200, response.json()
+        data = response.json()
+        sql = data["grain_groups"][0]["sql"]
+
+        # Should have WHERE clause referencing the dimension column
+        assert "WHERE" in sql
+        assert "category" in sql
+        assert "'Electronics'" in sql
+
+    async def test_multiple_filters_combined_with_and(self, client_with_build_v3):
+        """Test multiple filters are combined with AND."""
+        response = await client_with_build_v3.get(
+            "/sql/measures/v3/",
+            params={
+                "metrics": ["v3.total_revenue"],
+                "dimensions": ["v3.order_details.status", "v3.product.category"],
+                "filters": [
+                    "v3.order_details.status = 'completed'",
+                    "v3.product.category = 'Electronics'",
+                ],
+            },
+        )
+
+        assert response.status_code == 200, response.json()
+        data = response.json()
+        sql = data["grain_groups"][0]["sql"]
+
+        # Should have WHERE clause with both filters combined with AND
+        assert "WHERE" in sql
+        assert "AND" in sql
+        assert "'completed'" in sql
+        assert "'Electronics'" in sql
+
+    async def test_filter_in_metrics_sql(self, client_with_build_v3):
+        """Test that filters are applied in the metrics SQL endpoint."""
+        response = await client_with_build_v3.get(
+            "/sql/metrics/v3/",
+            params={
+                "metrics": ["v3.total_revenue"],
+                "dimensions": ["v3.product.category"],
+                "filters": ["v3.product.category = 'Electronics'"],
+            },
+        )
+
+        assert response.status_code == 200, response.json()
+        data = response.json()
+        sql = data["sql"]
+
+        # Should have WHERE clause in the final SQL
+        assert "WHERE" in sql
+        assert "category" in sql
+        assert "'Electronics'" in sql
+
+    async def test_filter_with_comparison_operators(self, client_with_build_v3):
+        """Test filters with various comparison operators."""
+        response = await client_with_build_v3.get(
+            "/sql/measures/v3/",
+            params={
+                "metrics": ["v3.total_revenue"],
+                "dimensions": ["v3.date.year[order]"],
+                "filters": ["v3.date.year[order] >= 2024"],
+            },
+        )
+
+        assert response.status_code == 200, response.json()
+        data = response.json()
+        sql = data["grain_groups"][0]["sql"]
+
+        # Should have filter with >= operator
+        assert "WHERE" in sql
+        assert ">=" in sql
+        assert "2024" in sql
+
+    async def test_filter_with_in_operator(self, client_with_build_v3):
+        """Test filter with IN operator."""
+        response = await client_with_build_v3.get(
+            "/sql/measures/v3/",
+            params={
+                "metrics": ["v3.total_revenue"],
+                "dimensions": ["v3.order_details.status"],
+                "filters": ["status IN ('completed', 'pending')"],
+            },
+        )
+
+        assert response.status_code == 200, response.json()
+        data = response.json()
+        sql = data["grain_groups"][0]["sql"]
+
+        # Should have filter with IN operator
+        assert "WHERE" in sql
+        assert "IN" in sql
+        assert "'completed'" in sql
+        assert "'pending'" in sql

@@ -46,6 +46,7 @@ from datajunction_server.construction.build_v3.helpers import (
     extract_join_columns_for_node,
     get_dimension_table_alias,
     make_column_ref,
+    parse_and_resolve_filters,
 )
 from datajunction_server.construction.build_v3.types import (
     BuildContext,
@@ -67,12 +68,71 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 
 
+def _add_table_prefixes_to_filter(
+    filter_ast: ast.Expression,
+    resolved_dimensions: list[ResolvedDimension],
+    main_alias: str,
+    dim_aliases: dict[tuple[str, Optional[str]], str],
+) -> None:
+    """
+    Add table prefixes to column references in a filter AST.
+
+    This mutates the filter_ast in place, adding the appropriate table alias
+    (main_alias or dim_alias) to each column reference based on which table
+    the column comes from.
+
+    Args:
+        filter_ast: The filter AST to mutate
+        resolved_dimensions: List of resolved dimensions with join info
+        main_alias: Alias for the main (fact) table
+        dim_aliases: Map from (dim_name, role) to table alias
+    """
+    # Build a map from column alias to table alias
+    col_to_table: dict[str, str] = {}
+
+    for resolved_dim in resolved_dimensions:
+        col_alias = resolved_dim.column_name
+        if resolved_dim.is_local:
+            col_to_table[col_alias] = main_alias
+        elif resolved_dim.join_path:
+            # Get the dimension's table alias
+            for link in resolved_dim.join_path.links:
+                dim_key = (link.dimension.name, resolved_dim.role)
+                if dim_key in dim_aliases:
+                    col_to_table[col_alias] = dim_aliases[dim_key]
+                    break
+
+    def add_prefixes(node: ast.Expression) -> None:
+        """Recursively add table prefixes to columns."""
+        if isinstance(node, ast.Column):
+            if node.name and not (node.name.namespace and node.name.namespace.name):
+                # Unqualified column - check if we know its table
+                col_name = node.name.name
+                if col_name in col_to_table:
+                    node.name = ast.Name(
+                        col_name,
+                        namespace=ast.Name(col_to_table[col_name]),
+                    )
+                else:
+                    # Default to main table for unknown columns (local fact columns)
+                    node.name = ast.Name(col_name, namespace=ast.Name(main_alias))
+
+        # Recursively process children
+        if hasattr(node, "children"):
+            for child in node.children:
+                if child and isinstance(child, ast.Expression):
+                    add_prefixes(child)
+
+    add_prefixes(filter_ast)
+
+
 def build_select_ast(
     ctx: BuildContext,
     metric_expressions: list[tuple[str, ast.Expression]],
     resolved_dimensions: list[ResolvedDimension],
     parent_node: Node,
     grain_columns: list[str] | None = None,
+    filters: list[str] | None = None,
 ) -> ast.Query:
     """
     Build a SELECT AST for measures SQL with JOIN support.
@@ -85,6 +145,9 @@ def build_select_ast(
         grain_columns: Optional list of columns required in GROUP BY for LIMITED
                        aggregability (e.g., ["customer_id"] for COUNT DISTINCT).
                        These are added to the output grain to enable re-aggregation.
+        filters: Optional list of filter strings to apply as WHERE clause.
+                 Filter strings can reference dimensions (e.g., "v3.product.category = 'Electronics'")
+                 or local columns (e.g., "status = 'active'").
 
     Returns:
         AST Query node
@@ -269,10 +332,59 @@ def build_select_ast(
 
     from_clause = ast.From(relations=[relation])
 
+    # Build WHERE clause from filters
+    where_clause: Optional[ast.Expression] = None
+    if filters:
+        # Build column alias mapping for filter resolution
+        # Maps dimension refs to their table-qualified column names
+        filter_column_aliases: dict[str, str] = {}
+
+        # Add dimension columns with their table aliases
+        for resolved_dim in resolved_dimensions:
+            table_alias = get_dimension_table_alias(
+                resolved_dim,
+                main_alias,
+                dim_aliases,
+            )
+            # Map the original ref (e.g., "v3.product.category") to "category"
+            # The table alias is handled by resolve_filter_references
+            col_alias = ctx.alias_registry.get_alias(resolved_dim.original_ref)
+            if col_alias:
+                filter_column_aliases[resolved_dim.original_ref] = col_alias
+            else:
+                filter_column_aliases[resolved_dim.original_ref] = (
+                    resolved_dim.column_name
+                )
+
+        # Add local columns from the parent node (for simple column refs like "status")
+        if parent_node.current and parent_node.current.columns:
+            for col in parent_node.current.columns:
+                if col.name not in filter_column_aliases:
+                    filter_column_aliases[col.name] = col.name
+
+        # Parse and resolve filters
+        # Note: We don't pass a cte_alias because the column references are already
+        # qualified with their table aliases during dimension resolution
+        where_clause = parse_and_resolve_filters(
+            filters,
+            filter_column_aliases,
+            cte_alias=None,  # Don't add table prefix - we'll handle it per column
+        )
+
+        # Now resolve table prefixes for filter columns based on where they come from
+        if where_clause:
+            _add_table_prefixes_to_filter(
+                where_clause,
+                resolved_dimensions,
+                main_alias,
+                dim_aliases,
+            )
+
     # Build SELECT
     select = ast.Select(
         projection=projection,
         from_=from_clause,
+        where=where_clause,
         group_by=group_by if group_by else [],
     )
 
@@ -534,6 +646,7 @@ def build_grain_group_sql(
         resolved_dimensions=resolved_dimensions,
         parent_node=parent_node,
         grain_columns=effective_grain_columns,
+        filters=ctx.filters,
     )
 
     # Build column metadata
@@ -1262,10 +1375,22 @@ def generate_metrics_sql(
             [make_column_ref(dim_col, cte_aliases[0]) for dim_col in dim_col_aliases],
         )
 
+    # Build WHERE clause from filters
+    # For metrics SQL, filters reference dimension columns which are now in the CTEs
+    where_clause: Optional[ast.Expression] = None
+    if ctx.filters:
+        # Resolve filters using dimension aliases
+        where_clause = parse_and_resolve_filters(
+            ctx.filters,
+            dimension_aliases,
+            cte_alias=cte_aliases[0],  # Reference the first CTE for dimensions
+        )
+
     # Build the final SELECT
     select_ast = ast.Select(
         projection=projection,
         from_=from_clause,
+        where=where_clause,
         group_by=group_by,
     )
 
