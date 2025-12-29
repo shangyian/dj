@@ -1011,10 +1011,13 @@ function NodeList({ nodes, showUpdatedAt }) {
               </a>
               <span
                 className={`node_type__${node.type?.toLowerCase()} badge node_type`}
+                style={{ fontSize: '8px', height: '22px' }}
               >
                 {node.type}
               </span>
-              <NodeStatus node={node} revalidate={false} />
+              <span style={{ transform: 'scale(0.8)', transformOrigin: 'left center' }}>
+                <NodeStatus node={node} revalidate={false} />
+              </span>
             </div>
             <div style={{ fontSize: '12px', color: '#888' }}>
               {node.name}
