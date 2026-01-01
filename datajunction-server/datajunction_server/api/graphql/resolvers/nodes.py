@@ -2,19 +2,22 @@
 Node resolvers
 """
 
+from collections import OrderedDict
 from typing import Any, List, Optional
 
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import defer, joinedload, selectinload
 from strawberry.types import Info
 
-from datajunction_server.api.graphql.scalars.node import NodeName
-from datajunction_server.api.graphql.utils import extract_fields
+from datajunction_server.errors import DJNodeNotFound
+from datajunction_server.api.graphql.scalars.node import NodeName, NodeSortField
+from datajunction_server.api.graphql.scalars.sql import CubeDefinition
+from datajunction_server.api.graphql.utils import dedupe_append, extract_fields
 from datajunction_server.database.dimensionlink import DimensionLink
 from datajunction_server.database.node import Column, ColumnAttribute
 from datajunction_server.database.node import Node as DBNode
 from datajunction_server.database.node import NodeRevision as DBNodeRevision
-from datajunction_server.models.node import NodeType
+from datajunction_server.models.node import NodeMode, NodeStatus, NodeType
 
 
 async def find_nodes_by(
@@ -28,6 +31,16 @@ async def find_nodes_by(
     limit: Optional[int] = 100,
     before: Optional[str] = None,
     after: Optional[str] = None,
+    order_by: NodeSortField = NodeSortField.CREATED_AT,
+    ascending: bool = False,
+    mode: Optional[NodeMode] = None,
+    owned_by: Optional[str] = None,
+    missing_description: bool = False,
+    missing_owner: bool = False,
+    dimensions: Optional[List[str]] = None,
+    statuses: Optional[List[NodeStatus]] = None,
+    has_materialization: bool = False,
+    orphaned_dimension: bool = False,
 ) -> List[DBNode]:
     """
     Finds nodes based on the search parameters. This function also tries to optimize
@@ -53,7 +66,17 @@ async def find_nodes_by(
         limit,
         before,
         after,
+        order_by=order_by.column,
+        ascending=ascending,
         options=options,
+        mode=mode,
+        owned_by=owned_by,
+        missing_description=missing_description,
+        missing_owner=missing_owner,
+        statuses=statuses,
+        has_materialization=has_materialization,
+        orphaned_dimension=orphaned_dimension,
+        dimensions=dimensions,
     )
 
 
@@ -97,7 +120,9 @@ def load_node_options(fields):
         node_revision_options = load_node_revision_options(fields["current"])
         options.append(joinedload(DBNode.current).options(*node_revision_options))
     if "created_by" in fields:
-        options.append(joinedload(DBNode.created_by))
+        options.append(selectinload(DBNode.created_by))
+    if "owners" in fields:
+        options.append(selectinload(DBNode.owners))
     if "edited_by" in fields:
         options.append(selectinload(DBNode.history))
     if "tags" in fields:
@@ -155,9 +180,50 @@ def load_node_revision_options(node_revision_fields):
     if "cube_elements" in node_revision_fields or is_cube_request:
         options.append(
             selectinload(DBNodeRevision.cube_elements)
-            .selectinload(Column.node_revisions)
+            .selectinload(Column.node_revision)
             .options(
                 selectinload(DBNodeRevision.node),
             ),
         )
     return options
+
+
+async def resolve_metrics_and_dimensions(
+    session: AsyncSession,
+    cube_def: CubeDefinition,
+) -> tuple[list[str], list[str]]:
+    """
+    Resolves the metrics and dimensions for a given cube definition.
+    If a cube is specified, it retrieves the metrics and dimensions from the cube node.
+    If no cube is specified, it uses the metrics and dimensions provided in the cube definition.
+    """
+    metrics = cube_def.metrics or []
+    dimensions = cube_def.dimensions or []
+
+    if cube_def.cube:
+        cube_node = await DBNode.get_cube_by_name(session, cube_def.cube)
+        if not cube_node:
+            raise DJNodeNotFound(f"Cube '{cube_def.cube}' not found.")
+        metrics = dedupe_append(cube_node.current.cube_node_metrics, metrics)
+        dimensions = dedupe_append(cube_node.current.cube_node_dimensions, dimensions)
+
+    metrics = list(OrderedDict.fromkeys(metrics))
+    return metrics, dimensions
+
+
+async def get_metrics(
+    session: AsyncSession,
+    metrics: list[str],
+):
+    return await DBNode.get_by_names(
+        session,
+        metrics,
+        options=[
+            joinedload(DBNode.current).options(
+                selectinload(DBNodeRevision.columns),
+                joinedload(DBNodeRevision.catalog),
+                selectinload(DBNodeRevision.parents),
+            ),
+        ],
+        include_inactive=False,
+    )

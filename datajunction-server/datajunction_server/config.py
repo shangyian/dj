@@ -5,22 +5,74 @@ Configuration for the datajunction server.
 import urllib.parse
 from datetime import timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from cachelib.base import BaseCache
 from cachelib.file import FileSystemCache
 from cachelib.redis import RedisCache
 from celery import Celery
-from pydantic import BaseSettings
+from pydantic import BaseModel, Field
+from pydantic_settings import BaseSettings
 
 if TYPE_CHECKING:
     pass
+
+
+class DatabaseConfig(BaseModel):
+    """
+    Metadata database configuration.
+    """
+
+    uri: str
+    pool_size: int = 20
+    max_overflow: int = 100
+    pool_timeout: int = 10
+    pool_recycle: int = 300
+    connect_timeout: int = 5
+    pool_pre_ping: bool = True
+    echo: bool = False
+    keepalives: int = 1
+    keepalives_idle: int = 30
+    keepalives_interval: int = 10
+    keepalives_count: int = 5
+
+
+class QueryClientConfig(BaseModel):
+    """
+    Configuration for query service clients.
+    """
+
+    # Type of query client: 'http', 'snowflake', 'bigquery', 'databricks', 'trino', etc.
+    type: str = "http"
+
+    # Connection parameters (varies by client type)
+    connection: Dict[str, Any] = Field(default_factory=dict)
+
+    # Number of retries for failed requests (mainly for HTTP client)
+    retries: int = 0
+
+
+class SeedSetup(BaseModel):
+    # A "default" catalog for nodes that are pure SQL and don't belong in any
+    # particular catalog. This typically applies to on-the-fly user-defined dimensions.
+    virtual_catalog_name: str = "default"
+
+    # A "DJ System" catalog that contains all system tables modeled in DJ
+    system_catalog_name: str = "dj_metadata"
+
+    # The engine for DJ's postgres metadata db
+    system_engine_name: str = "dj_system"
+
+    # The namespace for system tables modeled in DJ
+    system_namespace: str = "system.dj"
 
 
 class Settings(BaseSettings):  # pragma: no cover
     """
     DataJunction configuration.
     """
+
+    model_config = {"env_nested_delimiter": "__"}  # Enables nesting like WRITER_DB__URI
 
     name: str = "DJ server"
     description: str = "A DataJunction metrics layer"
@@ -29,8 +81,14 @@ class Settings(BaseSettings):  # pragma: no cover
     # A list of hostnames that are allowed to make cross-site HTTP requests
     cors_origin_whitelist: List[str] = ["http://localhost:3000"]
 
-    # SQLAlchemy URI for the metadata database.
-    index: str = "postgresql+psycopg://dj:dj@postgres_metadata:5432/dj"
+    # Config for the metadata database, with support for writer and reader clusters
+    # `writer_db` is the primary database used for write operations
+    # [optional] `reader_db` is used for read operations and defaults to `writer_db`
+    # if no dedicated read replica is configured.
+    writer_db: DatabaseConfig = DatabaseConfig(
+        uri="postgresql+psycopg://dj:dj@postgres_metadata:5432/dj",
+    )
+    reader_db: DatabaseConfig = writer_db
 
     # Directory where the repository lives. This should have 2 subdirectories, "nodes" and
     # "databases".
@@ -50,8 +108,12 @@ class Settings(BaseSettings):  # pragma: no cover
     # How long to wait when pinging databases to find out the fastest online database.
     do_ping_timeout: timedelta = timedelta(seconds=5)
 
-    # Query service
+    # Query service url (only used with "http" query client config)
+    # TODO: once the `QueryClientConfig` is proven out, this can be removed.
     query_service: Optional[str] = None
+
+    # Query client configuration
+    query_client: QueryClientConfig = Field(default_factory=QueryClientConfig)
 
     # The namespace where source nodes for registered tables should exist
     source_node_namespace: Optional[str] = "source"
@@ -87,25 +149,26 @@ class Settings(BaseSettings):  # pragma: no cover
     # Google OAuth application client secret file
     google_oauth_client_secret_file: Optional[str] = None
 
+    # Interval in seconds for which to expire service account tokens
+    service_account_token_expire: int = 3600 * 24 * 30
+
+    # Group membership provider
+    # Options: "postgres" (uses group_members table), "static" (no membership),
+    # or a custom implementation of the GroupMembershipProvider interface
+    group_membership_provider: str = "postgres"
+
     # Interval in seconds with which to expire caching of any indexes
-    index_cache_expire = 60
+    index_cache_expire: int = 60
 
-    default_catalog_id: int = 0
-
-    # SQLAlchemy engine config
-    db_pool_size = 20
-    db_max_overflow = 20
-    db_pool_timeout = 10
-    db_connect_timeout = 5
-    db_pool_pre_ping = True
-    db_echo = False
-    db_keepalives = 1
-    db_keepalives_idle = 30
-    db_keepalives_interval = 10
-    db_keepalives_count = 5
+    # Cache expiration for SQL endpoints
+    query_cache_timeout: int = 86400 * 300
 
     # Maximum amount of nodes to return for requests to list all nodes
-    node_list_max = 10000
+    node_list_max: int = 10000
+
+    # DAG traversal configuration
+    fanout_threshold: int = 50
+    max_concurrency: int = 20
 
     @property
     def celery(self) -> Celery:
@@ -129,3 +192,13 @@ class Settings(BaseSettings):  # pragma: no cover
             password=parsed.password,
             db=parsed.path.strip("/"),
         )
+
+    seed_setup: SeedSetup = SeedSetup()
+
+    @property
+    def effective_reader_concurrency(self) -> int:
+        return max(1, self.reader_db.pool_size // 2)
+
+    @property
+    def effective_writer_concurrency(self) -> int:
+        return max(1, self.writer_db.pool_size // 2)

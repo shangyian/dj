@@ -45,7 +45,7 @@ type Column {
   name: String!
   displayName: String
   type: String!
-  attributes: [Attribute!]
+  attributes: [Attribute!]!
   dimension: NodeName
   partition: Partition
 }
@@ -58,7 +58,8 @@ type ColumnMetadata {
 }
 
 input CubeDefinition {
-  metrics: [String!]!
+  cube: String = null
+  metrics: [String!] = null
   dimensions: [String!] = null
   filters: [String!] = null
   orderby: [String!] = null
@@ -74,15 +75,22 @@ type DJError {
 scalar DateTime
 
 type DecomposedMetric {
-  components: [MetricComponent!]!
-  derivedQuery: String!
   derivedExpression: String!
+  components: [MetricComponent!]!
+  combiner: String!
+  derivedQuery: String
 }
 
 enum Dialect {
   SPARK
   TRINO
   DRUID
+  POSTGRES
+  CLICKHOUSE
+  DUCKDB
+  REDSHIFT
+  SNOWFLAKE
+  SQLITE
 }
 
 type DialectInfo {
@@ -155,6 +163,11 @@ enum ErrorCode {
   INVALID_PARENT
   INVALID_DIMENSION
   INVALID_METRIC
+  INVALID_DIMENSION_LINK
+  INVALID_CUBE
+  TAG_NOT_FOUND
+  CATALOG_NOT_FOUND
+  INVALID_NAMESPACE
 }
 
 type GeneratedSQL {
@@ -195,10 +208,23 @@ type MaterializationConfig {
   strategy: String
 }
 
+type MaterializationPlan {
+  units: [MaterializationUnit!]!
+}
+
+type MaterializationUnit {
+  upstream: VersionedRef!
+  grainDimensions: [VersionedRef!]!
+  measures: [MetricComponent!]!
+  filterRefs: [VersionedRef!]!
+  filters: [String!]!
+}
+
 type MetricComponent {
   name: String!
   expression: String!
   aggregation: String
+  merge: String
   rule: AggregationRule!
 }
 
@@ -229,6 +255,7 @@ type Node {
   revisions: [NodeRevision!]!
   tags: [TagBase!]!
   createdBy: User!
+  owners: [User!]!
   editedBy: [String!]!
 }
 
@@ -250,6 +277,11 @@ type NodeName {
   name: String!
 }
 
+type NodeNameVersion {
+  name: String!
+  currentVersion: String!
+}
+
 type NodeRevision {
   id: Union!
   type: NodeType!
@@ -260,21 +292,32 @@ type NodeRevision {
   mode: NodeMode
   description: String!
   updatedAt: DateTime!
+  customMetadata: JSON
   query: String
-  columns: [Column!]!
-  dimensionLinks: [DimensionLink!]!
-  parents: [NodeName!]!
+  parents: [NodeNameVersion!]!
   availability: AvailabilityState
   materializations: [MaterializationConfig!]
   schema_: String
   table: String
   requiredDimensions: [Column!]
   catalog: Catalog
+  columns(attributes: [String!] = null): [Column!]!
+  dimensionLinks: [DimensionLink!]!
   primaryKey: [String!]!
   metricMetadata: MetricMetadata
   extractedMeasures: DecomposedMetric
   cubeMetrics: [NodeRevision!]!
   cubeDimensions: [DimensionAttribute!]!
+}
+
+enum NodeSortField {
+  NAME
+  DISPLAY_NAME
+  TYPE
+  STATUS
+  MODE
+  CREATED_AT
+  UPDATED_AT
 }
 
 enum NodeStatus {
@@ -359,8 +402,42 @@ type Query {
     """Filter to nodes tagged with these tags"""
     tags: [String!] = null
 
+    """
+    Filter to nodes that have ALL of these dimensions. Accepts dimension node names or dimension attributes
+    """
+    dimensions: [String!] = null
+
+    """Filter to nodes edited by this user"""
+    editedBy: String = null
+
+    """Filter to nodes in this namespace"""
+    namespace: String = null
+
+    """Filter to nodes with this mode (published or draft)"""
+    mode: NodeMode = null
+
+    """Filter to nodes owned by this user"""
+    ownedBy: String = null
+
+    """Filter to nodes missing descriptions (for data quality checks)"""
+    missingDescription: Boolean! = false
+
+    """Filter to nodes without any owners (for data quality checks)"""
+    missingOwner: Boolean! = false
+
+    """Filter to nodes with these statuses (e.g., VALID, INVALID)"""
+    statuses: [NodeStatus!] = null
+
+    """Filter to nodes that have materializations configured"""
+    hasMaterialization: Boolean! = false
+
+    """Filter to dimension nodes that are not linked to by any other node"""
+    orphanedDimension: Boolean! = false
+
     """Limit nodes"""
     limit: Int = 1000
+    orderBy: NodeSortField! = CREATED_AT
+    ascending: Boolean! = false
   ): [Node!]!
 
   """Find nodes based on the search parameters with pagination"""
@@ -377,16 +454,44 @@ type Query {
     """Filter to nodes tagged with these tags"""
     tags: [String!] = null
 
+    """
+    Filter to nodes that have ALL of these dimensions. Accepts dimension node names or dimension attributes
+    """
+    dimensions: [String!] = null
+
     """Filter to nodes edited by this user"""
     editedBy: String = null
 
     """Filter to nodes in this namespace"""
     namespace: String = null
+
+    """Filter to nodes with this mode (published or draft)"""
+    mode: NodeMode = null
+
+    """Filter to nodes owned by this user"""
+    ownedBy: String = null
+
+    """Filter to nodes missing descriptions (for data quality checks)"""
+    missingDescription: Boolean! = false
+
+    """Filter to nodes without any owners (for data quality checks)"""
+    missingOwner: Boolean! = false
+
+    """Filter to nodes with these statuses (e.g., VALID, INVALID)"""
+    statuses: [NodeStatus!] = null
+
+    """Filter to nodes that have materializations configured"""
+    hasMaterialization: Boolean! = false
+
+    """Filter to dimension nodes that are not linked to by any other node"""
+    orphanedDimension: Boolean! = false
     after: String = null
     before: String = null
 
     """Limit nodes"""
     limit: Int = 100
+    orderBy: NodeSortField! = CREATED_AT
+    ascending: Boolean! = false
   ): NodeConnection!
 
   """Get common dimensions for one or more nodes"""
@@ -394,6 +499,30 @@ type Query {
     """A list of nodes to find common dimensions for"""
     nodes: [String!] = null
   ): [DimensionAttribute!]!
+
+  """Find downstream nodes (optionally, of a given type) from a given node."""
+  downstreamNodes(
+    """The node names to find downstream nodes for."""
+    nodeNames: [String!]!
+
+    """The node type to filter the downstream nodes on."""
+    nodeType: NodeType = null
+
+    """Whether to include deactivated nodes in the result."""
+    includeDeactivated: Boolean! = false
+  ): [Node!]!
+
+  """Find upstream nodes (optionally, of a given type) from a given node."""
+  upstreamNodes(
+    """The node names to find upstream nodes for."""
+    nodeNames: [String!]!
+
+    """The node type to filter the upstream nodes on."""
+    nodeType: NodeType = null
+
+    """Whether to include deactivated nodes in the result."""
+    includeDeactivated: Boolean! = false
+  ): [Node!]!
 
   """Get measures SQL for a list of metrics, dimensions, and filters."""
   measuresSql(
@@ -412,7 +541,15 @@ type Query {
     Whether to pre-aggregate to the requested dimensions so that subsequent queries are more efficient.
     """
     preaggregate: Boolean! = false
+
+    """Query parameters to include in the SQL"""
+    queryParameters: JSON = null
   ): [GeneratedSQL!]!
+
+  """
+  Get materialization plan for a list of metrics, dimensions, and filters.
+  """
+  materializationPlan(cube: CubeDefinition!): MaterializationPlan!
 
   """Find DJ node tags based on the search parameters."""
   listTags(tagNames: [String!] = null, tagTypes: [String!] = null): [Tag!]!
@@ -474,4 +611,9 @@ type User {
   name: String
   oauthProvider: OAuthProvider!
   isAdmin: Boolean!
+}
+
+type VersionedRef {
+  name: String!
+  version: String!
 }

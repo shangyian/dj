@@ -25,6 +25,9 @@ async def test_find_by_node_type(
                 name
             }
             currentVersion
+            current {
+                customMetadata
+            }
         }
     }
     """
@@ -34,22 +37,25 @@ async def test_find_by_node_type(
     data = response.json()
     assert data["data"]["findNodes"] == [
         {
-            "currentVersion": "v1.0",
+            "currentVersion": "v1.4",
             "name": "default.repair_orders_fact",
             "tags": [],
             "type": "TRANSFORM",
+            "current": {"customMetadata": {"foo": "bar"}},
         },
         {
             "currentVersion": "v1.0",
             "name": "default.national_level_agg",
             "tags": [],
             "type": "TRANSFORM",
+            "current": {"customMetadata": None},
         },
         {
             "currentVersion": "v1.0",
             "name": "default.regional_level_agg",
             "tags": [],
             "type": "TRANSFORM",
+            "current": {"customMetadata": None},
         },
     ]
 
@@ -131,9 +137,12 @@ async def test_find_by_node_type_paginated(
             name
             type
             tags {
-                name
+              name
             }
             currentVersion
+            owners {
+              username
+            }
           }
         }
         pageInfo {
@@ -153,10 +162,11 @@ async def test_find_by_node_type_paginated(
         "edges": [
             {
                 "node": {
-                    "currentVersion": "v1.0",
+                    "currentVersion": "v1.4",
                     "name": "default.repair_orders_fact",
                     "tags": [],
                     "type": "TRANSFORM",
+                    "owners": [{"username": "dj"}],
                 },
             },
             {
@@ -165,6 +175,7 @@ async def test_find_by_node_type_paginated(
                     "name": "default.national_level_agg",
                     "tags": [],
                     "type": "TRANSFORM",
+                    "owners": [{"username": "dj"}],
                 },
             },
         ],
@@ -256,7 +267,7 @@ async def test_find_by_node_type_paginated(
             {
                 "node": {
                     "currentVersion": "v1.0",
-                    "name": "default.repair_orders_fact",
+                    "name": "default.regional_level_agg",
                     "tags": [],
                     "type": "TRANSFORM",
                 },
@@ -498,7 +509,7 @@ async def test_find_by_names(
                     },
                 ],
             },
-            "currentVersion": "v1.0",
+            "currentVersion": "v1.2",
             "name": "default.repair_orders",
             "type": "SOURCE",
         },
@@ -611,6 +622,7 @@ async def test_find_transform(
             current {
                 parents {
                     name
+                    currentVersion
                 }
                 materializations {
                     name
@@ -655,9 +667,11 @@ async def test_find_transform(
                 "parents": [
                     {
                         "name": "default.repair_orders",
+                        "currentVersion": "v1.2",
                     },
                     {
                         "name": "default.repair_order_details",
+                        "currentVersion": "v1.2",
                     },
                 ],
                 "extractedMeasures": None,
@@ -745,7 +759,7 @@ async def test_find_metric(
                         {
                             "aggregation": "SUM",
                             "expression": "completed_repairs",
-                            "name": "completed_repairs_sum_81105666",
+                            "name": "completed_repairs_sum_8b112bf1",
                             "rule": {
                                 "type": "FULL",
                             },
@@ -753,7 +767,7 @@ async def test_find_metric(
                         {
                             "aggregation": "SUM",
                             "expression": "total_repairs_dispatched",
-                            "name": "total_repairs_dispatched_sum_01dc2341",
+                            "name": "total_repairs_dispatched_sum_601dc4f1",
                             "rule": {
                                 "type": "FULL",
                             },
@@ -761,7 +775,7 @@ async def test_find_metric(
                         {
                             "aggregation": "SUM",
                             "expression": "total_amount_in_region",
-                            "name": "total_amount_in_region_sum_1c94ab45",
+                            "name": "total_amount_in_region_sum_3426ede4",
                             "rule": {
                                 "type": "FULL",
                             },
@@ -769,23 +783,23 @@ async def test_find_metric(
                         {
                             "aggregation": "SUM",
                             "expression": "na.total_amount_nationwide",
-                            "name": "na_DOT_total_amount_nationwide_sum_fed946fe",
+                            "name": "na_DOT_total_amount_nationwide_sum_4ecb2318",
                             "rule": {
                                 "type": "FULL",
                             },
                         },
                     ],
-                    "derivedQuery": "SELECT  (SUM(completed_repairs_sum_81105666) * 1.0 / "
-                    "SUM(total_repairs_dispatched_sum_01dc2341)) * "
-                    "(SUM(total_amount_in_region_sum_1c94ab45) * 1.0 / "
-                    "SUM(na_DOT_total_amount_nationwide_sum_fed946fe)) * 100 \n"
+                    "derivedQuery": "SELECT  (SUM(completed_repairs_sum_8b112bf1) * 1.0 / "
+                    "SUM(total_repairs_dispatched_sum_601dc4f1)) * "
+                    "(SUM(total_amount_in_region_sum_3426ede4) * 1.0 / "
+                    "SUM(na_DOT_total_amount_nationwide_sum_4ecb2318)) * 100 \n"
                     " FROM default.regional_level_agg CROSS JOIN "
                     "default.national_level_agg na\n"
                     "\n",
-                    "derivedExpression": "(SUM(completed_repairs_sum_81105666) * 1.0 / "
-                    "SUM(total_repairs_dispatched_sum_01dc2341)) * "
-                    "(SUM(total_amount_in_region_sum_1c94ab45) * 1.0 / "
-                    "SUM(na_DOT_total_amount_nationwide_sum_fed946fe)) * 100",
+                    "derivedExpression": "(SUM(completed_repairs_sum_8b112bf1) * 1.0 / "
+                    "SUM(total_repairs_dispatched_sum_601dc4f1)) * "
+                    "(SUM(total_amount_in_region_sum_3426ede4) * 1.0 / "
+                    "SUM(na_DOT_total_amount_nationwide_sum_4ecb2318)) * 100",
                 },
             },
             "name": "default.regional_repair_efficiency",
@@ -940,43 +954,74 @@ async def test_find_node_with_revisions(
                 "name": "default.repair_orders_fact",
                 "type": "TRANSFORM",
                 "revisions": [
+                    {"displayName": "Repair Orders Fact", "dimensionLinks": []},
                     {
                         "displayName": "Repair Orders Fact",
                         "dimensionLinks": [
                             {
-                                "dimension": {
-                                    "name": "default.dispatcher",
-                                },
-                                "joinSql": "default.repair_orders_fact.dispatcher_id = "
-                                "default.dispatcher.dispatcher_id",
+                                "dimension": {"name": "default.municipality_dim"},
+                                "joinSql": "default.repair_orders_fact.municipality_id = default.municipality_dim.municipality_id",
+                            },
+                        ],
+                    },
+                    {
+                        "displayName": "Repair Orders Fact",
+                        "dimensionLinks": [
+                            {
+                                "dimension": {"name": "default.municipality_dim"},
+                                "joinSql": "default.repair_orders_fact.municipality_id = default.municipality_dim.municipality_id",
                             },
                             {
-                                "dimension": {
-                                    "name": "default.hard_hat",
-                                },
-                                "joinSql": "default.repair_orders_fact.hard_hat_id = "
-                                "default.hard_hat.hard_hat_id",
+                                "dimension": {"name": "default.hard_hat"},
+                                "joinSql": "default.repair_orders_fact.hard_hat_id = default.hard_hat.hard_hat_id",
+                            },
+                        ],
+                    },
+                    {
+                        "displayName": "Repair Orders Fact",
+                        "dimensionLinks": [
+                            {
+                                "dimension": {"name": "default.municipality_dim"},
+                                "joinSql": "default.repair_orders_fact.municipality_id = default.municipality_dim.municipality_id",
+                            },
+                            {
+                                "dimension": {"name": "default.hard_hat"},
+                                "joinSql": "default.repair_orders_fact.hard_hat_id = default.hard_hat.hard_hat_id",
+                            },
+                            {
+                                "dimension": {"name": "default.hard_hat_to_delete"},
+                                "joinSql": "default.repair_orders_fact.hard_hat_id = default.hard_hat_to_delete.hard_hat_id",
+                            },
+                        ],
+                    },
+                    {
+                        "displayName": "Repair Orders Fact",
+                        "dimensionLinks": [
+                            {
+                                "dimension": {"name": "default.municipality_dim"},
+                                "joinSql": "default.repair_orders_fact.municipality_id = default.municipality_dim.municipality_id",
+                            },
+                            {
+                                "dimension": {"name": "default.hard_hat"},
+                                "joinSql": "default.repair_orders_fact.hard_hat_id = default.hard_hat.hard_hat_id",
                             },
                             {
                                 "dimension": {"name": "default.hard_hat_to_delete"},
                                 "joinSql": "default.repair_orders_fact.hard_hat_id = default.hard_hat_to_delete.hard_hat_id",
                             },
                             {
-                                "dimension": {
-                                    "name": "default.municipality_dim",
-                                },
-                                "joinSql": "default.repair_orders_fact.municipality_id = "
-                                "default.municipality_dim.municipality_id",
+                                "dimension": {"name": "default.dispatcher"},
+                                "joinSql": "default.repair_orders_fact.dispatcher_id = default.dispatcher.dispatcher_id",
                             },
                         ],
                     },
                 ],
-                "currentVersion": "v1.0",
+                "currentVersion": "v1.4",
                 "createdBy": {
-                    "email": None,
+                    "email": "dj@datajunction.io",
                     "id": 1,
                     "isAdmin": False,
-                    "name": None,
+                    "name": "DJ",
                     "oauthProvider": "BASIC",
                     "username": "dj",
                 },
@@ -987,17 +1032,14 @@ async def test_find_node_with_revisions(
                 "name": "default.national_level_agg",
                 "type": "TRANSFORM",
                 "revisions": [
-                    {
-                        "displayName": "National Level Agg",
-                        "dimensionLinks": [],
-                    },
+                    {"displayName": "National Level Agg", "dimensionLinks": []},
                 ],
                 "currentVersion": "v1.0",
                 "createdBy": {
-                    "email": None,
+                    "email": "dj@datajunction.io",
                     "id": 1,
                     "isAdmin": False,
-                    "name": None,
+                    "name": "DJ",
                     "oauthProvider": "BASIC",
                     "username": "dj",
                 },
@@ -1008,17 +1050,14 @@ async def test_find_node_with_revisions(
                 "name": "default.regional_level_agg",
                 "type": "TRANSFORM",
                 "revisions": [
-                    {
-                        "displayName": "Regional Level Agg",
-                        "dimensionLinks": [],
-                    },
+                    {"displayName": "Regional Level Agg", "dimensionLinks": []},
                 ],
                 "currentVersion": "v1.0",
                 "createdBy": {
-                    "email": None,
+                    "email": "dj@datajunction.io",
                     "id": 1,
                     "isAdmin": False,
-                    "name": None,
+                    "name": "DJ",
                     "oauthProvider": "BASIC",
                     "username": "dj",
                 },
@@ -1095,3 +1134,1059 @@ async def test_find_nodes_paginated_empty_list(
             "hasPrevPage": False,
         },
     }
+
+
+@pytest.mark.asyncio
+async def test_find_by_with_filtering_on_columns(
+    module__client_with_roads: AsyncClient,
+) -> None:
+    """
+    Test that filter on columns works correctly
+    """
+    query = """
+    {
+        findNodes(names: ["default.regional_level_agg", "default.repair_orders"]) {
+            name
+            type
+            current {
+                columns(attributes: ["primary_key"]) {
+                    name
+                    type
+                }
+            }
+            currentVersion
+        }
+    }
+    """
+
+    response = await module__client_with_roads.post("/graphql", json={"query": query})
+    assert response.status_code == 200
+    data = response.json()
+    assert data["data"]["findNodes"] == [
+        {
+            "current": {
+                "columns": [
+                    {
+                        "name": "us_region_id",
+                        "type": "int",
+                    },
+                    {
+                        "name": "state_name",
+                        "type": "string",
+                    },
+                    {
+                        "name": "order_year",
+                        "type": "int",
+                    },
+                    {
+                        "name": "order_month",
+                        "type": "int",
+                    },
+                    {
+                        "name": "order_day",
+                        "type": "int",
+                    },
+                ],
+            },
+            "currentVersion": "v1.0",
+            "name": "default.regional_level_agg",
+            "type": "TRANSFORM",
+        },
+        {
+            "current": {
+                "columns": [],
+            },
+            "currentVersion": "v1.2",
+            "name": "default.repair_orders",
+            "type": "SOURCE",
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_find_by_with_ordering(
+    module__client_with_roads: AsyncClient,
+) -> None:
+    """
+    Test finding nodes with ordering
+    """
+    query = """
+    {
+        findNodes(fragment: "default.", orderBy: NAME, ascending: true) {
+            name
+        }
+    }
+    """
+
+    response = await module__client_with_roads.post("/graphql", json={"query": query})
+    assert response.status_code == 200
+    data = response.json()
+    assert [node["name"] for node in data["data"]["findNodes"]][:6] == [
+        "default.avg_length_of_employment",
+        "default.avg_repair_order_discounts",
+        "default.avg_repair_price",
+        "default.avg_time_to_dispatch",
+        "default.contractor",
+        "default.contractors",
+    ]
+
+    query = """
+    {
+        findNodes(fragment: "default.", orderBy: UPDATED_AT, ascending: true) {
+            name
+        }
+    }
+    """
+
+    response = await module__client_with_roads.post("/graphql", json={"query": query})
+    assert response.status_code == 200
+    data = response.json()
+    assert [node["name"] for node in data["data"]["findNodes"]][:6] == [
+        "default.repair_orders_view",
+        "default.municipality_municipality_type",
+        "default.municipality_type",
+        "default.municipality",
+        "default.dispatchers",
+        "default.hard_hats",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_find_nodes_with_mode(
+    module__client_with_roads: AsyncClient,
+) -> None:
+    """
+    Test finding nodes returns mode field
+    """
+    query = """
+    {
+        findNodes(names: ["default.repair_orders_fact"]) {
+            name
+            current {
+                mode
+            }
+        }
+    }
+    """
+
+    response = await module__client_with_roads.post("/graphql", json={"query": query})
+    assert response.status_code == 200
+    data = response.json()
+    assert data["data"]["findNodes"] == [
+        {
+            "name": "default.repair_orders_fact",
+            "current": {
+                "mode": "PUBLISHED",
+            },
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_find_nodes_paginated_filter_by_mode(
+    module__client_with_roads: AsyncClient,
+) -> None:
+    """
+    Test filtering nodes by mode (published vs draft)
+    """
+    # First, create a draft node
+    response = await module__client_with_roads.post(
+        "/nodes/transform/",
+        json={
+            "name": "default.draft_test_node",
+            "description": "A draft test node",
+            "query": "SELECT 1 as id",
+            "mode": "draft",
+        },
+    )
+    assert response.status_code == 201
+
+    # Query for published nodes only (should not include the draft node)
+    query = """
+    {
+        findNodesPaginated(mode: PUBLISHED, namespace: "default", limit: 100) {
+            edges {
+                node {
+                    name
+                    current {
+                        mode
+                    }
+                }
+            }
+        }
+    }
+    """
+
+    response = await module__client_with_roads.post("/graphql", json={"query": query})
+    assert response.status_code == 200
+    data = response.json()
+
+    # All returned nodes should be published
+    for edge in data["data"]["findNodesPaginated"]["edges"]:
+        assert edge["node"]["current"]["mode"] == "PUBLISHED"
+
+    # Draft node should not be in the results
+    node_names = [
+        edge["node"]["name"] for edge in data["data"]["findNodesPaginated"]["edges"]
+    ]
+    assert "default.draft_test_node" not in node_names
+
+    # Query for draft nodes only
+    query = """
+    {
+        findNodesPaginated(mode: DRAFT, namespace: "default", limit: 100) {
+            edges {
+                node {
+                    name
+                    current {
+                        mode
+                    }
+                }
+            }
+        }
+    }
+    """
+
+    response = await module__client_with_roads.post("/graphql", json={"query": query})
+    assert response.status_code == 200
+    data = response.json()
+
+    # All returned nodes should be draft
+    for edge in data["data"]["findNodesPaginated"]["edges"]:
+        assert edge["node"]["current"]["mode"] == "DRAFT"
+
+    # Draft node should be in the results
+    node_names = [
+        edge["node"]["name"] for edge in data["data"]["findNodesPaginated"]["edges"]
+    ]
+    assert "default.draft_test_node" in node_names
+
+    # Query without mode filter should return both
+    query = """
+    {
+        findNodesPaginated(namespace: "default", limit: 100) {
+            edges {
+                node {
+                    name
+                    current {
+                        mode
+                    }
+                }
+            }
+        }
+    }
+    """
+
+    response = await module__client_with_roads.post("/graphql", json={"query": query})
+    assert response.status_code == 200
+    data = response.json()
+
+    node_names = [
+        edge["node"]["name"] for edge in data["data"]["findNodesPaginated"]["edges"]
+    ]
+    assert "default.draft_test_node" in node_names
+
+
+@pytest.mark.asyncio
+async def test_approx_count_distinct_metric_decomposition(
+    module__client_with_roads: AsyncClient,
+) -> None:
+    """
+    Test that APPROX_COUNT_DISTINCT metrics decompose into HLL sketch components.
+
+    This verifies that:
+    1. The metric decomposes to a single HLL component
+    2. The aggregation is hll_sketch_agg (Spark's function for building sketch)
+    3. The merge is hll_union (Spark's function for combining sketches)
+    4. The derived query uses hll_sketch_estimate(hll_union(...)) as the combiner
+
+    Translation to other dialects (Druid, Trino) happens in the transpilation layer.
+    """
+    query = """
+    {
+        findNodes(names: ["default.num_unique_hard_hats_approx"]) {
+            name
+            type
+            current {
+                query
+                extractedMeasures {
+                    components {
+                        name
+                        expression
+                        aggregation
+                        merge
+                        rule {
+                            type
+                        }
+                    }
+                    combiner
+                    derivedQuery
+                    derivedExpression
+                }
+            }
+        }
+    }
+    """
+
+    response = await module__client_with_roads.post("/graphql", json={"query": query})
+    assert response.status_code == 200
+    data = response.json()
+
+    assert len(data["data"]["findNodes"]) == 1
+    node = data["data"]["findNodes"][0]
+    assert node["name"] == "default.num_unique_hard_hats_approx"
+    assert node["type"] == "METRIC"
+
+    extracted = node["current"]["extractedMeasures"]
+    assert extracted is not None
+
+    # Should have exactly one HLL component
+    components = extracted["components"]
+    assert len(components) == 1
+
+    hll_component = components[0]
+    assert hll_component["expression"] == "hard_hat_id"
+    assert hll_component["aggregation"] == "hll_sketch_agg"  # Spark's HLL accumulate
+    assert hll_component["merge"] == "hll_union"  # Spark's HLL merge
+    assert hll_component["rule"]["type"] == "FULL"
+
+    # The combiner should use Spark HLL functions
+    assert "hll_sketch_estimate" in extracted["combiner"]
+    assert "hll_union" in extracted["combiner"]
+    assert "hll_sketch_estimate" in extracted["derivedExpression"]
+
+    # The derived query should contain Spark HLL functions
+    assert "hll_sketch_estimate" in extracted["derivedQuery"]
+    assert "hll_union" in extracted["derivedQuery"]
+
+
+@pytest.mark.asyncio
+async def test_find_nodes_with_dimensions_filter(
+    module__client_with_roads: AsyncClient,
+) -> None:
+    """
+    Test finding nodes with the dimensions filter.
+    This filters to nodes that have ALL of the specified dimensions.
+    """
+    # Find nodes that have the hard_hat dimension
+    query = """
+    {
+        findNodes(dimensions: ["default.hard_hat"]) {
+            name
+            type
+        }
+    }
+    """
+    response = await module__client_with_roads.post("/graphql", json={"query": query})
+    assert response.status_code == 200
+    data = response.json()
+    node_names = {node["name"] for node in data["data"]["findNodes"]}
+
+    # These nodes should have the hard_hat dimension
+    expected_nodes = {
+        "default.repair_orders",
+        "default.repair_order_details",
+        "default.repair_order",
+        "default.num_repair_orders",
+        "default.num_unique_hard_hats_approx",
+        "default.avg_repair_price",
+        "default.repair_orders_fact",
+        "default.total_repair_cost",
+        "default.discounted_orders_rate",
+        "default.total_repair_order_discounts",
+        "default.avg_repair_order_discounts",
+        "default.avg_time_to_dispatch",
+    }
+    assert node_names == expected_nodes
+
+
+@pytest.mark.asyncio
+async def test_find_nodes_with_dimensions_filter_combined_with_type(
+    module__client_with_roads: AsyncClient,
+) -> None:
+    """
+    Test finding nodes with dimensions filter combined with node type filter.
+    """
+    # Find only METRIC nodes that have the hard_hat dimension
+    query = """
+    {
+        findNodes(dimensions: ["default.hard_hat"], nodeTypes: [METRIC]) {
+            name
+            type
+        }
+    }
+    """
+    response = await module__client_with_roads.post("/graphql", json={"query": query})
+    assert response.status_code == 200
+    data = response.json()
+    node_names = {node["name"] for node in data["data"]["findNodes"]}
+
+    # All returned nodes should be METRICs with the hard_hat dimension
+    for node in data["data"]["findNodes"]:
+        assert node["type"] == "METRIC"
+
+    # These are the metrics with the hard_hat dimension
+    expected_metrics = {
+        "default.num_repair_orders",
+        "default.num_unique_hard_hats_approx",
+        "default.avg_repair_price",
+        "default.total_repair_cost",
+        "default.discounted_orders_rate",
+        "default.total_repair_order_discounts",
+        "default.avg_repair_order_discounts",
+        "default.avg_time_to_dispatch",
+    }
+    assert node_names == expected_metrics
+
+
+@pytest.mark.asyncio
+async def test_find_nodes_with_nonexistent_dimension(
+    module__client_with_roads: AsyncClient,
+) -> None:
+    """
+    Test that finding nodes with a nonexistent dimension returns empty list.
+    """
+    query = """
+    {
+        findNodes(dimensions: ["default.nonexistent_dimension"]) {
+            name
+        }
+    }
+    """
+    response = await module__client_with_roads.post("/graphql", json={"query": query})
+    assert response.status_code == 200
+    data = response.json()
+    assert data["data"]["findNodes"] == []
+
+
+@pytest.mark.asyncio
+async def test_find_nodes_with_dimension_attribute(
+    module__client_with_roads: AsyncClient,
+) -> None:
+    """
+    Test finding nodes with a dimension attribute (e.g., default.hard_hat.city).
+    This should work the same as filtering by the dimension node.
+    """
+    # Find nodes using dimension attribute (includes column name)
+    query_with_attr = """
+    {
+        findNodes(dimensions: ["default.hard_hat.hard_hat_id"]) {
+            name
+        }
+    }
+    """
+    response_attr = await module__client_with_roads.post(
+        "/graphql",
+        json={"query": query_with_attr},
+    )
+    assert response_attr.status_code == 200
+    data_attr = response_attr.json()
+    nodes_from_attr = {node["name"] for node in data_attr["data"]["findNodes"]}
+
+    # Find nodes using dimension node name
+    query_with_node = """
+    {
+        findNodes(dimensions: ["default.hard_hat"]) {
+            name
+        }
+    }
+    """
+    response_node = await module__client_with_roads.post(
+        "/graphql",
+        json={"query": query_with_node},
+    )
+    assert response_node.status_code == 200
+    data_node = response_node.json()
+    nodes_from_node = {node["name"] for node in data_node["data"]["findNodes"]}
+
+    # Both should return the same set of nodes
+    assert nodes_from_attr == nodes_from_node
+    assert len(nodes_from_attr) > 0  # Ensure we got some results
+
+
+@pytest.mark.asyncio
+async def test_find_nodes_with_mixed_dimension_formats(
+    module__client_with_roads: AsyncClient,
+) -> None:
+    """
+    Test finding nodes with a mix of dimension node names and dimension attributes.
+    """
+    # Mix a dimension node name and a dimension attribute
+    query = """
+    {
+        findNodes(dimensions: ["default.hard_hat", "default.dispatcher.dispatcher_id"]) {
+            name
+            type
+        }
+    }
+    """
+    response = await module__client_with_roads.post("/graphql", json={"query": query})
+    assert response.status_code == 200
+    data = response.json()
+    node_names = {node["name"] for node in data["data"]["findNodes"]}
+
+    # Should find nodes that have BOTH hard_hat AND dispatcher dimensions
+    # This should include repair_orders_fact and related nodes
+    assert len(node_names) > 0
+    # All results should have both dimensions available
+    assert "default.repair_orders_fact" in node_names
+
+
+@pytest.mark.asyncio
+async def test_find_nodes_filter_by_owner(
+    module__client_with_roads: AsyncClient,
+) -> None:
+    """
+    Test filtering nodes by owner (ownedBy).
+    """
+    # Query for nodes owned by the 'dj' user
+    query = """
+    {
+        findNodes(ownedBy: "dj") {
+            name
+            owners {
+                username
+            }
+        }
+    }
+    """
+    response = await module__client_with_roads.post("/graphql", json={"query": query})
+    assert response.status_code == 200
+    data = response.json()
+
+    # All returned nodes should have 'dj' as an owner
+    for node in data["data"]["findNodes"]:
+        owner_usernames = [owner["username"] for owner in node["owners"]]
+        assert "dj" in owner_usernames
+
+    # Verify we got some results
+    assert len(data["data"]["findNodes"]) > 0
+
+
+@pytest.mark.asyncio
+async def test_find_nodes_paginated_filter_by_owner(
+    module__client_with_roads: AsyncClient,
+) -> None:
+    """
+    Test filtering nodes by owner (ownedBy) using paginated endpoint.
+    """
+    query = """
+    {
+        findNodesPaginated(ownedBy: "dj", limit: 10) {
+            edges {
+                node {
+                    name
+                    owners {
+                        username
+                    }
+                }
+            }
+        }
+    }
+    """
+    response = await module__client_with_roads.post("/graphql", json={"query": query})
+    assert response.status_code == 200
+    data = response.json()
+
+    # All returned nodes should have 'dj' as an owner
+    for edge in data["data"]["findNodesPaginated"]["edges"]:
+        owner_usernames = [owner["username"] for owner in edge["node"]["owners"]]
+        assert "dj" in owner_usernames
+
+
+@pytest.mark.asyncio
+async def test_find_nodes_filter_by_status_valid(
+    module__client_with_roads: AsyncClient,
+) -> None:
+    """
+    Test filtering nodes by status (VALID).
+    """
+    query = """
+    {
+        findNodes(statuses: [VALID]) {
+            name
+            current {
+                status
+            }
+        }
+    }
+    """
+    response = await module__client_with_roads.post("/graphql", json={"query": query})
+    assert response.status_code == 200
+    data = response.json()
+
+    # All returned nodes should have VALID status
+    for node in data["data"]["findNodes"]:
+        assert node["current"]["status"] == "VALID"
+
+    # Verify we got some results
+    assert len(data["data"]["findNodes"]) > 0
+
+
+@pytest.mark.asyncio
+async def test_find_nodes_filter_by_status_invalid(
+    module__client_with_roads: AsyncClient,
+) -> None:
+    """
+    Test filtering nodes by status (INVALID).
+    First create an invalid node, then filter for it.
+    """
+    # Create a node that references a non-existent parent (will be invalid)
+    response = await module__client_with_roads.post(
+        "/nodes/transform/",
+        json={
+            "name": "default.invalid_test_node",
+            "description": "An invalid test node",
+            "query": "SELECT * FROM default.nonexistent_table",
+            "mode": "published",
+        },
+    )
+    # This should fail or create an invalid node
+
+    query = """
+    {
+        findNodes(statuses: [INVALID]) {
+            name
+            current {
+                status
+            }
+        }
+    }
+    """
+    response = await module__client_with_roads.post("/graphql", json={"query": query})
+    assert response.status_code == 200
+    data = response.json()
+
+    # All returned nodes should have INVALID status
+    for node in data["data"]["findNodes"]:
+        assert node["current"]["status"] == "INVALID"
+
+
+@pytest.mark.asyncio
+async def test_find_nodes_paginated_filter_by_status(
+    module__client_with_roads: AsyncClient,
+) -> None:
+    """
+    Test filtering nodes by status using paginated endpoint.
+    """
+    query = """
+    {
+        findNodesPaginated(statuses: [VALID], limit: 10) {
+            edges {
+                node {
+                    name
+                    current {
+                        status
+                    }
+                }
+            }
+        }
+    }
+    """
+    response = await module__client_with_roads.post("/graphql", json={"query": query})
+    assert response.status_code == 200
+    data = response.json()
+
+    # All returned nodes should have VALID status
+    for edge in data["data"]["findNodesPaginated"]["edges"]:
+        assert edge["node"]["current"]["status"] == "VALID"
+
+
+@pytest.mark.asyncio
+async def test_find_nodes_filter_missing_description(
+    module__client_with_roads: AsyncClient,
+) -> None:
+    """
+    Test filtering nodes that are missing descriptions.
+    """
+    # First create a node without a description
+    response = await module__client_with_roads.post(
+        "/nodes/transform/",
+        json={
+            "name": "default.no_description_node",
+            "description": "",  # Empty description
+            "query": "SELECT 1 as id",
+            "mode": "published",
+        },
+    )
+
+    query = """
+    {
+        findNodes(missingDescription: true) {
+            name
+            current {
+                description
+            }
+        }
+    }
+    """
+    response = await module__client_with_roads.post("/graphql", json={"query": query})
+    assert response.status_code == 200
+    data = response.json()
+
+    # All returned nodes should have empty or null descriptions
+    for node in data["data"]["findNodes"]:
+        desc = node["current"]["description"]
+        assert desc is None or desc == ""
+
+
+@pytest.mark.asyncio
+async def test_find_nodes_paginated_filter_missing_description(
+    module__client_with_roads: AsyncClient,
+) -> None:
+    """
+    Test filtering nodes that are missing descriptions using paginated endpoint.
+    """
+    query = """
+    {
+        findNodesPaginated(missingDescription: true, limit: 10) {
+            edges {
+                node {
+                    name
+                    current {
+                        description
+                    }
+                }
+            }
+        }
+    }
+    """
+    response = await module__client_with_roads.post("/graphql", json={"query": query})
+    assert response.status_code == 200
+    data = response.json()
+
+    # All returned nodes should have empty or null descriptions
+    for edge in data["data"]["findNodesPaginated"]["edges"]:
+        desc = edge["node"]["current"]["description"]
+        assert desc is None or desc == ""
+
+
+@pytest.mark.asyncio
+async def test_find_nodes_filter_missing_owner(
+    module__client_with_roads: AsyncClient,
+) -> None:
+    """
+    Test filtering nodes that are missing owners.
+    """
+    query = """
+    {
+        findNodes(missingOwner: true) {
+            name
+            owners {
+                username
+            }
+        }
+    }
+    """
+    response = await module__client_with_roads.post("/graphql", json={"query": query})
+    assert response.status_code == 200
+    data = response.json()
+
+    # All returned nodes should have no owners
+    for node in data["data"]["findNodes"]:
+        assert node["owners"] == [] or node["owners"] is None
+
+
+@pytest.mark.asyncio
+async def test_find_nodes_paginated_filter_missing_owner(
+    module__client_with_roads: AsyncClient,
+) -> None:
+    """
+    Test filtering nodes that are missing owners using paginated endpoint.
+    """
+    query = """
+    {
+        findNodesPaginated(missingOwner: true, limit: 10) {
+            edges {
+                node {
+                    name
+                    owners {
+                        username
+                    }
+                }
+            }
+        }
+    }
+    """
+    response = await module__client_with_roads.post("/graphql", json={"query": query})
+    assert response.status_code == 200
+    data = response.json()
+
+    # All returned nodes should have no owners
+    for edge in data["data"]["findNodesPaginated"]["edges"]:
+        owners = edge["node"]["owners"]
+        assert owners == [] or owners is None
+
+
+@pytest.mark.asyncio
+async def test_find_nodes_filter_orphaned_dimension(
+    module__client_with_roads: AsyncClient,
+) -> None:
+    """
+    Test filtering for orphaned dimension nodes (dimensions not linked to by any other node).
+    """
+    # First, create an orphaned dimension (a dimension that no other node links to)
+    response = await module__client_with_roads.post(
+        "/nodes/dimension/",
+        json={
+            "name": "default.orphaned_dimension_test",
+            "description": "An orphaned dimension for testing",
+            "query": "SELECT 1 as orphan_id, 'test' as orphan_name",
+            "primary_key": ["orphan_id"],
+            "mode": "published",
+        },
+    )
+
+    query = """
+    {
+        findNodes(orphanedDimension: true) {
+            name
+            type
+        }
+    }
+    """
+    response = await module__client_with_roads.post("/graphql", json={"query": query})
+    assert response.status_code == 200
+    data = response.json()
+
+    # All returned nodes should be dimensions
+    for node in data["data"]["findNodes"]:
+        assert node["type"] == "DIMENSION"
+
+    # The orphaned dimension we created should be in the results
+    node_names = {node["name"] for node in data["data"]["findNodes"]}
+    assert "default.orphaned_dimension_test" in node_names
+
+
+@pytest.mark.asyncio
+async def test_find_nodes_paginated_filter_orphaned_dimension(
+    module__client_with_roads: AsyncClient,
+) -> None:
+    """
+    Test filtering for orphaned dimension nodes using paginated endpoint.
+    """
+    query = """
+    {
+        findNodesPaginated(orphanedDimension: true, limit: 10) {
+            edges {
+                node {
+                    name
+                    type
+                }
+            }
+        }
+    }
+    """
+    response = await module__client_with_roads.post("/graphql", json={"query": query})
+    assert response.status_code == 200
+    data = response.json()
+
+    # All returned nodes should be dimensions
+    for edge in data["data"]["findNodesPaginated"]["edges"]:
+        assert edge["node"]["type"] == "DIMENSION"
+
+
+@pytest.mark.asyncio
+async def test_find_nodes_combined_filters(
+    module__client_with_roads: AsyncClient,
+) -> None:
+    """
+    Test combining multiple filters together.
+    """
+    # Combine ownedBy with status filter
+    query = """
+    {
+        findNodes(ownedBy: "dj", statuses: [VALID], nodeTypes: [METRIC]) {
+            name
+            type
+            owners {
+                username
+            }
+            current {
+                status
+            }
+        }
+    }
+    """
+    response = await module__client_with_roads.post("/graphql", json={"query": query})
+    assert response.status_code == 200
+    data = response.json()
+
+    # All returned nodes should match all filters
+    for node in data["data"]["findNodes"]:
+        assert node["type"] == "METRIC"
+        assert node["current"]["status"] == "VALID"
+        owner_usernames = [owner["username"] for owner in node["owners"]]
+        assert "dj" in owner_usernames
+
+
+@pytest.mark.asyncio
+async def test_find_nodes_paginated_combined_filters(
+    module__client_with_roads: AsyncClient,
+) -> None:
+    """
+    Test combining multiple filters together using paginated endpoint.
+    """
+    query = """
+    {
+        findNodesPaginated(ownedBy: "dj", statuses: [VALID], nodeTypes: [SOURCE], limit: 10) {
+            edges {
+                node {
+                    name
+                    type
+                    owners {
+                        username
+                    }
+                    current {
+                        status
+                    }
+                }
+            }
+        }
+    }
+    """
+    response = await module__client_with_roads.post("/graphql", json={"query": query})
+    assert response.status_code == 200
+    data = response.json()
+
+    # All returned nodes should match all filters
+    for edge in data["data"]["findNodesPaginated"]["edges"]:
+        node = edge["node"]
+        assert node["type"] == "SOURCE"
+        assert node["current"]["status"] == "VALID"
+        owner_usernames = [owner["username"] for owner in node["owners"]]
+        assert "dj" in owner_usernames
+
+
+@pytest.mark.asyncio
+async def test_find_nodes_filter_by_nonexistent_owner(
+    module__client_with_roads: AsyncClient,
+) -> None:
+    """
+    Test that filtering by a nonexistent owner returns empty results.
+    """
+    query = """
+    {
+        findNodes(ownedBy: "nonexistent_user_12345") {
+            name
+        }
+    }
+    """
+    response = await module__client_with_roads.post("/graphql", json={"query": query})
+    assert response.status_code == 200
+    data = response.json()
+    assert data["data"]["findNodes"] == []
+
+
+@pytest.mark.asyncio
+async def test_find_nodes_filter_multiple_statuses(
+    module__client_with_roads: AsyncClient,
+) -> None:
+    """
+    Test filtering nodes by multiple statuses.
+    """
+    query = """
+    {
+        findNodes(statuses: [VALID, INVALID]) {
+            name
+            current {
+                status
+            }
+        }
+    }
+    """
+    response = await module__client_with_roads.post("/graphql", json={"query": query})
+    assert response.status_code == 200
+    data = response.json()
+
+    # All returned nodes should have either VALID or INVALID status
+    for node in data["data"]["findNodes"]:
+        assert node["current"]["status"] in ["VALID", "INVALID"]
+
+    # Verify we got some results
+    assert len(data["data"]["findNodes"]) > 0
+
+
+@pytest.mark.asyncio
+async def test_find_nodes_paginated_filter_has_materialization(
+    module__client_with_roads: AsyncClient,
+) -> None:
+    """
+    Test filtering nodes that have materializations configured.
+    """
+    # First, set up a partition column on a node so we can create a materialization
+    await module__client_with_roads.post(
+        "/nodes/default.repair_orders_fact/columns/repair_order_id/partition",
+        json={"type_": "categorical"},
+    )
+
+    # Create a materialization on a node
+    response = await module__client_with_roads.post(
+        "/nodes/default.repair_orders_fact/materialization",
+        json={
+            "job": "spark_sql",
+            "strategy": "full",
+            "schedule": "@daily",
+            "config": {},
+        },
+    )
+    # Note: materialization creation may fail in test environment without query service,
+    # but the node should still be marked as having materialization configured
+
+    # Query for nodes with materializations
+    query = """
+    {
+        findNodesPaginated(hasMaterialization: true, limit: 10) {
+            edges {
+                node {
+                    name
+                    type
+                    current {
+                        materializations {
+                            name
+                        }
+                    }
+                }
+            }
+        }
+    }
+    """
+    response = await module__client_with_roads.post("/graphql", json={"query": query})
+    assert response.status_code == 200
+    data = response.json()
+
+    # If we got results, all returned nodes should have materializations
+    for edge in data["data"]["findNodesPaginated"]["edges"]:
+        node = edge["node"]
+        materializations = node["current"]["materializations"]
+        assert materializations is not None and len(materializations) > 0
+
+
+@pytest.mark.asyncio
+async def test_find_nodes_filter_has_materialization(
+    module__client_with_roads: AsyncClient,
+) -> None:
+    """
+    Test filtering nodes that have materializations using non-paginated endpoint.
+    """
+    query = """
+    {
+        findNodes(hasMaterialization: true) {
+            name
+            type
+            current {
+                materializations {
+                    name
+                }
+            }
+        }
+    }
+    """
+    response = await module__client_with_roads.post("/graphql", json={"query": query})
+    assert response.status_code == 200
+    data = response.json()
+
+    # If we got results, all returned nodes should have materializations
+    for node in data["data"]["findNodes"]:
+        materializations = node["current"]["materializations"]
+        assert materializations is not None and len(materializations) > 0

@@ -8,9 +8,10 @@ from pydantic import ValidationError
 from sqlalchemy.exc import InvalidRequestError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from datajunction_server.api.helpers import build_sql_for_multiple_metrics
+from datajunction_server.internal.sql import build_sql_for_multiple_metrics
 from datajunction_server.construction.build import get_default_criteria
-from datajunction_server.construction.build_v2 import QueryBuilder, get_measures_query
+from datajunction_server.construction.build_v2 import QueryBuilder
+from datajunction_server.internal.sql import get_measures_query
 from datajunction_server.database.materialization import Materialization
 from datajunction_server.database.node import NodeRevision
 from datajunction_server.database.user import User
@@ -40,7 +41,7 @@ from datajunction_server.sql.parsing import ast
 from datajunction_server.sql.parsing.ast import CompileContext
 from datajunction_server.sql.parsing.backends.antlr4 import parse
 from datajunction_server.sql.parsing.types import TimestampType
-from datajunction_server.utils import SEPARATOR
+from datajunction_server.utils import SEPARATOR, session_context
 
 MAX_COLUMN_NAME_LENGTH = 128
 _logger = logging.getLogger(__name__)
@@ -173,21 +174,23 @@ async def build_cube_materialization_config(
                     if col.semantic_type == SemanticType.DIMENSION
                 ],
                 measures=metrics_expressions,
-                spark=upsert_input.config.spark.__root__
-                if hasattr(upsert_input, "config") and upsert_input.config.spark
-                else {},
+                spark=(
+                    getattr(getattr(upsert_input.config, "spark", None), "root", {})
+                    if upsert_input.config
+                    else {}
+                ),
                 upstream_tables=measures_query.upstream_tables,
                 columns=measures_query.columns,
-                lookback_window=upsert_input.lookback_window
-                if hasattr(upsert_input, "lookback_window")
-                else "",
+                lookback_window=getattr(upsert_input, "lookback_window", None),
             )
         return generic_config
     except (KeyError, ValidationError, AttributeError) as exc:  # pragma: no cover
+        _logger.exception(exc)
         raise DJInvalidInputException(  # pragma: no cover
             message=(
                 "No change has been made to the materialization config for "
-                f"node `{current_revision.name}` and job `{upsert_input.job.name}` as"
+                f"node `{current_revision.name}` and job "
+                f"`{upsert_input.job.name}` as"  # type: ignore
                 " the config does not have valid configuration for "
                 f"engine `{upsert_input.job.name}`."
             ),
@@ -216,9 +219,9 @@ async def build_non_cube_materialization_config(
         query_builder.ignore_errors().with_build_criteria(build_criteria).build()
     )
     generic_config = GenericMaterializationConfig(
-        lookback_window=upsert.config.lookback_window,
+        lookback_window=getattr(upsert.config, "lookback_window", None),
         query=str(materialization_ast),
-        spark=upsert.config.spark if upsert.config.spark else {},
+        spark=getattr(upsert.config, "spark", None) if upsert.config else {},
         upstream_tables=[
             f"{current_revision.catalog.name}.{tbl.identifier()}"
             for tbl in materialization_ast.find_all(ast.Table)
@@ -234,7 +237,7 @@ async def build_non_cube_materialization_config(
 async def create_new_materialization(
     session: AsyncSession,
     current_revision: NodeRevision,
-    upsert: UpsertMaterialization | UpsertCubeMaterialization,
+    upsert: UpsertCubeMaterialization | UpsertMaterialization,
     validate_access: access.ValidateAccessFn,
     current_user: User,
 ) -> Materialization:
@@ -285,7 +288,7 @@ async def create_new_materialization(
                 current_user=current_user,
             )
     materialization_name = (
-        f"{upsert.job.name.lower()}__{upsert.strategy.name.lower()}"
+        f"{upsert.job.name.lower()}__{upsert.strategy.name.lower()}"  # type: ignore
         + (f"__{temporal_partition[0].name}" if temporal_partition else "")
         + ("__" if categorical_partitions else "")
         + ("__".join([partition.name for partition in categorical_partitions]))
@@ -293,7 +296,7 @@ async def create_new_materialization(
     return Materialization(
         name=materialization_name,
         node_revision=current_revision,
-        config=generic_config.dict(),  # type: ignore
+        config=generic_config.model_dump(),  # type: ignore
         schedule=upsert.schedule or "@daily",
         strategy=upsert.strategy,
         job=upsert.job.value.job_class,  # type: ignore
@@ -328,6 +331,25 @@ async def schedule_materialization_jobs(
                 request_headers=request_headers,
             )
     return materialization_to_output
+
+
+async def schedule_materialization_jobs_bg(
+    node_revision_id: int,
+    materialization_names: List[str],
+    query_service_client: QueryServiceClient,
+    request_headers: Optional[Dict[str, str]] = None,
+) -> None:
+    """
+    Schedule a materialization job in the background.
+    """
+    async with session_context() as session:
+        await schedule_materialization_jobs(
+            session=session,
+            node_revision_id=node_revision_id,
+            materialization_names=materialization_names,
+            query_service_client=query_service_client,
+            request_headers=request_headers,
+        )
 
 
 def _get_readable_name(expr):

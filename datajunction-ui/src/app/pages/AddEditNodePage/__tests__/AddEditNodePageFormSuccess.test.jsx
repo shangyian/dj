@@ -67,6 +67,7 @@ describe('AddEditNodePage submission succeeded', () => {
         undefined,
         undefined,
         undefined,
+        null,
       );
       expect(screen.getByText(/default.some_test_dim/)).toBeInTheDocument();
     });
@@ -103,6 +104,11 @@ describe('AddEditNodePage submission succeeded', () => {
       mocks.metricMetadata,
     );
 
+    mockDjClient.DataJunctionAPI.whoami.mockReturnValue({
+      id: 123,
+      username: 'test_user',
+    });
+
     const element = testElement(mockDjClient);
     const { container } = renderCreateMetric(element);
 
@@ -128,13 +134,14 @@ describe('AddEditNodePage submission succeeded', () => {
           'default.some_test_metric',
           'Some Test Metric',
           '',
-          'SELECT SUM(a) FROM default.repair_orders',
+          'SELECT SUM(a) \n FROM default.repair_orders',
           'published',
           'default',
           null,
           undefined,
           undefined,
           undefined,
+          null,
         );
         expect(
           screen.getByText(/default.some_test_metric/),
@@ -195,6 +202,8 @@ describe('AddEditNodePage submission succeeded', () => {
         '',
         '',
         undefined,
+        ['dj'],
+        null,
       );
       expect(mockDjClient.DataJunctionAPI.tagsNode).toBeCalledTimes(1);
       expect(mockDjClient.DataJunctionAPI.tagsNode).toBeCalledWith(
@@ -233,6 +242,11 @@ describe('AddEditNodePage submission succeeded', () => {
       { name: 'intent', display_name: 'Intent' },
     ]);
 
+    mockDjClient.DataJunctionAPI.whoami.mockReturnValue({
+      id: 123,
+      username: 'test_user',
+    });
+
     const element = testElement(mockDjClient);
     const { getByTestId } = renderEditNode(element);
 
@@ -250,13 +264,15 @@ describe('AddEditNodePage submission succeeded', () => {
         'default.num_repair_orders',
         'Default: Num Repair Orders!!!',
         'Number of repair orders!!!',
-        'SELECT count(repair_order_id) FROM default.repair_orders',
+        'SELECT count(repair_order_id) \n FROM default.repair_orders',
         'published',
         ['repair_order_id', 'country'],
         'neutral',
         'unitless',
         5,
         undefined,
+        ['dj'],
+        { key1: 'value1', key2: 'value2' },
       );
       expect(mockDjClient.DataJunctionAPI.tagsNode).toBeCalledTimes(1);
       expect(mockDjClient.DataJunctionAPI.tagsNode).toBeCalledWith(

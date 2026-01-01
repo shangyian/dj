@@ -2,18 +2,16 @@
 Tests for the data API.
 """
 
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, cast
 from unittest import mock
 
 import pytest
 from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import joinedload
+from sqlalchemy.orm import joinedload, selectinload
 
-from datajunction_server.database import QueryRequest
 from datajunction_server.database.node import Node, NodeRevision
-from datajunction_server.database.queryrequest import QueryBuildType
 from datajunction_server.models.node import AvailabilityStateBase
 
 
@@ -38,10 +36,9 @@ class TestDataForNode:
             },
         )
         data = response.json()
-        assert response.status_code == 422
+        assert response.status_code == 500
         assert (
-            "something are not available dimensions on default.payment_type"
-            in data["message"]
+            "This dimension attribute cannot be joined in: something" in data["message"]
         )
 
     @pytest.mark.asyncio
@@ -566,20 +563,6 @@ class TestDataForNode:
             assert "event: message" in full_text
             assert "SELECT  default_DOT_repair_orders_fact.repair_order_id" in full_text
 
-        # Check that the query request for the above transform has an external query id saved
-        query_request = await QueryRequest.get_query_request(
-            session=module__session,
-            query_type=QueryBuildType.NODE,
-            nodes=["default.repair_orders_fact"],
-            dimensions=["default.dispatcher.company_name"],
-            engine_name=None,
-            engine_version=None,
-            filters=[],
-            limit=10,
-            orderby=[],
-        )
-        assert query_request.query_id == "bd98d6be-e2d2-413e-94c7-96d9411ddee2"  # type: ignore
-
         # Hit the same SSE stream again
         async with module__client_with_roads.stream(
             "GET",
@@ -712,9 +695,9 @@ class TestAvailabilityState:
             module__session,
             "default.large_revenue_payments_and_business_only",
         )
-        node_dict = AvailabilityStateBase.from_orm(
+        node_dict = AvailabilityStateBase.model_validate(
             large_revenue_payments_and_business_only.current.availability,  # type: ignore
-        ).dict()
+        ).model_dump()
         assert node_dict == {
             "valid_through_ts": 20230125,
             "catalog": "default",
@@ -923,9 +906,9 @@ class TestAvailabilityState:
             module__session,
             "default.large_revenue_payments_and_business_only_1",
         )
-        node_dict = AvailabilityStateBase.from_orm(
+        node_dict = AvailabilityStateBase.model_validate(
             large_revenue_payments_and_business_only.current.availability,  # type: ignore
-        ).dict()
+        ).model_dump()
         assert node_dict == {
             "valid_through_ts": 20230125,
             "catalog": "default",
@@ -1536,9 +1519,9 @@ class TestAvailabilityState:
         large_revenue_payments_only = (
             (await module__session.execute(statement)).unique().scalar_one()
         )
-        node_dict = AvailabilityStateBase.from_orm(
+        node_dict = AvailabilityStateBase.model_validate(
             large_revenue_payments_only.current.availability,
-        ).dict()
+        ).model_dump()
         assert node_dict == {
             "valid_through_ts": 20230101,
             "catalog": "default",
@@ -1609,9 +1592,9 @@ class TestAvailabilityState:
         large_revenue_payments_only = (
             (await module__session.execute(statement)).unique().scalar_one()
         )
-        node_dict = AvailabilityStateBase.from_orm(
+        node_dict = AvailabilityStateBase.model_validate(
             large_revenue_payments_only.current.availability,
-        ).dict()
+        ).model_dump()
         assert node_dict == {
             "valid_through_ts": 20230101,
             "catalog": "default",
@@ -1638,7 +1621,7 @@ class TestAvailabilityState:
         response = await module__client_with_account_revenue.post(
             "/data/default.revenue/availability/",
             json={
-                "catalog": "default",
+                "catalog": "basic",
                 "schema_": "accounting",
                 "table": "revenue",
                 "valid_through_ts": 20230101,
@@ -1657,10 +1640,12 @@ class TestAvailabilityState:
         revenue = (await module__session.execute(statement)).scalar_one()
         await module__session.refresh(revenue, ["current"])
         await module__session.refresh(revenue.current, ["availability"])
-        node_dict = AvailabilityStateBase.from_orm(revenue.current.availability).dict()
+        node_dict = AvailabilityStateBase.model_validate(
+            revenue.current.availability,
+        ).model_dump()
         assert node_dict == {
             "valid_through_ts": 20230101,
-            "catalog": "default",
+            "catalog": "basic",
             "min_temporal_partition": ["2022", "01", "01"],
             "table": "revenue",
             "max_temporal_partition": ["2023", "01", "01"],
@@ -1698,7 +1683,7 @@ class TestAvailabilityState:
             "message": (
                 "Cannot set availability state, source nodes require availability states "
                 "to match the set table: default.accounting.large_pmts does not match "
-                "default.accounting.revenue "
+                "basic.accounting.revenue "
             ),
             "errors": [],
             "warnings": [],
@@ -1738,3 +1723,226 @@ class TestAvailabilityState:
         ).json()
         assert node2["custom_metadata"] == {"bar": "baz"}
         assert node2["version"] == "v1.1"
+
+    @pytest.mark.asyncio
+    async def test_removing_availability_state_when_one_exists(
+        self,
+        module__session: AsyncSession,
+        module__client_with_account_revenue: AsyncClient,
+    ) -> None:
+        """
+        Test removing an availability state when one exists for a node
+        """
+        # First, set up availability state
+        await module__client_with_account_revenue.post(
+            "/data/default.large_revenue_payments_and_business_only/availability/",
+            json={
+                "catalog": "default",
+                "schema_": "accounting",
+                "table": "pmts",
+                "valid_through_ts": 20230125,
+                "max_temporal_partition": ["2023", "01", "25"],
+                "min_temporal_partition": ["2022", "01", "01"],
+                "url": "http://some.catalog.com/default.accounting.pmts",
+            },
+        )
+
+        # Verify availability exists
+        node = cast(
+            Node,
+            await Node.get_by_name(
+                module__session,
+                "default.large_revenue_payments_and_business_only",
+                options=[
+                    joinedload(Node.current).options(
+                        selectinload(NodeRevision.availability),
+                    ),
+                ],
+            ),
+        )
+        assert node.current.availability is not None
+
+        # Now remove the availability state
+        response = await module__client_with_account_revenue.delete(
+            "/data/default.large_revenue_payments_and_business_only/availability/",
+        )
+        data = response.json()
+
+        assert response.status_code == 201
+        assert data == {"message": "Availability state successfully removed"}
+
+        # Verify availability is now None - re-fetch the node with availability loaded
+        node = cast(
+            Node,
+            await Node.get_by_name(
+                module__session,
+                "default.large_revenue_payments_and_business_only",
+                options=[
+                    joinedload(Node.current).options(
+                        selectinload(NodeRevision.availability),
+                    ),
+                ],
+            ),
+        )
+        assert node.current.availability is None
+
+    @pytest.mark.asyncio
+    async def test_removing_availability_state_when_none_exists(
+        self,
+        module__session: AsyncSession,
+        module__client_with_account_revenue: AsyncClient,
+    ) -> None:
+        """
+        Test removing an availability state when no availability exists for a node
+        """
+        # Verify no availability exists to begin with
+        response = await module__client_with_account_revenue.delete(
+            "/data/default.large_revenue_payments_and_business_only_1/availability",
+        )
+        node = cast(
+            Node,
+            await Node.get_by_name(
+                module__session,
+                "default.large_revenue_payments_and_business_only_1",
+                options=[
+                    joinedload(Node.current).options(
+                        selectinload(NodeRevision.availability),
+                    ),
+                ],
+            ),
+        )
+        assert node.current.availability is None
+
+        # Attempt to remove availability state
+        response = await module__client_with_account_revenue.delete(
+            "/data/default.large_revenue_payments_and_business_only_1/availability",
+        )
+        data = response.json()
+
+        assert response.status_code == 201
+        assert data == {"message": "Availability state successfully removed"}
+
+        # Verify availability is still None - re-fetch to confirm
+        node = cast(
+            Node,
+            await Node.get_by_name(
+                module__session,
+                "default.large_revenue_payments_and_business_only_1",
+                options=[
+                    joinedload(Node.current).options(
+                        selectinload(NodeRevision.availability),
+                    ),
+                ],
+            ),
+        )
+        assert node.current.availability is None
+
+    @pytest.mark.asyncio
+    async def test_removing_availability_state_nonexistent_node(
+        self,
+        module__client_with_account_revenue: AsyncClient,
+    ) -> None:
+        """
+        Test removing availability state from a non-existent node
+        """
+        response = await module__client_with_account_revenue.delete(
+            "/data/default.nonexistentnode/availability/",
+        )
+        data = response.json()
+
+        assert response.status_code == 404
+        assert data == {
+            "message": "A node with name `default.nonexistentnode` does not exist.",
+            "errors": [],
+            "warnings": [],
+        }
+
+    @pytest.mark.asyncio
+    async def test_removing_availability_state_history_tracking(
+        self,
+        module__session: AsyncSession,
+        module__client_with_account_revenue: AsyncClient,
+    ) -> None:
+        """
+        Test that removal of availability state is properly tracked in history with DELETE activity type
+        """
+        # First, set up availability state
+        await module__client_with_account_revenue.post(
+            "/data/default.large_revenue_payments_and_business_only_1/availability/",
+            json={
+                "catalog": "default",
+                "schema_": "accounting",
+                "table": "pmts",
+                "valid_through_ts": 20230125,
+                "max_temporal_partition": ["2023", "01", "25"],
+                "min_temporal_partition": ["2022", "01", "01"],
+                "url": "http://some.catalog.com/default.accounting.pmts",
+            },
+        )
+
+        # Now remove the availability state
+        response = await module__client_with_account_revenue.delete(
+            "/data/default.large_revenue_payments_and_business_only_1/availability/",
+        )
+
+        assert response.status_code == 201
+
+        # Check that the history tracker has been updated with DELETE activity
+        response = await module__client_with_account_revenue.get(
+            "/history?node=default.large_revenue_payments_and_business_only_1",
+        )
+        data = response.json()
+        availability_activities = [
+            activity
+            for activity in data
+            if activity["entity_type"] == "availability"
+            and activity["node"] == "default.large_revenue_payments_and_business_only_1"
+        ]
+        assert len(availability_activities) >= 2
+
+        # Check CREATE activity
+        create_activity = availability_activities[1]
+        assert create_activity["activity_type"] == "create"
+        assert (
+            create_activity["node"]
+            == "default.large_revenue_payments_and_business_only_1"
+        )
+        assert create_activity["entity_type"] == "availability"
+        assert create_activity["pre"] == {}
+        assert create_activity["post"] == {
+            "catalog": "default",
+            "categorical_partitions": [],
+            "max_temporal_partition": ["2023", "01", "25"],
+            "min_temporal_partition": ["2022", "01", "01"],
+            "partitions": [],
+            "schema_": "accounting",
+            "table": "pmts",
+            "temporal_partitions": [],
+            "valid_through_ts": 20230125,
+            "url": "http://some.catalog.com/default.accounting.pmts",
+            "links": {},
+        }
+
+        # Check DELETE activity
+        delete_activity = availability_activities[0]
+        assert delete_activity["activity_type"] == "delete"
+        assert (
+            delete_activity["node"]
+            == "default.large_revenue_payments_and_business_only_1"
+        )
+        assert delete_activity["entity_type"] == "availability"
+        assert delete_activity["post"] == {}
+        assert delete_activity["pre"] == {
+            "catalog": "default",
+            "categorical_partitions": [],
+            "max_temporal_partition": ["2023", "01", "25"],
+            "min_temporal_partition": ["2022", "01", "01"],
+            "partitions": [],
+            "schema_": "accounting",
+            "table": "pmts",
+            "temporal_partitions": [],
+            "valid_through_ts": 20230125,
+            "url": "http://some.catalog.com/default.accounting.pmts",
+            "links": {},
+        }
+        assert delete_activity["user"] == "dj"

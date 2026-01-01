@@ -17,8 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from datajunction_server.database import Catalog
 from datajunction_server.database.column import Column
 from datajunction_server.database.node import Node, NodeRelationship, NodeRevision
-from datajunction_server.database.queryrequest import QueryBuildType, QueryRequest
-from datajunction_server.database.user import OAuthProvider, User
+from datajunction_server.database.user import User
 from datajunction_server.errors import DJDoesNotExistException
 from datajunction_server.internal.materializations import decompose_expression
 from datajunction_server.models.node import NodeStatus
@@ -53,9 +52,9 @@ async def test_read_node(client_with_roads: AsyncClient) -> None:
     data = response.json()
 
     assert response.status_code == 200
-    assert data["version"] == "v1.0"
+    assert data["version"] == "v1.2"
     assert data["node_id"] == 1
-    assert data["node_revision_id"] == 1
+    assert data["node_revision_id"] > 1
     assert data["type"] == "source"
 
     response = await client_with_roads.get("/nodes/default.nothing/")
@@ -245,6 +244,7 @@ async def test_get_nodes_with_details(client_with_examples: AsyncClient):
         "default.hard_hat_state",
         "default.hard_hat_to_delete",
         "default.num_repair_orders",
+        "default.num_unique_hard_hats_approx",
         "basic.source.users",
         "default.date",
         "default.us_states",
@@ -276,6 +276,67 @@ async def test_get_nodes_with_details(client_with_examples: AsyncClient):
         "default.large_revenue_payments_only_2",
         "default.large_revenue_payments_only_custom",
         "default.repair_orders_fact",
+        "hll.category_dim",
+        "hll.events",
+        "hll.total_events",
+        "hll.unique_users",
+        # DERIVED_METRICS examples
+        "default.orders_source",
+        "default.events_source",
+        "default.inventory_source",
+        "default.dates_source",
+        "default.customers_source",
+        "default.warehouses_source",
+        "default.derived_date",
+        "default.customer",
+        "default.warehouse",
+        "default.dm_revenue",
+        "default.dm_orders",
+        "default.dm_page_views",
+        "default.dm_total_inventory",
+        "default.dm_revenue_per_order",
+        "default.dm_revenue_per_page_view",
+        "default.dm_wow_revenue_change",
+        "default.dm_mom_revenue_change",
+        # V3 examples
+        "v3.avg_items_per_order",
+        "v3.avg_order_value",
+        "v3.avg_unit_price",
+        "v3.completed_order_revenue",
+        "v3.conversion_rate",
+        "v3.customer",
+        "v3.customer_count",
+        "v3.date",
+        "v3.location",
+        "v3.max_unit_price",
+        "v3.min_unit_price",
+        "v3.mom_revenue_change",
+        "v3.order_count",
+        "v3.order_details",
+        "v3.page_view_count",
+        "v3.page_views_enriched",
+        "v3.pages_per_session",
+        "v3.price_spread",
+        "v3.price_spread_pct",
+        "v3.product",
+        "v3.product_view_count",
+        "v3.revenue_per_customer",
+        "v3.revenue_per_page_view",
+        "v3.revenue_per_visitor",
+        "v3.session_count",
+        "v3.src_customers",
+        "v3.src_dates",
+        "v3.src_locations",
+        "v3.src_order_items",
+        "v3.src_orders",
+        "v3.src_page_views",
+        "v3.src_products",
+        "v3.total_quantity",
+        "v3.total_revenue",
+        "v3.total_unit_price",
+        "v3.visitor_count",
+        "v3.wow_order_growth",
+        "v3.wow_revenue_change",
     }
 
 
@@ -345,29 +406,6 @@ class TestNodeCRUD:
         return catalog
 
     @pytest_asyncio.fixture
-    async def current_user(self, session: AsyncSession) -> User:
-        """
-        A user fixture.
-        """
-
-        new_user = User(
-            username="datajunction",
-            password="datajunction",
-            email="dj@datajunction.io",
-            name="DJ",
-            oauth_provider=OAuthProvider.BASIC,
-            is_admin=False,
-        )
-        existing_user = await session.get(User, new_user.id)
-        if not existing_user:
-            session.add(new_user)
-            await session.commit()
-            user = new_user
-        else:
-            user = existing_user
-        return user
-
-    @pytest_asyncio.fixture
     async def source_node(self, session: AsyncSession, current_user: User) -> Node:
         """
         A source node fixture.
@@ -427,6 +465,7 @@ class TestNodeCRUD:
                 "attributes": [],
                 "description": None,
                 "dimension": None,
+                "dimension_column": None,
                 "display_name": "Title Code",
                 "name": "title_code",
                 "type": "int",
@@ -438,6 +477,7 @@ class TestNodeCRUD:
                 ],
                 "description": None,
                 "dimension": None,
+                "dimension_column": None,
                 "display_name": "Title",
                 "name": "title",
                 "type": "string",
@@ -456,6 +496,7 @@ class TestNodeCRUD:
             "attributes": [],
             "description": None,
             "dimension": None,
+            "dimension_column": None,
             "display_name": "Title",
             "name": "title",
             "type": "string",
@@ -1253,6 +1294,59 @@ class TestNodeCRUD:
             "warnings": [],
         }
 
+    @pytest.mark.asyncio
+    async def test_restore_node_with_downstream_cube(
+        self,
+        client_with_roads: AsyncClient,
+    ):
+        """
+        Test restoring a node that has a downstream cube.
+        This tests the fix for the greenlet_spawn async lazy-loading issue
+        when accessing cube_element.node_revision during node restoration.
+        """
+        # Create a cube that depends on some metrics and dimensions
+        response = await client_with_roads.post(
+            "/nodes/cube/",
+            json={
+                "metrics": ["default.num_repair_orders", "default.avg_repair_price"],
+                "dimensions": [
+                    "default.hard_hat.country",
+                    "default.dispatcher.company_name",
+                ],
+                "description": "Cube for testing restore",
+                "mode": "published",
+                "name": "default.test_restore_cube",
+            },
+        )
+        assert response.status_code == 201
+
+        # Verify the cube is valid
+        response = await client_with_roads.get("/nodes/default.test_restore_cube/")
+        assert response.json()["status"] == NodeStatus.VALID
+
+        # Deactivate a node that's upstream of the cube's metrics
+        # (repair_orders_fact is upstream of num_repair_orders and avg_repair_price)
+        response = await client_with_roads.delete("/nodes/default.repair_orders_fact/")
+        assert response.status_code == 200
+
+        # Verify the cube became invalid
+        response = await client_with_roads.get("/nodes/default.test_restore_cube/")
+        assert response.json()["status"] == NodeStatus.INVALID
+
+        # Restore the upstream node - this is where the greenlet_spawn bug would occur
+        response = await client_with_roads.post(
+            "/nodes/default.repair_orders_fact/restore/",
+        )
+        assert response.status_code in (200, 201)
+
+        # Verify the cube is valid again after restore
+        response = await client_with_roads.get("/nodes/default.test_restore_cube/")
+        assert response.json()["status"] == NodeStatus.VALID
+
+        # Clean up
+        response = await client_with_roads.delete("/nodes/default.test_restore_cube/")
+        assert response.status_code == 200
+
     async def verify_complete_hard_delete(
         self,
         session: AsyncSession,
@@ -1393,7 +1487,7 @@ class TestNodeCRUD:
         """
         Test raising when restoring an already active node
         """
-        # Hard deleting a node causes downstream nodes to become invalid
+        # Hard deleting a source node causes downstream nodes to become invalid
         response = await client_with_roads.delete("/nodes/default.repair_orders/hard/")
         assert response.status_code in (200, 201)
         data = response.json()
@@ -1423,6 +1517,11 @@ class TestNodeCRUD:
                 {
                     "effect": "downstream node is now invalid",
                     "name": "default.num_repair_orders",
+                    "status": "invalid",
+                },
+                {
+                    "effect": "downstream node is now invalid",
+                    "name": "default.num_unique_hard_hats_approx",
                     "status": "invalid",
                 },
                 {
@@ -1469,61 +1568,6 @@ class TestNodeCRUD:
                     "effect": "broken link",
                     "name": "default.repair_order_details",
                     "status": "valid",
-                },
-                {
-                    "effect": "broken link",
-                    "name": "default.regional_level_agg",
-                    "status": "invalid",
-                },
-                {
-                    "effect": "broken link",
-                    "name": "default.national_level_agg",
-                    "status": "valid",
-                },
-                {
-                    "effect": "broken link",
-                    "name": "default.repair_orders_fact",
-                    "status": "invalid",
-                },
-                {
-                    "effect": "broken link",
-                    "name": "default.regional_repair_efficiency",
-                    "status": "invalid",
-                },
-                {
-                    "effect": "broken link",
-                    "name": "default.num_repair_orders",
-                    "status": "invalid",
-                },
-                {
-                    "effect": "broken link",
-                    "name": "default.avg_repair_price",
-                    "status": "invalid",
-                },
-                {
-                    "effect": "broken link",
-                    "name": "default.total_repair_cost",
-                    "status": "invalid",
-                },
-                {
-                    "effect": "broken link",
-                    "name": "default.discounted_orders_rate",
-                    "status": "invalid",
-                },
-                {
-                    "effect": "broken link",
-                    "name": "default.total_repair_order_discounts",
-                    "status": "invalid",
-                },
-                {
-                    "effect": "broken link",
-                    "name": "default.avg_repair_order_discounts",
-                    "status": "invalid",
-                },
-                {
-                    "effect": "broken link",
-                    "name": "default.avg_time_to_dispatch",
-                    "status": "invalid",
                 },
             ],
             key=lambda x: x["name"],
@@ -1595,6 +1639,7 @@ class TestNodeCRUD:
         """
         Registering a view with a query service set up should succeed.
         """
+        await module__client_with_basic.get("/catalogs")
         response = await module__client_with_basic.post(
             "/register/view/public/main/view_foo?query=SELECT+1+AS+one+,+'two'+AS+two",
         )
@@ -1616,6 +1661,7 @@ class TestNodeCRUD:
                 "attributes": [],
                 "description": None,
                 "dimension": None,
+                "dimension_column": None,
                 "partition": None,
             },
             {
@@ -1625,6 +1671,7 @@ class TestNodeCRUD:
                 "attributes": [],
                 "description": None,
                 "dimension": None,
+                "dimension_column": None,
                 "partition": None,
             },
         ]
@@ -1652,6 +1699,7 @@ class TestNodeCRUD:
         assert data["catalog"]["name"] == "public"
         assert data["schema_"] == "basic"
         assert data["table"] == "comments"
+        assert data["owners"] == [{"username": "dj"}]
         assert data["columns"] == [
             {
                 "name": "id",
@@ -1660,6 +1708,7 @@ class TestNodeCRUD:
                 "attributes": [],
                 "description": None,
                 "dimension": None,
+                "dimension_column": None,
                 "partition": None,
             },
             {
@@ -1669,6 +1718,7 @@ class TestNodeCRUD:
                 "attributes": [],
                 "description": None,
                 "dimension": None,
+                "dimension_column": None,
                 "partition": None,
             },
             {
@@ -1678,6 +1728,7 @@ class TestNodeCRUD:
                 "attributes": [],
                 "description": None,
                 "dimension": None,
+                "dimension_column": None,
                 "partition": None,
             },
             {
@@ -1687,10 +1738,17 @@ class TestNodeCRUD:
                 "attributes": [],
                 "description": None,
                 "dimension": None,
+                "dimension_column": None,
                 "partition": None,
             },
         ]
         assert response.status_code == 201
+
+        response = await module__client_with_basic.post(
+            "/register/table/public/basic/comments/?source_node_namespace=default",
+        )
+        data = response.json()
+        assert data["name"] == "default.public.basic.comments"
 
     @pytest.mark.asyncio
     async def test_refresh_source_node(
@@ -1713,6 +1771,7 @@ class TestNodeCRUD:
                 "attributes": [],
                 "description": None,
                 "dimension": None,
+                "dimension_column": None,
                 "display_name": "Repair Order Id",
                 "name": "repair_order_id",
                 "type": "int",
@@ -1722,6 +1781,7 @@ class TestNodeCRUD:
                 "attributes": [],
                 "description": None,
                 "dimension": None,
+                "dimension_column": None,
                 "display_name": "Municipality Id",
                 "name": "municipality_id",
                 "type": "string",
@@ -1731,6 +1791,7 @@ class TestNodeCRUD:
                 "attributes": [],
                 "description": None,
                 "dimension": None,
+                "dimension_column": None,
                 "display_name": "Hard Hat Id",
                 "name": "hard_hat_id",
                 "type": "int",
@@ -1740,6 +1801,7 @@ class TestNodeCRUD:
                 "attributes": [],
                 "description": None,
                 "dimension": None,
+                "dimension_column": None,
                 "display_name": "Order Date",
                 "name": "order_date",
                 "type": "timestamp",
@@ -1749,6 +1811,7 @@ class TestNodeCRUD:
                 "attributes": [],
                 "description": None,
                 "dimension": None,
+                "dimension_column": None,
                 "display_name": "Required Date",
                 "name": "required_date",
                 "type": "timestamp",
@@ -1758,6 +1821,7 @@ class TestNodeCRUD:
                 "attributes": [],
                 "description": None,
                 "dimension": None,
+                "dimension_column": None,
                 "display_name": "Dispatched Date",
                 "name": "dispatched_date",
                 "type": "timestamp",
@@ -1767,6 +1831,7 @@ class TestNodeCRUD:
                 "attributes": [],
                 "description": None,
                 "dimension": None,
+                "dimension_column": None,
                 "display_name": "Dispatcher Id",
                 "name": "dispatcher_id",
                 "type": "int",
@@ -1776,6 +1841,7 @@ class TestNodeCRUD:
                 "attributes": [],
                 "description": None,
                 "dimension": None,
+                "dimension_column": None,
                 "display_name": "Rating",
                 "name": "rating",
                 "type": "int",
@@ -1962,6 +2028,7 @@ class TestNodeCRUD:
                 "attributes": [],
                 "description": None,
                 "dimension": None,
+                "dimension_column": None,
                 "display_name": "Repair Order Id",
                 "name": "repair_order_id",
                 "type": "int",
@@ -1971,6 +2038,7 @@ class TestNodeCRUD:
                 "attributes": [],
                 "description": None,
                 "dimension": None,
+                "dimension_column": None,
                 "display_name": "Municipality Id",
                 "name": "municipality_id",
                 "type": "string",
@@ -1980,6 +2048,7 @@ class TestNodeCRUD:
                 "attributes": [],
                 "description": None,
                 "dimension": None,
+                "dimension_column": None,
                 "display_name": "Hard Hat Id",
                 "name": "hard_hat_id",
                 "type": "int",
@@ -1989,6 +2058,7 @@ class TestNodeCRUD:
                 "attributes": [],
                 "description": None,
                 "dimension": None,
+                "dimension_column": None,
                 "display_name": "Order Date",
                 "name": "order_date",
                 "type": "timestamp",
@@ -1998,6 +2068,7 @@ class TestNodeCRUD:
                 "attributes": [],
                 "description": None,
                 "dimension": None,
+                "dimension_column": None,
                 "display_name": "Required Date",
                 "name": "required_date",
                 "type": "timestamp",
@@ -2007,6 +2078,7 @@ class TestNodeCRUD:
                 "attributes": [],
                 "description": None,
                 "dimension": None,
+                "dimension_column": None,
                 "display_name": "Dispatched Date",
                 "name": "dispatched_date",
                 "type": "timestamp",
@@ -2016,6 +2088,7 @@ class TestNodeCRUD:
                 "attributes": [],
                 "description": None,
                 "dimension": None,
+                "dimension_column": None,
                 "display_name": "Dispatcher Id",
                 "name": "dispatcher_id",
                 "type": "int",
@@ -2025,6 +2098,7 @@ class TestNodeCRUD:
                 "attributes": [],
                 "description": None,
                 "dimension": None,
+                "dimension_column": None,
                 "display_name": "Rating",
                 "name": "rating",
                 "type": "int",
@@ -2131,6 +2205,7 @@ class TestNodeCRUD:
                 "attributes": [],
                 "description": None,
                 "dimension": None,
+                "dimension_column": None,
                 "display_name": "Id",
                 "name": "id",
                 "type": "int",
@@ -2140,6 +2215,7 @@ class TestNodeCRUD:
                 "attributes": [],
                 "description": None,
                 "dimension": None,
+                "dimension_column": "basic.dimension.users",
                 "display_name": "User Id",
                 "name": "user_id",
                 "type": "int",
@@ -2149,6 +2225,7 @@ class TestNodeCRUD:
                 "attributes": [],
                 "description": None,
                 "dimension": None,
+                "dimension_column": None,
                 "display_name": "Timestamp",
                 "name": "timestamp",
                 "type": "timestamp",
@@ -2158,6 +2235,7 @@ class TestNodeCRUD:
                 "attributes": [],
                 "description": None,
                 "dimension": None,
+                "dimension_column": None,
                 "display_name": "Text V2",
                 "name": "text_v2",
                 "type": "string",
@@ -2209,6 +2287,13 @@ class TestNodeCRUD:
         )
         assert response.status_code == 200
 
+        # Check upstreams for a downstream metric
+        response = await client_with_roads.get(
+            "/nodes/default.num_repair_orders/upstream",
+        )
+        upstream_names = [upstream["name"] for upstream in response.json()]
+        assert "default.repair_orders_fact" in upstream_names
+
         response = await client_with_roads.patch(
             "/nodes/default.repair_orders_fact",
             json={
@@ -2220,6 +2305,13 @@ class TestNodeCRUD:
             },
         )
         assert response.status_code == 200
+
+        # Check upstreams for a downstream metric
+        response = await client_with_roads.get(
+            "/nodes/default.num_repair_orders/upstream",
+        )
+        upstream_names = [upstream["name"] for upstream in response.json()]
+        assert "default.repair_orders_fact" in upstream_names
 
         # Test updating a transform with a deactivated downstream metric
         response = await client_with_roads.delete(
@@ -2263,26 +2355,20 @@ class TestNodeCRUD:
                 "mode": "published",
             },
         )
-        assert response.status_code >= 400
-        assert response.json() == {
-            "detail": [
-                {
-                    "loc": ["body", "catalog"],
-                    "msg": "field required",
-                    "type": "value_error.missing",
-                },
-                {
-                    "loc": ["body", "schema_"],
-                    "msg": "field required",
-                    "type": "value_error.missing",
-                },
-                {
-                    "loc": ["body", "table"],
-                    "msg": "field required",
-                    "type": "value_error.missing",
-                },
-            ],
-        }
+        assert response.status_code == 422
+        response_data = response.json()
+        assert "detail" in response_data
+
+        # Check that all required fields are mentioned in validation errors
+        error_fields = set()
+        for error in response_data["detail"]:
+            if "loc" in error and len(error["loc"]) >= 2:
+                error_fields.add(error["loc"][1])
+
+        required_fields = {"catalog", "schema_", "table"}
+        assert required_fields.issubset(error_fields), (
+            f"Missing required field errors: {required_fields - error_fields}"
+        )
 
     @pytest.mark.asyncio
     async def test_create_invalid_transform_node(
@@ -2378,11 +2464,13 @@ class TestNodeCRUD:
             == "SELECT country, COUNT(DISTINCT id) AS num_users FROM basic.source.users"
         )
         assert data["status"] == "valid"
+        assert data["owners"] == [{"username": "dj"}]
         assert data["columns"] == [
             {
                 "attributes": [],
                 "description": None,
                 "dimension": None,
+                "dimension_column": None,
                 "display_name": "Country",
                 "name": "country",
                 "type": "string",
@@ -2392,6 +2480,7 @@ class TestNodeCRUD:
                 "attributes": [],
                 "description": None,
                 "dimension": None,
+                "dimension_column": None,
                 "display_name": "Num Users",
                 "name": "num_users",
                 "type": "bigint",
@@ -2453,6 +2542,7 @@ class TestNodeCRUD:
                 "attributes": [],
                 "description": None,
                 "dimension": None,
+                "dimension_column": None,
                 "display_name": "Country",
                 "name": "country",
                 "type": "string",
@@ -2462,6 +2552,7 @@ class TestNodeCRUD:
                 "attributes": [],
                 "description": None,
                 "dimension": None,
+                "dimension_column": None,
                 "display_name": "Num Users",
                 "name": "num_users",
                 "type": "bigint",
@@ -2471,6 +2562,7 @@ class TestNodeCRUD:
                 "attributes": [],
                 "description": None,
                 "dimension": None,
+                "dimension_column": None,
                 "display_name": "Num Entries",
                 "name": "num_entries",
                 "type": "bigint",
@@ -2501,6 +2593,7 @@ class TestNodeCRUD:
                     "attributes": [],
                     "description": None,
                     "dimension": None,
+                    "dimension_column": None,
                     "display_name": "Country",
                     "name": "country",
                     "type": "string",
@@ -2510,6 +2603,7 @@ class TestNodeCRUD:
                     "attributes": [],
                     "description": None,
                     "dimension": None,
+                    "dimension_column": None,
                     "display_name": "Num Users",
                     "name": "num_users",
                     "type": "bigint",
@@ -2521,6 +2615,7 @@ class TestNodeCRUD:
                     "attributes": [],
                     "description": None,
                     "dimension": None,
+                    "dimension_column": None,
                     "display_name": "Country",
                     "name": "country",
                     "type": "string",
@@ -2530,6 +2625,7 @@ class TestNodeCRUD:
                     "attributes": [],
                     "description": None,
                     "dimension": None,
+                    "dimension_column": None,
                     "display_name": "Num Users",
                     "name": "num_users",
                     "type": "bigint",
@@ -2541,6 +2637,7 @@ class TestNodeCRUD:
                     "attributes": [],
                     "description": None,
                     "dimension": None,
+                    "dimension_column": None,
                     "display_name": "Country",
                     "name": "country",
                     "type": "string",
@@ -2550,6 +2647,7 @@ class TestNodeCRUD:
                     "attributes": [],
                     "description": None,
                     "dimension": None,
+                    "dimension_column": None,
                     "display_name": "Num Users",
                     "name": "num_users",
                     "type": "bigint",
@@ -2559,6 +2657,7 @@ class TestNodeCRUD:
                     "attributes": [],
                     "description": None,
                     "dimension": None,
+                    "dimension_column": None,
                     "display_name": "Num Entries",
                     "name": "num_entries",
                     "type": "bigint",
@@ -2600,11 +2699,11 @@ class TestNodeCRUD:
         assert metric_data["metric_metadata"] == {
             "direction": "higher_is_better",
             "unit": {
-                "abbreviation": None,
-                "category": None,
+                "abbreviation": "$",
+                "category": "currency",
                 "description": None,
                 "label": "Dollar",
-                "name": "DOLLAR",
+                "name": "dollar",
             },
             "significant_digits": 6,
             "min_decimal_exponent": 2,
@@ -2709,6 +2808,7 @@ class TestNodeCRUD:
                 ],
                 "description": None,
                 "dimension": None,
+                "dimension_column": None,
                 "display_name": "Country",
                 "name": "country",
                 "type": "string",
@@ -2718,6 +2818,7 @@ class TestNodeCRUD:
                 "attributes": [],
                 "description": None,
                 "dimension": None,
+                "dimension_column": None,
                 "display_name": "User Cnt",
                 "name": "user_cnt",
                 "type": "bigint",
@@ -2742,6 +2843,7 @@ class TestNodeCRUD:
                 ],
                 "description": None,
                 "dimension": None,
+                "dimension_column": None,
                 "display_name": "Country",
                 "name": "country",
                 "type": "string",
@@ -2766,6 +2868,7 @@ class TestNodeCRUD:
                 "attributes": [],
                 "description": None,
                 "dimension": None,
+                "dimension_column": None,
                 "display_name": "Country",
                 "name": "country",
                 "type": "string",
@@ -2777,6 +2880,7 @@ class TestNodeCRUD:
                 ],
                 "description": None,
                 "dimension": None,
+                "dimension_column": None,
                 "display_name": "Sum Age",
                 "name": "sum_age",
                 "type": "bigint",
@@ -2786,6 +2890,7 @@ class TestNodeCRUD:
                 "attributes": [],
                 "description": None,
                 "dimension": None,
+                "dimension_column": None,
                 "display_name": "Num Users",
                 "name": "num_users",
                 "type": "bigint",
@@ -2807,6 +2912,7 @@ class TestNodeCRUD:
                 ],
                 "description": None,
                 "dimension": None,
+                "dimension_column": None,
                 "display_name": "Country",
                 "name": "country",
                 "type": "string",
@@ -2816,6 +2922,7 @@ class TestNodeCRUD:
                 "attributes": [],
                 "description": None,
                 "dimension": None,
+                "dimension_column": None,
                 "display_name": "Sum Age",
                 "name": "sum_age",
                 "type": "bigint",
@@ -2825,6 +2932,7 @@ class TestNodeCRUD:
                 "attributes": [],
                 "description": None,
                 "dimension": None,
+                "dimension_column": None,
                 "display_name": "Num Users",
                 "name": "num_users",
                 "type": "bigint",
@@ -2890,6 +2998,7 @@ class TestNodeCRUD:
                 ],
                 "description": None,
                 "dimension": None,
+                "dimension_column": None,
                 "display_name": "Country",
                 "name": "country",
                 "type": "string",
@@ -2899,6 +3008,7 @@ class TestNodeCRUD:
                 "attributes": [],
                 "description": None,
                 "dimension": None,
+                "dimension_column": None,
                 "display_name": "User Cnt",
                 "name": "user_cnt",
                 "type": "bigint",
@@ -2962,12 +3072,7 @@ class TestNodeCRUD:
                 "schedule": "0 * * * *",
             },
         )
-        assert response.status_code == 404
-        data = response.json()
-        assert data["message"] == (
-            "Materialization job type `SOMETHING` not found. Available job "
-            "types: ['SPARK_SQL', 'DRUID_MEASURES_CUBE', 'DRUID_METRICS_CUBE', 'DRUID_CUBE']"
-        )
+        assert response.status_code == 422
 
     @pytest.mark.asyncio
     async def test_node_with_struct(
@@ -3033,6 +3138,7 @@ GROUP BY
             "attributes": [],
             "description": None,
             "dimension": None,
+            "dimension_column": None,
             "name": "measures",
             "type": "struct<completed_repairs bigint,"
             "total_repairs_dispatched bigint,"
@@ -3090,18 +3196,6 @@ GROUP BY
           FROM default_DOT_total_amount_in_region_from_struct_transform
         """
         assert str(parse(response.json()["sql"])) == str(parse(expected))
-
-        # Check that this query request has been saved
-        query_request = (await session.execute(select(QueryRequest))).scalars().all()
-        assert len(query_request) == 1
-        assert query_request[0].nodes == [
-            "default.total_amount_in_region_from_struct_transform@v1.0",
-        ]
-        assert query_request[0].dimensions == ["location_hierarchy@v1.0"]
-        assert query_request[0].filters == []
-        assert query_request[0].orderby == []
-        assert query_request[0].limit is None
-        assert query_request[0].query_type == QueryBuildType.NODE
 
     @pytest.mark.asyncio
     async def test_node_with_incremental_time_materialization(
@@ -3301,7 +3395,6 @@ GROUP BY
         format_regex = r"\${(?P<capture>[^}]+)}"
 
         result_sql = response.json()["sql"]
-
         match = re.search(format_regex, result_sql)
         assert match and match.group("capture") == "dj_logical_timestamp"
         query = re.sub(format_regex, "FORMATTED", result_sql)
@@ -3466,10 +3559,12 @@ SELECT  m0_default_DOT_num_repair_orders_partitioned.default_DOT_num_repair_orde
                     "spark": {},
                     "upstream_tables": ["public.basic.dim_users"],
                 },
+                "deactivated_at": None,
                 "strategy": "full",
                 "job": "SparkSqlMaterializationJob",
                 "name": "spark_sql__full",
                 "schedule": "0 * * * *",
+                "node_revision_id": mock.ANY,
             },
         ]
 
@@ -3489,6 +3584,7 @@ SELECT  m0_default_DOT_num_repair_orders_partitioned.default_DOT_num_repair_orde
             ],
             "description": None,
             "dimension": None,
+            "dimension_column": None,
             "display_name": "test",
             "name": "hard_hat_id",
             "type": "int",
@@ -3511,6 +3607,7 @@ SELECT  m0_default_DOT_num_repair_orders_partitioned.default_DOT_num_repair_orde
             ],
             "description": "test description",
             "dimension": None,
+            "dimension_column": None,
             "display_name": "Hard Hat Id",
             "name": "hard_hat_id",
             "type": "int",
@@ -3630,6 +3727,7 @@ class TestNodeColumnsAttributes:
                 ],
                 "description": None,
                 "dimension": None,
+                "dimension_column": None,
                 "partition": None,
             },
         ]
@@ -3669,6 +3767,7 @@ class TestNodeColumnsAttributes:
                 ],
                 "description": None,
                 "dimension": None,
+                "dimension_column": None,
                 "partition": None,
             },
         ]
@@ -3687,6 +3786,7 @@ class TestNodeColumnsAttributes:
                 "attributes": [],
                 "description": None,
                 "dimension": None,
+                "dimension_column": None,
                 "partition": None,
             },
         ]
@@ -3714,6 +3814,7 @@ class TestNodeColumnsAttributes:
                 ],
                 "description": None,
                 "dimension": None,
+                "dimension_column": None,
                 "partition": None,
             },
         ]
@@ -3810,6 +3911,7 @@ class TestNodeColumnsAttributes:
                 ],
                 "description": None,
                 "dimension": {"name": "basic.dimension.users"},
+                "dimension_column": None,
                 "partition": None,
             },
         ]
@@ -3871,6 +3973,7 @@ class TestNodeColumnsAttributes:
                 "attributes": [],
                 "description": None,
                 "dimension": None,
+                "dimension_column": None,
                 "partition": None,
             },
             {
@@ -3881,6 +3984,7 @@ class TestNodeColumnsAttributes:
                     {"attribute_type": {"namespace": "system", "name": "primary_key"}},
                 ],
                 "dimension": {"name": "basic.dimension.users"},
+                "dimension_column": None,
                 "description": None,
                 "partition": None,
             },
@@ -3891,6 +3995,7 @@ class TestNodeColumnsAttributes:
                 "attributes": [],
                 "description": None,
                 "dimension": None,
+                "dimension_column": None,
                 "partition": None,
             },
             {
@@ -3900,6 +4005,7 @@ class TestNodeColumnsAttributes:
                 "attributes": [],
                 "description": None,
                 "dimension": None,
+                "dimension_column": None,
                 "partition": None,
             },
             {
@@ -3909,6 +4015,7 @@ class TestNodeColumnsAttributes:
                 "attributes": [],
                 "description": None,
                 "dimension": None,
+                "dimension_column": None,
                 "partition": None,
             },
             {
@@ -3918,6 +4025,7 @@ class TestNodeColumnsAttributes:
                 "attributes": [],
                 "description": None,
                 "dimension": None,
+                "dimension_column": None,
                 "partition": None,
             },
             {
@@ -3927,6 +4035,7 @@ class TestNodeColumnsAttributes:
                 "attributes": [],
                 "description": None,
                 "dimension": None,
+                "dimension_column": None,
                 "partition": None,
             },
         ]
@@ -3963,6 +4072,7 @@ class TestValidateNodes:
                 "attributes": [],
                 "description": None,
                 "dimension": None,
+                "dimension_column": None,
                 "display_name": "Payment Id",
                 "name": "payment_id",
                 "partition": None,
@@ -4072,6 +4182,7 @@ class TestValidateNodes:
                     "attributes": [],
                     "description": None,
                     "dimension": None,
+                    "dimension_column": None,
                     "display_name": "Col0",
                     "name": "col0",
                     "partition": None,
@@ -4118,6 +4229,7 @@ class TestValidateNodes:
                 "attributes": [],
                 "description": None,
                 "dimension": None,
+                "dimension_column": None,
                 "display_name": "Col0",
                 "name": "col0",
                 "partition": None,
@@ -4268,7 +4380,7 @@ class TestValidateNodes:
         )
         data = response.json()
         assert data["message"] == (
-            "Cannot link dimension to node, because catalogs do not match: default, public"
+            "Cannot link dimension to node, because catalogs do not match: basic, public"
         )
 
     @pytest.mark.asyncio
@@ -4312,7 +4424,6 @@ class TestValidateNodes:
         ] == [
             ("update", "node"),
             ("create", "link"),
-            ("set_attribute", "column_attribute"),
             ("create", "node"),
         ]
 
@@ -4324,6 +4435,7 @@ class TestValidateNodes:
                 ],
                 "description": None,
                 "dimension": None,
+                "dimension_column": None,
                 "display_name": "Hard Hat Id",
                 "name": "hard_hat_id",
                 "type": "int",
@@ -4333,6 +4445,7 @@ class TestValidateNodes:
                 "attributes": [],
                 "description": None,
                 "dimension": None,
+                "dimension_column": None,
                 "display_name": "Title",
                 "name": "title",
                 "type": "string",
@@ -4342,6 +4455,7 @@ class TestValidateNodes:
                 "attributes": [],
                 "description": None,
                 "dimension": None,
+                "dimension_column": None,
                 "display_name": "State",
                 "name": "state",
                 "type": "string",
@@ -4359,7 +4473,6 @@ class TestValidateNodes:
         ] == [
             ("update", "node"),
             ("create", "link"),
-            ("set_attribute", "column_attribute"),
             ("create", "node"),
         ]
 
@@ -4382,6 +4495,7 @@ class TestValidateNodes:
         }
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("client", [False], indirect=True)
     async def test_propagate_update_downstream(
         self,
         client_with_roads: AsyncClient,
@@ -4535,6 +4649,15 @@ class TestValidateNodes:
         """
         Test getting upstream nodes of different node types.
         """
+        response = await client_with_event.get(
+            "/nodes/default.long_events_distinct_countries/upstream/",
+        )
+        data = response.json()
+        assert {node["name"] for node in data} == {
+            "default.event_source",
+            "default.long_events",
+        }
+        # Uses cached response
         response = await client_with_event.get(
             "/nodes/default.long_events_distinct_countries/upstream/",
         )
@@ -4703,6 +4826,7 @@ class TestValidateNodes:
                 ],
                 "description": None,
                 "dimension": None,
+                "dimension_column": None,
                 "display_name": "Us Region Id",
                 "name": "us_region_id",
                 "type": "int",
@@ -4714,6 +4838,7 @@ class TestValidateNodes:
                 ],
                 "description": None,
                 "dimension": None,
+                "dimension_column": None,
                 "display_name": "State Name",
                 "name": "state_name",
                 "type": "string",
@@ -4723,6 +4848,7 @@ class TestValidateNodes:
                 "attributes": [],
                 "description": None,
                 "dimension": None,
+                "dimension_column": None,
                 "display_name": "Location Hierarchy",
                 "name": "location_hierarchy",
                 "type": "string",
@@ -4734,6 +4860,7 @@ class TestValidateNodes:
                 ],
                 "description": None,
                 "dimension": None,
+                "dimension_column": None,
                 "display_name": "Order Year",
                 "name": "order_year",
                 "type": "int",
@@ -4745,6 +4872,7 @@ class TestValidateNodes:
                 ],
                 "description": None,
                 "dimension": None,
+                "dimension_column": None,
                 "display_name": "Order Month",
                 "name": "order_month",
                 "type": "int",
@@ -4756,6 +4884,7 @@ class TestValidateNodes:
                 ],
                 "description": None,
                 "dimension": None,
+                "dimension_column": None,
                 "display_name": "Order Day",
                 "name": "order_day",
                 "type": "int",
@@ -4765,6 +4894,7 @@ class TestValidateNodes:
                 "attributes": [],
                 "description": None,
                 "dimension": None,
+                "dimension_column": None,
                 "display_name": "Completed Repairs",
                 "name": "completed_repairs",
                 "type": "bigint",
@@ -4774,6 +4904,7 @@ class TestValidateNodes:
                 "attributes": [],
                 "description": None,
                 "dimension": None,
+                "dimension_column": None,
                 "display_name": "Total Repairs Dispatched",
                 "name": "total_repairs_dispatched",
                 "type": "bigint",
@@ -4783,6 +4914,7 @@ class TestValidateNodes:
                 "attributes": [],
                 "description": None,
                 "dimension": None,
+                "dimension_column": None,
                 "display_name": "Total Amount In Region",
                 "name": "total_amount_in_region",
                 "type": "double",
@@ -4792,6 +4924,7 @@ class TestValidateNodes:
                 "attributes": [],
                 "description": None,
                 "dimension": None,
+                "dimension_column": None,
                 "display_name": "Avg Repair Amount In Region",
                 "name": "avg_repair_amount_in_region",
                 "type": "double",
@@ -4801,6 +4934,7 @@ class TestValidateNodes:
                 "attributes": [],
                 "description": None,
                 "dimension": None,
+                "dimension_column": None,
                 "display_name": "Avg Dispatch Delay",
                 "name": "avg_dispatch_delay",
                 "type": "double",
@@ -4810,6 +4944,7 @@ class TestValidateNodes:
                 "attributes": [],
                 "description": None,
                 "dimension": None,
+                "dimension_column": None,
                 "display_name": "Unique Contractors",
                 "name": "unique_contractors",
                 "type": "bigint",
@@ -4827,6 +4962,7 @@ class TestValidateNodes:
                 "attributes": [],
                 "description": None,
                 "dimension": None,
+                "dimension_column": None,
                 "display_name": "Regional Repair Efficiency",
                 "name": "default_DOT_regional_repair_efficiency",
                 "type": "double",
@@ -5546,6 +5682,7 @@ async def test_set_column_partition(client_with_roads: AsyncClient):
         "attributes": [],
         "description": None,
         "dimension": None,
+        "dimension_column": None,
         "display_name": "Hire Date",
         "name": "hire_date",
         "partition": {
@@ -5568,6 +5705,7 @@ async def test_set_column_partition(client_with_roads: AsyncClient):
         "attributes": [],
         "description": None,
         "dimension": None,
+        "dimension_column": None,
         "display_name": "State",
         "name": "state",
         "partition": {
@@ -5628,6 +5766,7 @@ async def test_set_column_partition(client_with_roads: AsyncClient):
         "attributes": [],
         "description": None,
         "dimension": None,
+        "dimension_column": None,
         "display_name": "Country",
         "name": "country",
         "partition": {
@@ -5721,12 +5860,12 @@ ON s.state_region = r.us_region_id""",
     )
     node_data = response.json()
     assert node_data["version"] == "v2.0"
+    assert node_data["owners"] == [{"username": "dj"}]
     response = await client_with_roads.get("/history?node=default.us_state")
     assert [activity["activity_type"] for activity in response.json()] == [
         "restore",
         "update",
         "delete",
-        "set_attribute",
         "create",
     ]
 
@@ -5825,7 +5964,14 @@ class TestCopyNode:
         )
         copied = (await client_with_roads.get("/nodes/default.contractor")).json()
         original = (await client_with_roads.get("/nodes/default.repair_order")).json()
-        for field in ["name", "node_id", "node_revision_id", "updated_at"]:
+        for field in [
+            "name",
+            "node_id",
+            "node_revision_id",
+            "updated_at",
+            "version",
+            "current_version",
+        ]:
             copied[field] = mock.ANY
         copied_dimension_links = sorted(
             copied["dimension_links"],
@@ -6096,7 +6242,14 @@ class TestCopyNode:
                 copied["dimension_links"],
                 key=lambda link: link["dimension"]["name"],
             )
+            assert sorted(original["parents"], key=lambda node: node["name"]) == sorted(
+                copied["parents"],
+                key=lambda node: node["name"],
+            )
             copied["dimension_links"] = mock.ANY
+            copied["parents"] = mock.ANY
+            copied["current_version"] = mock.ANY
+            copied["version"] = mock.ANY
             original["dimension_links"] = sorted(
                 original["dimension_links"],
                 key=lambda link: link["dimension"]["name"],

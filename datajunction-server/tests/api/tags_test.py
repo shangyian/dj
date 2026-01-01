@@ -26,7 +26,8 @@ class TestTags:
         yield  # Testing happens
         # Teardown: remove any data from database (even data not created by this session)
         for table in Base.metadata.tables.keys():
-            await module__session.execute(text(f'TRUNCATE TABLE "{table}" CASCADE'))
+            if table != "users":
+                await module__session.execute(text(f'TRUNCATE TABLE "{table}" CASCADE'))
         await module__session.commit()
 
     async def create_tag(self, module__client: AsyncClient):
@@ -134,6 +135,16 @@ class TestTags:
         """
         response = await self.create_tag(module__client)
         assert response.status_code == 201
+        response = await module__client.post(
+            "/tags/",
+            json={
+                "name": "sales_report",
+                "display_name": "Sales Report",
+                "description": "All metrics for sales",
+                "tag_type": "group",
+                "tag_metadata": {},
+            },
+        )
 
         # Trying updating the tag
         response = await module__client.patch(
@@ -292,8 +303,8 @@ class TestTags:
                 "mode": "published",
                 "name": "default.items_sold_count",
                 "description": "Total units sold",
-                "edited_by": None,
-                "tags": None,
+                "edited_by": [],
+                "tags": [],
                 "status": "valid",
                 "type": "metric",
                 "updated_at": mock.ANY,
@@ -338,8 +349,8 @@ class TestTags:
                 "name": "default.items_sold_count",
                 "description": "Total units sold",
                 "status": "valid",
-                "edited_by": None,
-                "tags": None,
+                "edited_by": [],
+                "tags": [],
                 "type": "metric",
                 "updated_at": mock.ANY,
                 "version": "v1.0",
@@ -350,8 +361,8 @@ class TestTags:
                 "name": "default.total_profit",
                 "description": "Total profit",
                 "status": "valid",
-                "edited_by": None,
-                "tags": None,
+                "edited_by": [],
+                "tags": [],
                 "type": "metric",
                 "updated_at": mock.ANY,
                 "version": "v1.0",
@@ -385,3 +396,62 @@ class TestTags:
         assert response.status_code == 200
         response_data = response.json()
         assert response_data == []
+
+    @pytest.mark.asyncio
+    async def test_tagging_node_with_same_tags_does_not_create_history(
+        self,
+        client_with_dbt: AsyncClient,
+    ) -> None:
+        """
+        Test that tagging a node with the same tags doesn't create a new history event.
+        """
+        # Create tags
+        await self.create_tag(client_with_dbt)
+        await self.create_another_tag(client_with_dbt)
+
+        # Tag a node with two tags
+        response = await client_with_dbt.post(
+            "/nodes/default.items_sold_count/tags/?tag_names=sales_report&tag_names=reports",
+        )
+        assert response.status_code == 200
+
+        # Check history - should have one tag event
+        response = await client_with_dbt.get(
+            "/history?node=default.items_sold_count",
+        )
+        history = response.json()
+        tag_events = [h for h in history if h["activity_type"] == "tag"]
+        assert len(tag_events) == 1
+        assert tag_events[0]["details"] == {"tags": ["sales_report", "reports"]}
+
+        # Tag the same node with the same tags again (order may differ)
+        response = await client_with_dbt.post(
+            "/nodes/default.items_sold_count/tags/?tag_names=reports&tag_names=sales_report",
+        )
+        assert response.status_code == 200
+
+        # Check history again - should still have only one tag event (no new history)
+        response = await client_with_dbt.get(
+            "/history?node=default.items_sold_count",
+        )
+        history = response.json()
+        tag_events = [h for h in history if h["activity_type"] == "tag"]
+        assert len(tag_events) == 1, (
+            "No new history event should be created when tags haven't changed"
+        )
+
+        # Now actually change the tags - remove one
+        response = await client_with_dbt.post(
+            "/nodes/default.items_sold_count/tags/?tag_names=sales_report",
+        )
+        assert response.status_code == 200
+
+        # Check history - should now have two tag events
+        response = await client_with_dbt.get(
+            "/history?node=default.items_sold_count",
+        )
+        history = response.json()
+        tag_events = [h for h in history if h["activity_type"] == "tag"]
+        assert len(tag_events) == 2, (
+            "A new history event should be created when tags are changed"
+        )

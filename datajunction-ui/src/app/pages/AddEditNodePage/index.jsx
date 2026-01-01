@@ -15,6 +15,7 @@ import { displayMessageAfterSubmit } from '../../../utils/form';
 import { NodeQueryField } from './NodeQueryField';
 import { MetricMetadataFields } from './MetricMetadataFields';
 import { UpstreamNodeField } from './UpstreamNodeField';
+import { OwnersField } from './OwnersField';
 import { TagsField } from './TagsField';
 import { NamespaceField } from './NamespaceField';
 import { AlertMessage } from './AlertMessage';
@@ -24,6 +25,7 @@ import { NodeModeField } from './NodeModeField';
 import { RequiredDimensionsSelect } from './RequiredDimensionsSelect';
 import LoadingIcon from '../../icons/LoadingIcon';
 import { ColumnsSelect } from './ColumnsSelect';
+import { CustomMetadataField } from './CustomMetadataField';
 
 class Action {
   static Add = new Action('add');
@@ -50,6 +52,8 @@ export function AddEditNodePage({ extensions = {} }) {
     description: '',
     primary_key: '',
     mode: 'published',
+    owners: [],
+    custom_metadata: null,
   };
 
   const validator = values => {
@@ -105,6 +109,17 @@ export function AddEditNodePage({ extensions = {} }) {
     return primaryKey.map(columnName => columnName.trim());
   };
 
+  const parseCustomMetadata = customMetadata => {
+    if (!customMetadata || customMetadata.trim() === '') {
+      return null;
+    }
+    try {
+      return JSON.parse(customMetadata);
+    } catch (err) {
+      return null;
+    }
+  };
+
   const createNode = async (values, setStatus) => {
     const { status, json } = await djClient.createNode(
       nodeType,
@@ -112,7 +127,7 @@ export function AddEditNodePage({ extensions = {} }) {
       values.display_name,
       values.description,
       values.type === 'metric'
-        ? `SELECT ${values.aggregate_expression} FROM ${values.upstream_node}`
+        ? `SELECT ${values.aggregate_expression} \n FROM ${values.upstream_node}`
         : values.query,
       values.mode,
       values.namespace,
@@ -120,6 +135,7 @@ export function AddEditNodePage({ extensions = {} }) {
       values.metric_direction,
       values.metric_unit,
       values.required_dimensions,
+      parseCustomMetadata(values.custom_metadata),
     );
     if (status === 200 || status === 201) {
       if (values.tags) {
@@ -146,7 +162,7 @@ export function AddEditNodePage({ extensions = {} }) {
       values.display_name,
       values.description,
       values.type === 'metric'
-        ? `SELECT ${values.aggregate_expression} FROM ${values.upstream_node}`
+        ? `SELECT ${values.aggregate_expression} \n FROM ${values.upstream_node}`
         : values.query,
       values.mode,
       values.primary_key ? primaryKeyToList(values.primary_key) : null,
@@ -154,6 +170,8 @@ export function AddEditNodePage({ extensions = {} }) {
       values.metric_unit,
       values.significant_digits,
       values.required_dimensions,
+      values.owners,
+      parseCustomMetadata(values.custom_metadata),
     );
     const tagsResponse = await djClient.tagsNode(
       values.name,
@@ -201,6 +219,8 @@ export function AddEditNodePage({ extensions = {} }) {
       query: node.current.query,
       tags: node.tags,
       mode: node.current.mode.toLowerCase(),
+      owners: node.owners,
+      custom_metadata: node.current.customMetadata,
     };
 
     if (node.type === 'METRIC') {
@@ -244,6 +264,7 @@ export function AddEditNodePage({ extensions = {} }) {
     setSelectPrimaryKey,
     setSelectUpstreamNode,
     setSelectRequiredDims,
+    setSelectOwners,
   ) => {
     // Update fields with existing data to prepare for edit
     const fields = [
@@ -259,6 +280,8 @@ export function AddEditNodePage({ extensions = {} }) {
       'metric_unit',
       'metric_direction',
       'significant_digits',
+      'owners',
+      'custom_metadata',
     ];
     fields.forEach(field => {
       if (field === 'tags') {
@@ -266,6 +289,14 @@ export function AddEditNodePage({ extensions = {} }) {
           field,
           data[field].map(tag => tag.name),
         );
+      } else if (field === 'owners') {
+        setFieldValue(
+          field,
+          data[field].map(owner => owner.username),
+        );
+      } else if (field === 'custom_metadata') {
+        const value = data[field] ? JSON.stringify(data[field], null, 2) : '';
+        setFieldValue(field, value, false);
       } else {
         setFieldValue(field, data[field] || '', false);
       }
@@ -306,6 +337,15 @@ export function AddEditNodePage({ extensions = {} }) {
         }}
       />,
     );
+    if (data.owners) {
+      setSelectOwners(
+        <OwnersField
+          defaultValue={data.owners.map(owner => {
+            return { value: owner.username, label: owner.username };
+          })}
+        />,
+      );
+    }
   };
 
   return (
@@ -326,6 +366,8 @@ export function AddEditNodePage({ extensions = {} }) {
             <Formik
               initialValues={initialValues}
               validate={validator}
+              validateOnChange={true}
+              validateOnBlur={true}
               onSubmit={async (values, { setSubmitting, setStatus }) => {
                 try {
                   for (const handler of submitHandlers) {
@@ -338,13 +380,23 @@ export function AddEditNodePage({ extensions = {} }) {
                 }
               }}
             >
-              {function Render({ isSubmitting, status, setFieldValue }) {
+              {function Render(formikProps) {
+                const {
+                  isSubmitting,
+                  status,
+                  setFieldValue,
+                  errors,
+                  touched,
+                  isValid,
+                  dirty,
+                } = formikProps;
                 const [node, setNode] = useState([]);
                 const [selectPrimaryKey, setSelectPrimaryKey] = useState(null);
                 const [selectRequiredDims, setSelectRequiredDims] =
                   useState(null);
                 const [selectUpstreamNode, setSelectUpstreamNode] =
                   useState(null);
+                const [selectOwners, setSelectOwners] = useState(null);
                 const [selectTags, setSelectTags] = useState(null);
                 const [message, setMessage] = useState('');
 
@@ -361,6 +413,7 @@ export function AddEditNodePage({ extensions = {} }) {
                         setSelectPrimaryKey,
                         setSelectUpstreamNode,
                         setSelectRequiredDims,
+                        setSelectOwners,
                       );
                     }
                   };
@@ -390,6 +443,13 @@ export function AddEditNodePage({ extensions = {} }) {
                           )
                         ) : (
                           ''
+                        )}
+                        <br />
+                        <br />
+                        {action === Action.Edit ? (
+                          selectOwners
+                        ) : (
+                          <OwnersField />
                         )}
                         <br />
                         <br />
@@ -430,6 +490,11 @@ export function AddEditNodePage({ extensions = {} }) {
                         ) : (
                           <RequiredDimensionsSelect />
                         )}
+                        <CustomMetadataField
+                          value={
+                            node.custom_metadata ? node.custom_metadata : ''
+                          }
+                        />
                         {Object.entries(extensions).map(
                           ([key, ExtensionComponent]) => (
                             <div key={key} className="mt-4 border-t pt-4">
@@ -455,7 +520,10 @@ export function AddEditNodePage({ extensions = {} }) {
                         {action === Action.Edit ? selectTags : <TagsField />}
                         <NodeModeField />
 
-                        <button type="submit" disabled={isSubmitting}>
+                        <button
+                          type="submit"
+                          disabled={isSubmitting || !isValid}
+                        >
                           {isSubmitting ? (
                             <LoadingIcon />
                           ) : (

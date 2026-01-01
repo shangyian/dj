@@ -25,6 +25,7 @@ from datajunction_server.sql.parsing.backends.antlr4 import parse
 from datajunction_server.sql.parsing.backends.exceptions import DJParseException
 from datajunction_server.sql.parsing.types import (
     BigIntType,
+    BooleanType,
     DateType,
     DecimalType,
     DoubleType,
@@ -2013,6 +2014,45 @@ async def test_histogram_numeric_func(session: AsyncSession):
 
 
 @pytest.mark.asyncio
+async def test_hll_sketch_agg(session: AsyncSession):
+    """
+    Test the `hll_sketch_agg` function
+    """
+    query = parse("SELECT hll_sketch_agg(col, 5) FROM (SELECT (1), (2) AS col)")
+    exc = DJException()
+    ctx = ast.CompileContext(session=session, exception=exc)
+    await query.compile(ctx)
+    assert not exc.errors
+    assert isinstance(query.select.projection[0].type, ct.BinaryType)  # type: ignore
+
+
+@pytest.mark.asyncio
+async def test_hll_union(session: AsyncSession):
+    """
+    Test the `hll_union` function
+    """
+    query = parse("SELECT hll_union(col) FROM (SELECT (1), (2) AS col)")
+    exc = DJException()
+    ctx = ast.CompileContext(session=session, exception=exc)
+    await query.compile(ctx)
+    assert not exc.errors
+    assert isinstance(query.select.projection[0].type, ct.BinaryType)  # type: ignore
+
+
+@pytest.mark.asyncio
+async def test_hll_sketch_estimate(session: AsyncSession):
+    """
+    Test the `hll_sketch_estimate` function
+    """
+    query = parse("SELECT hll_sketch_estimate(col) FROM (SELECT (1), (2) AS col)")
+    exc = DJException()
+    ctx = ast.CompileContext(session=session, exception=exc)
+    await query.compile(ctx)
+    assert not exc.errors
+    assert query.select.projection[0].type == ct.LongType()  # type: ignore
+
+
+@pytest.mark.asyncio
 async def test_hour_func(session: AsyncSession):
     """
     Test the `hour` function
@@ -2705,6 +2745,9 @@ async def test_max() -> None:
     assert Max.infer_type(ast.Column(ast.Name("x"), _type=BigIntType())) == BigIntType()
     assert Max.infer_type(ast.Column(ast.Name("x"), _type=FloatType())) == FloatType()
     assert Max.infer_type(ast.Column(ast.Name("x"), _type=StringType())) == StringType()
+    assert (
+        Max.infer_type(ast.Column(ast.Name("x"), _type=BooleanType())) == BooleanType()
+    )
     assert Max.infer_type(
         ast.Column(ast.Name("x"), _type=DecimalType(8, 6)),
     ) == DecimalType(8, 6)
@@ -3667,6 +3710,15 @@ async def test_unix_timestamp(session: AsyncSession):
     assert not exc.errors
     assert query.select.projection[0].type == ct.BigIntType()  # type: ignore
     assert query.select.projection[1].type == ct.BigIntType()  # type: ignore
+
+    query = parse(
+        "SELECT unix_timestamp(to_timestamp('2025-01-01 10:10:10.123', 'yyyy-MM-dd HH:mm:ss.SSS'))",
+    )
+    exc = DJException()
+    ctx = ast.CompileContext(session=session, exception=exc)
+    await query.compile(ctx)
+    assert not exc.errors
+    assert query.select.projection[0].type == ct.BigIntType()  # type: ignore
 
 
 @pytest.mark.asyncio

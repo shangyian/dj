@@ -6,10 +6,9 @@ import logging
 from typing import List, Optional
 
 from fastapi import Depends, Query
-from sqlalchemy import select
+from sqlalchemy import select, and_, cast, func, String
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
-from sqlalchemy import and_, cast, func, String
 
 from datajunction_server.api.helpers import get_history
 from datajunction_server.database.history import History
@@ -19,7 +18,7 @@ from datajunction_server.internal.access.authentication.http import SecureAPIRou
 from datajunction_server.internal.history import EntityType
 from datajunction_server.models.history import HistoryOutput
 from datajunction_server.utils import (
-    get_and_update_current_user,
+    get_current_user,
     get_session,
     get_settings,
 )
@@ -48,7 +47,7 @@ async def list_history(
         offset=offset,
         limit=limit,
     )
-    return [HistoryOutput.from_orm(entry) for entry in hist]
+    return [HistoryOutput.model_validate(entry) for entry in hist]
 
 
 @router.get("/history/", response_model=List[HistoryOutput])
@@ -59,7 +58,7 @@ async def list_history_by_node_context(
     limit: int = Query(default=100, lte=100),
     *,
     session: AsyncSession = Depends(get_session),
-    current_user: User = Depends(get_and_update_current_user),
+    current_user: User = Depends(get_current_user),
 ) -> List[HistoryOutput]:
     """
     List all activity history for a node context
@@ -86,4 +85,4 @@ async def list_history_by_node_context(
     )
     result = await session.execute(statement)
     hist = result.scalars().all()
-    return [HistoryOutput.from_orm(entry) for entry in hist]
+    return [HistoryOutput.model_validate(entry) for entry in hist]

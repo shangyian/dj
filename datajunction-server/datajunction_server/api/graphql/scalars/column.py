@@ -38,6 +38,16 @@ class NodeName:
 
 
 @strawberry.type
+class NodeNameVersion:
+    """
+    Node name and version
+    """
+
+    name: str
+    current_version: str
+
+
+@strawberry.type
 class Partition:
     """
     A partition configuration for a column
@@ -58,6 +68,6 @@ class Column:
     name: str
     display_name: Optional[str]
     type: str
-    attributes: Optional[List[Attribute]]
+    attributes: List[Attribute] = strawberry.field(default_factory=list)
     dimension: Optional[NodeName]
     partition: Optional[Partition]

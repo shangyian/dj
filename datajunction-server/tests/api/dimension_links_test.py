@@ -36,6 +36,32 @@ async def test_link_dimension_with_errors(
     Test linking dimensions with errors
     """
     response = await dimensions_link_client.post(
+        "/nodes/default.does_not_exist/link",
+        json={
+            "dimension_node": "default.users",
+            "join_on": ("default.does_not_exist.x = default.users.y"),
+            "join_cardinality": "many_to_one",
+        },
+    )
+    assert (
+        response.json()["message"]
+        == "A node with name `default.does_not_exist` does not exist."
+    )
+
+    response = await dimensions_link_client.post(
+        "/nodes/default.events/link",
+        json={
+            "dimension_node": "default.random_dimension",
+            "join_on": ("default.events.x = default.random_dimension.y"),
+            "join_cardinality": "many_to_one",
+        },
+    )
+    assert (
+        response.json()["message"]
+        == "A node with name `default.random_dimension` does not exist."
+    )
+
+    response = await dimensions_link_client.post(
         "/nodes/default.elapsed_secs/link",
         json={
             "dimension_node": "default.users",
@@ -71,6 +97,19 @@ async def test_link_dimension_with_errors(
     assert (
         response.json()["message"]
         == "Join query default.events.order_year = default.users.year is not valid"
+    )
+
+    # Test linking a non-dimension node as the dimension_node (source node instead of dimension)
+    response = await dimensions_link_client.post(
+        "/nodes/default.events/link",
+        json={
+            "dimension_node": "default.events_table",
+            "join_on": ("default.events.user_id = default.events_table.user_id"),
+            "join_cardinality": "many_to_one",
+        },
+    )
+    assert response.json()["message"] == (
+        "Cannot link dimension to a node of type source. Must be a dimension node."
     )
 
 
@@ -124,6 +163,7 @@ def link_events_to_users_with_role_direct(
                 "role": "user_direct",
             },
         )
+        assert response.status_code == 201
         return response
 
     return _link_events_to_users_with_role_direct
@@ -270,6 +310,7 @@ async def test_link_complex_dimension_without_role(
                 "join_sql": "default.events.user_id = default.users.user_id AND "
                 "default.events.event_end_date = default.users.snapshot_date",
                 "role": None,
+                "version": "v1.2",
             },
         ),
         (
@@ -280,6 +321,7 @@ async def test_link_complex_dimension_without_role(
                 "join_sql": "default.events.user_id = default.users.user_id AND "
                 "default.events.event_start_date = default.users.snapshot_date",
                 "role": None,
+                "version": "v1.1",
             },
         ),
     ]
@@ -390,7 +432,7 @@ async def test_link_complex_dimension_with_role(
     response = await dimensions_link_client.get("/nodes/default.events")
     assert sorted(
         response.json()["dimension_links"],
-        key=lambda x: x["role"],
+        key=lambda x: x["role"] or "",
     ) == sorted(
         [
             {
@@ -530,18 +572,19 @@ async def test_link_complex_dimension_with_role(
 ),
 default_DOT_events_metrics AS (
   SELECT
-    default_DOT_users.user_id default_DOT_users_DOT_user_id_LBRACK_user_windowed_RBRACK,
-    default_DOT_users.snapshot_date default_DOT_users_DOT_snapshot_date_LBRACK_user_windowed_RBRACK,
-    default_DOT_users.registration_country default_DOT_users_DOT_registration_country_LBRACK_user_windowed_RBRACK,
+    user_windowed.user_id default_DOT_users_DOT_user_id_LBRACK_user_windowed_RBRACK,
+    user_windowed.snapshot_date default_DOT_users_DOT_snapshot_date_LBRACK_user_windowed_RBRACK,
+    user_windowed.registration_country default_DOT_users_DOT_registration_country_LBRACK_user_windowed_RBRACK,
     SUM(default_DOT_events.elapsed_secs) default_DOT_elapsed_secs
   FROM default_DOT_events
-  LEFT JOIN default_DOT_users
-    ON default_DOT_events.user_id = default_DOT_users.user_id
-    AND default_DOT_events.event_start_date = default_DOT_users.snapshot_date
+  LEFT JOIN default_DOT_users AS user_windowed ON default_DOT_events.user_id = user_windowed.user_id
+    AND default_DOT_events.event_start_date BETWEEN user_windowed.snapshot_date
+    AND CAST(DATE_ADD(CAST(user_windowed.snapshot_date AS DATE), 10) AS INT)
+  WHERE  user_windowed.registration_country = 'NZ'
   GROUP BY
-    default_DOT_users.user_id,
-    default_DOT_users.snapshot_date,
-    default_DOT_users.registration_country
+    user_windowed.user_id,
+    user_windowed.snapshot_date,
+    user_windowed.registration_country
 )
 SELECT
   default_DOT_events_metrics.default_DOT_users_DOT_user_id_LBRACK_user_windowed_RBRACK,
@@ -578,18 +621,18 @@ FROM default_DOT_events_metrics
     ),
     default_DOT_events_metrics AS (
       SELECT
-        default_DOT_users.user_id default_DOT_users_DOT_user_id_LBRACK_user_direct_RBRACK,
-        default_DOT_users.snapshot_date default_DOT_users_DOT_snapshot_date_LBRACK_user_direct_RBRACK,
-        default_DOT_users.registration_country default_DOT_users_DOT_registration_country_LBRACK_user_direct_RBRACK,
+        user_direct.user_id default_DOT_users_DOT_user_id_LBRACK_user_direct_RBRACK,
+        user_direct.snapshot_date default_DOT_users_DOT_snapshot_date_LBRACK_user_direct_RBRACK,
+        user_direct.registration_country default_DOT_users_DOT_registration_country_LBRACK_user_direct_RBRACK,
         SUM(default_DOT_events.elapsed_secs) default_DOT_elapsed_secs
       FROM default_DOT_events
-      LEFT JOIN default_DOT_users
-        ON default_DOT_events.user_id = default_DOT_users.user_id
-        AND default_DOT_events.event_start_date = default_DOT_users.snapshot_date
+      LEFT JOIN default_DOT_users AS user_direct
+        ON default_DOT_events.user_id = user_direct.user_id
+        AND default_DOT_events.event_start_date = user_direct.snapshot_date
       GROUP BY
-        default_DOT_users.user_id,
-        default_DOT_users.snapshot_date,
-        default_DOT_users.registration_country
+        user_direct.user_id,
+        user_direct.snapshot_date,
+        user_direct.registration_country
     )
     SELECT
       default_DOT_events_metrics.default_DOT_users_DOT_user_id_LBRACK_user_direct_RBRACK,
@@ -605,6 +648,7 @@ FROM default_DOT_events_metrics
         "/sql/default.elapsed_secs?",
         params={
             "dimensions": [
+                # "default.countries.country_code[user_windowed->registration_country]",
                 "default.countries.name[user_direct->registration_country]",
                 "default.users.snapshot_date[user_direct]",
                 "default.users.registration_country[user_direct]",
@@ -614,7 +658,8 @@ FROM default_DOT_events_metrics
             ],
         },
     )
-    query = response.json()["sql"]
+    data = response.json()
+    query = data["sql"]
     expected = """WITH default_DOT_events AS (
   SELECT
     default_DOT_events_table.user_id,
@@ -640,26 +685,64 @@ FROM default_DOT_events_metrics
 ),
 default_DOT_events_metrics AS (
   SELECT
-    default_DOT_users.snapshot_date default_DOT_users_DOT_snapshot_date_LBRACK_user_direct_RBRACK,
-    default_DOT_users.registration_country default_DOT_users_DOT_registration_country_LBRACK_user_direct_RBRACK,
+    user_direct__registration_country.name default_DOT_countries_DOT_name_LBRACK_user_direct_MINUS__GT_registration_country_RBRACK,
+    user_direct.snapshot_date default_DOT_users_DOT_snapshot_date_LBRACK_user_direct_RBRACK,
+    user_direct.registration_country default_DOT_users_DOT_registration_country_LBRACK_user_direct_RBRACK,
     SUM(default_DOT_events.elapsed_secs) default_DOT_elapsed_secs
   FROM default_DOT_events
-  LEFT JOIN default_DOT_users
-    ON default_DOT_events.user_id = default_DOT_users.user_id
-    AND default_DOT_events.event_start_date = default_DOT_users.snapshot_date
-  INNER JOIN default_DOT_countries
-    ON default_DOT_users.registration_country = default_DOT_countries.country_code
+  LEFT JOIN default_DOT_users AS user_direct
+    ON default_DOT_events.user_id = user_direct.user_id
+    AND default_DOT_events.event_start_date = user_direct.snapshot_date
+  INNER JOIN default_DOT_countries AS user_direct__registration_country
+    ON user_direct.registration_country = user_direct__registration_country.country_code
+  WHERE  user_direct__registration_country.name = 'NZ'
   GROUP BY
-    default_DOT_users.snapshot_date,
-    default_DOT_users.registration_country
+    user_direct__registration_country.name,
+    user_direct.snapshot_date,
+    user_direct.registration_country
 )
 SELECT
+  default_DOT_events_metrics.default_DOT_countries_DOT_name_LBRACK_user_direct_MINUS__GT_registration_country_RBRACK,
   default_DOT_events_metrics.default_DOT_users_DOT_snapshot_date_LBRACK_user_direct_RBRACK,
   default_DOT_events_metrics.default_DOT_users_DOT_registration_country_LBRACK_user_direct_RBRACK,
   default_DOT_events_metrics.default_DOT_elapsed_secs
 FROM default_DOT_events_metrics
 """
     assert str(parse(query)) == str(parse(expected))
+    assert data["columns"] == [
+        {
+            "column": "name[user_direct->registration_country]",
+            "name": "default_DOT_countries_DOT_name_LBRACK_user_direct_MINUS__GT_registration_country_RBRACK",
+            "node": "default.countries",
+            "semantic_entity": "default.countries.name[user_direct->registration_country]",
+            "semantic_type": "dimension",
+            "type": "string",
+        },
+        {
+            "column": "snapshot_date[user_direct]",
+            "name": "default_DOT_users_DOT_snapshot_date_LBRACK_user_direct_RBRACK",
+            "node": "default.users",
+            "semantic_entity": "default.users.snapshot_date[user_direct]",
+            "semantic_type": "dimension",
+            "type": "int",
+        },
+        {
+            "column": "registration_country[user_direct]",
+            "name": "default_DOT_users_DOT_registration_country_LBRACK_user_direct_RBRACK",
+            "node": "default.users",
+            "semantic_entity": "default.users.registration_country[user_direct]",
+            "semantic_type": "dimension",
+            "type": "string",
+        },
+        {
+            "column": "default_DOT_elapsed_secs",
+            "name": "default_DOT_elapsed_secs",
+            "node": "default.elapsed_secs",
+            "semantic_entity": "default.elapsed_secs.default_DOT_elapsed_secs",
+            "semantic_type": "metric",
+            "type": "bigint",
+        },
+    ]
 
 
 @pytest.mark.asyncio
@@ -781,40 +864,17 @@ async def test_measures_sql_with_dimension_roles(
 )
 SELECT
   default_DOT_events.elapsed_secs default_DOT_events_DOT_elapsed_secs,
-  default_DOT_countries.name default_DOT_countries_DOT_name
+  user_direct__registration_country.name default_DOT_countries_DOT_name_LBRACK_user_direct_MINUS__GT_registration_country_RBRACK,
+  user_direct.snapshot_date default_DOT_users_DOT_snapshot_date_LBRACK_user_direct_RBRACK,
+  user_direct.registration_country default_DOT_users_DOT_registration_country_LBRACK_user_direct_RBRACK
 FROM default_DOT_events
-LEFT JOIN default_DOT_users
-  ON default_DOT_events.user_id = default_DOT_users.user_id
-  AND default_DOT_events.event_start_date = default_DOT_users.snapshot_date
-INNER JOIN default_DOT_countries
-  ON default_DOT_users.registration_country = default_DOT_countries.country_code"""
+LEFT JOIN default_DOT_users AS user_direct
+  ON default_DOT_events.user_id = user_direct.user_id
+  AND default_DOT_events.event_start_date = user_direct.snapshot_date
+INNER JOIN default_DOT_countries AS user_direct__registration_country
+  ON user_direct.registration_country = user_direct__registration_country.country_code
+WHERE  user_direct__registration_country.name = 'UG'"""
     assert str(parse(query)) == str(parse(expected))
-    # TODO Implement caching for v2 measures SQL endpoint
-    # query_request = (
-    #     (
-    #         await session.execute(
-    #             select(QueryRequest).where(
-    #                 QueryRequest.query_type == QueryBuildType.MEASURES,
-    #             ),
-    #         )
-    #     )
-    #     .scalars()
-    #     .all()
-    # )
-    # assert len(query_request) == 1
-    # assert query_request[0].nodes == ["default.elapsed_secs@v1.0"]
-    # assert query_request[0].parents == [
-    #     "default.events@v1.0",
-    #     "default.events_table@v1.0",
-    # ]
-    # assert query_request[0].dimensions == [
-    #     "default.countries.name[user_direct->registration_country]@v1.0",
-    #     "default.users.snapshot_date[user_direct]@v1.0",
-    #     "default.users.registration_country[user_direct]@v1.0",
-    # ]
-    # assert query_request[0].filters == [
-    #     "default.countries.name[user_direct -> registration_country]@v1.0 = 'UG'",
-    # ]
 
 
 @pytest.mark.asyncio
@@ -826,7 +886,6 @@ async def test_reference_dimension_links_errors(
     Test various reference dimension link errors
     """
     # Not a dimension node being linked
-    dimensions_link_client.post("/nodes/{}")
     response = await dimensions_link_client.post(
         "/nodes/default.events/columns/user_registration_country/link",
         params={
@@ -996,8 +1055,8 @@ FROM default_DOT_events"""
         {
             "name": "default_DOT_users_DOT_registration_country",
             "type": "string",
-            "column": "registration_country",
-            "node": "default.users",
+            "column": "user_registration_country",
+            "node": "default.events",
             "semantic_entity": "default.users.registration_country",
             "semantic_type": "dimension",
         },
@@ -1006,6 +1065,7 @@ FROM default_DOT_events"""
         "/nodes/default.events/columns/user_registration_country/link",
     )
     assert response.status_code == 200
+    response = await dimensions_link_client.get("/sql/measures/v2", params=sql_params)
     response = await dimensions_link_client.get("/sql/measures/v2", params=sql_params)
     response_data = response.json()
     expected_sql = """
@@ -1107,3 +1167,88 @@ async def test_dimension_link_cross_join(
     FROM default_DOT_events CROSS JOIN default_DOT_areas
     """
     assert str(parse(response.json()["sql"])) == str(parse(expected))
+
+
+@pytest.mark.asyncio
+async def test_dimension_link_deleted_dimension_node(
+    dimensions_link_client: AsyncClient,
+    link_events_to_users_without_role,
+):
+    """
+    Test dimension links with deleted dimension node
+    """
+    response = await link_events_to_users_without_role()
+    assert response.json() == {
+        "message": "Dimension node default.users has been successfully linked to node "
+        "default.events.",
+    }
+    response = await dimensions_link_client.get("/nodes/default.events")
+    assert [
+        link["dimension"]["name"] for link in response.json()["dimension_links"]
+    ] == ["default.users"]
+
+    gql_find_nodes_query = """
+      query Node {
+        findNodes(names: ["default.events"]) {
+          current {
+            dimensionLinks {
+              dimension {
+                name
+              }
+            }
+          }
+        }
+      }
+    """
+    response = await dimensions_link_client.post(
+        "/graphql",
+        json={"query": gql_find_nodes_query},
+    )
+    assert response.json()["data"]["findNodes"] == [
+        {
+            "current": {"dimensionLinks": [{"dimension": {"name": "default.users"}}]},
+        },
+    ]
+
+    # Deactivate the dimension node
+    response = await dimensions_link_client.delete("/nodes/default.users")
+
+    # The dimension link should be hidden
+    response = await dimensions_link_client.get("/nodes/default.events")
+    assert response.json()["dimension_links"] == []
+    response = await dimensions_link_client.post(
+        "/graphql",
+        json={"query": gql_find_nodes_query},
+    )
+    assert response.json()["data"]["findNodes"] == [{"current": {"dimensionLinks": []}}]
+
+    # Restore the dimension node
+    response = await dimensions_link_client.post("/nodes/default.users/restore")
+    assert response.status_code == 200
+
+    # The dimension link should be recovered
+    response = await dimensions_link_client.get("/nodes/default.events")
+    assert [
+        link["dimension"]["name"] for link in response.json()["dimension_links"]
+    ] == ["default.users"]
+    response = await dimensions_link_client.post(
+        "/graphql",
+        json={"query": gql_find_nodes_query},
+    )
+    assert response.json()["data"]["findNodes"] == [
+        {
+            "current": {"dimensionLinks": [{"dimension": {"name": "default.users"}}]},
+        },
+    ]
+
+    # Hard delete the dimension node
+    response = await dimensions_link_client.delete("/nodes/default.users/hard")
+
+    # The dimension link should be gone
+    response = await dimensions_link_client.get("/nodes/default.events")
+    assert response.json()["dimension_links"] == []
+    response = await dimensions_link_client.post(
+        "/graphql",
+        json={"query": gql_find_nodes_query},
+    )
+    assert response.json()["data"]["findNodes"] == [{"current": {"dimensionLinks": []}}]

@@ -10,7 +10,7 @@ import re
 import time
 import uuid
 from http import HTTPStatus
-from typing import Callable, Dict, List, Optional, Set, Tuple, cast
+from typing import Callable, Dict, List, Optional, Set, Tuple
 
 from fastapi import Depends
 from sqlalchemy import select
@@ -20,12 +20,11 @@ from sqlalchemy.sql.operators import and_, is_
 
 from datajunction_server.api.notifications import get_notifier
 from datajunction_server.construction.build import (
-    build_materialized_cube_node,
-    build_metric_nodes,
     get_default_criteria,
     rename_columns,
     validate_shared_dimensions,
 )
+from datajunction_server.construction.build_v2 import FullColumnName
 from datajunction_server.construction.dj_query import build_dj_query
 from datajunction_server.database.attributetype import AttributeType
 from datajunction_server.database.catalog import Catalog
@@ -62,11 +61,13 @@ from datajunction_server.models.materialization import (
     MaterializationConfigOutput,
 )
 from datajunction_server.models.query import ColumnMetadata, QueryWithResults
-from datajunction_server.naming import LOOKUP_CHARS
+from datajunction_server.naming import from_amenable_name
 from datajunction_server.service_clients import QueryServiceClient
 from datajunction_server.sql.parsing import ast
 from datajunction_server.typing import END_JOB_STATES
-from datajunction_server.utils import SEPARATOR, refresh_if_needed
+from datajunction_server.utils import SEPARATOR
+
+from datajunction_server.models.engine import Dialect
 
 _logger = logging.getLogger(__name__)
 
@@ -103,15 +104,17 @@ async def get_node_by_name(
     """
     Get a node by name
     """
+    from datajunction_server.models.node import NodeOutput
+
     statement = select(Node).where(Node.name == name)
     if not include_inactive:
         statement = statement.where(is_(Node.deactivated_at, None))
     if node_type:
         statement = statement.where(Node.type == node_type)
     if with_current:
-        statement = statement.options(joinedload(Node.current)).options(
-            joinedload(Node.tags),
-        )
+        # Use full NodeOutput load options to ensure all required fields
+        # (like dimension_links) are eagerly loaded for serialization
+        statement = statement.options(*NodeOutput.load_options())
         result = await session.execute(statement)
         node = result.unique().scalar_one_or_none()
     else:
@@ -237,29 +240,86 @@ async def get_query(
     return query_ast
 
 
-def find_bound_dimensions(
-    validated_node: NodeRevision,
-    dependencies_map: Dict[NodeRevision, List[ast.Table]],
+async def find_required_dimensions(
+    session: AsyncSession,
+    required_dimensions: list[str],
+    parent_columns: list[Column],
 ) -> Tuple[Set[str], List[Column]]:
     """
-    Finds the matched required dimensions
+    Find Column objects for required dimension paths.
+
+    Required dimensions can be specified as:
+    - Full path: "common.dimensions.date.dateint" -> look up dimension node and find column
+    - Short name: "status" -> find in parent_columns
+
+    Uses a single DB query to fetch all needed dimension nodes.
+
+    Returns:
+        Tuple of (invalid dimension paths, matched Column objects)
     """
-    invalid_required_dimensions = set()
-    matched_bound_columns = []
-    required_dimensions_mapping = {}
-    for col in validated_node.required_dimensions:
-        column_name = col.name if isinstance(col, Column) else col
-        for parent in dependencies_map.keys():
-            parent_columns = {
-                parent_col.name: parent_col for parent_col in parent.columns
-            }
-            required_dimensions_mapping[column_name] = parent_columns.get(column_name)
-    for column_name, required_column in required_dimensions_mapping.items():
-        if required_column is not None:
-            matched_bound_columns.append(required_column)
+    invalid_required_dimensions: Set[str] = set()
+    matched_columns: List[Column] = []
+
+    # Build lookup for parent columns
+    parent_col_map = {col.name: col for col in parent_columns}
+
+    # Separate full paths from short names
+    # full_paths: {dim_node_name: [(full_path, col_name), ...]}
+    full_paths: Dict[str, List[Tuple[str, str]]] = {}
+    short_names: List[str] = []
+
+    for required_dim in required_dimensions:
+        if SEPARATOR in required_dim:
+            dim_node_name, col_name = required_dim.rsplit(SEPARATOR, 1)
+            # Strip role suffix if present (e.g., "week[order]" -> "week")
+            # Role is DJ-specific syntax, not part of actual column name
+            if "[" in col_name:
+                col_name = col_name.split("[")[0]
+            if dim_node_name not in full_paths:  # pragma: no cover
+                full_paths[dim_node_name] = []
+            full_paths[dim_node_name].append((required_dim, col_name))
         else:
-            invalid_required_dimensions.add(column_name)
-    return invalid_required_dimensions, matched_bound_columns  # type: ignore
+            short_names.append(required_dim)
+
+    # Handle short names from parent columns
+    for short_name in short_names:
+        if short_name in parent_col_map:
+            matched_columns.append(parent_col_map[short_name])
+        else:
+            invalid_required_dimensions.add(short_name)  # pragma: no cover
+
+    # Single query to fetch all needed dimension nodes
+    if full_paths:
+        result = await session.execute(
+            select(Node)
+            .filter(Node.name.in_(full_paths.keys()))
+            .options(
+                selectinload(Node.current).options(
+                    selectinload(NodeRevision.columns),
+                ),
+            ),
+        )
+        dim_nodes = {node.name: node for node in result.scalars().all()}
+
+        # Match columns for each full path
+        for dim_node_name, paths in full_paths.items():
+            dim_node = dim_nodes.get(dim_node_name)
+            if not dim_node or not dim_node.current:  # pragma: no cover
+                # Node not found - all paths for this node are invalid
+                for full_path, _ in paths:
+                    invalid_required_dimensions.add(full_path)
+                continue
+
+            # Build column lookup for this dimension
+            dim_col_map = {col.name: col for col in dim_node.current.columns}
+
+            for full_path, col_name in paths:
+                if col_name in dim_col_map:
+                    matched_columns.append(dim_col_map[col_name])
+                else:
+                    invalid_required_dimensions.add(full_path)
+
+    return invalid_required_dimensions, matched_columns
 
 
 async def resolve_downstream_references(
@@ -356,8 +416,11 @@ def map_dimensions_to_roles(dimensions: List[str]) -> Dict[str, str]:
     For example, ["default.users.user_id[user]"] would turn into
     {"default.users.user_id": "[user]"}
     """
-    dimension_roles = [re.findall(COLUMN_NAME_REGEX, dim)[0] for dim in dimensions]
-    return {dim_rols[0]: dim_rols[1] for dim_rols in dimension_roles}
+    dimension_attrs = [FullColumnName(dim) for dim in dimensions]
+    return {
+        attr.node_name + SEPARATOR + attr.column_name: attr.role  # type: ignore
+        for attr in dimension_attrs
+    }
 
 
 async def validate_cube(
@@ -376,7 +439,7 @@ async def validate_cube(
     # Verify that the provided metrics are metric nodes
     metrics: List[Column] = [metric.current.columns[0] for metric in metric_nodes]
     for metric in metrics:
-        await session.refresh(metric, ["node_revisions"])
+        await session.refresh(metric, ["node_revision"])
     if not metrics:
         raise DJInvalidInputException(
             message=("At least one metric is required"),
@@ -402,16 +465,20 @@ async def validate_cube(
         dimension_names,
     )
     dimension_mapping: Dict[str, Node] = {
-        f"{node_name}{SEPARATOR}{attr}": dimension_nodes[node_name]
-        for node_name, attr in dimension_attributes
+        f"{attr.node_name}{SEPARATOR}{attr.column_name}": dimension_nodes[
+            attr.node_name
+        ]
+        for attr in dimension_attributes
     }
     dimensions: List[Column] = []
-    for node_name, column_name in dimension_attributes:
-        dimension_node = dimension_mapping[f"{node_name}{SEPARATOR}{column_name}"]
+    for attr in dimension_attributes:
+        dimension_node = dimension_mapping[
+            f"{attr.node_name}{SEPARATOR}{attr.column_name}"
+        ]
         columns = {col.name: col for col in dimension_node.current.columns}  # type: ignore
 
-        column_name_without_role = column_name
-        match = re.fullmatch(COLUMN_NAME_REGEX, column_name)
+        column_name_without_role = attr.column_name
+        match = re.fullmatch(COLUMN_NAME_REGEX, attr.column_name)
         if match:
             column_name_without_role = match.groups()[0]
 
@@ -419,7 +486,9 @@ async def validate_cube(
             dimensions.append(columns[column_name_without_role])
 
     if require_dimensions and not dimensions:
-        raise DJInvalidInputException(message="At least one dimension is required")
+        raise DJInvalidInputException(  # pragma: no cover
+            message="At least one dimension is required",
+        )
 
     if len(set(catalogs)) > 1:
         raise DJInvalidInputException(
@@ -474,14 +543,14 @@ async def check_metrics_exist(session: AsyncSession, metrics: list[str]) -> list
 async def check_dimension_attributes_exist(
     session: AsyncSession,
     dimensions: list[str],
-) -> Tuple[list[list[str]], Dict[str, Node]]:
+) -> Tuple[list[FullColumnName], Dict[str, Node]]:
     """
     Verify that the provided dimension attributes exist
     """
-    dimension_attributes: List[List[str]] = [
-        dimension_attribute.rsplit(".", 1) for dimension_attribute in dimensions
+    dimension_attributes: list[FullColumnName] = [
+        FullColumnName(dimension_attribute) for dimension_attribute in dimensions
     ]
-    dimension_node_names = [node_name for node_name, _ in dimension_attributes]
+    dimension_node_names = [attr.node_name for attr in dimension_attributes]
     dimension_nodes: Dict[str, Node] = {
         node.name: node
         for node in await Node.get_by_names(
@@ -489,7 +558,9 @@ async def check_dimension_attributes_exist(
             dimension_node_names,
             options=[
                 joinedload(Node.current).options(
-                    selectinload(NodeRevision.columns),
+                    selectinload(NodeRevision.columns).options(
+                        selectinload(Column.node_revision),
+                    ),
                     defer(NodeRevision.query_ast),
                 ),
             ],
@@ -499,9 +570,9 @@ async def check_dimension_attributes_exist(
     if missing_dimensions:  # pragma: no cover
         missing_dimension_attributes = ", ".join(  # pragma: no cover
             [
-                attr
-                for node_name, attr in dimension_attributes
-                if node_name in missing_dimensions
+                attr.name
+                for attr in dimension_attributes
+                if attr.node_name in missing_dimensions
             ],
         )
         message = (
@@ -602,68 +673,27 @@ async def find_existing_cube(
     return None
 
 
-async def build_sql_for_multiple_metrics(
+async def resolve_engine(
     session: AsyncSession,
-    metrics: List[str],
-    dimensions: List[str],
-    filters: List[str] = None,
-    orderby: List[str] = None,
-    limit: Optional[int] = None,
-    engine_name: Optional[str] = None,
-    engine_version: Optional[str] = None,
-    access_control: Optional[access.AccessControlStore] = None,
-    ignore_errors: bool = True,
-    use_materialized: bool = True,
-    query_parameters: Optional[Dict[str, str]] = None,
-) -> Tuple[TranslatedSQL, Engine, Catalog]:
+    node: Node,
+    engine_name: str | None = None,
+    engine_version: str | None = None,
+    dialect: Dialect | None = None,
+) -> Engine:
     """
-    Build SQL for multiple metrics. Used by both /sql and /data endpoints
+    Resolve which engine should be used to execute node SQL.
+    The engine is determined in the following order:
+      1. If an explicit engine name and version are provided, fetch that engine
+         from the database.
+      2. Otherwise, fall back to the first engine associated with the node's
+         catalog that matches the requested dialect.
+      3. Validate that the chosen engine is available for the given node.
     """
-    if not filters:
-        filters = []
-    if not orderby:
-        orderby = []
-
-    metric_columns, metric_nodes, _, dimension_columns, _ = await validate_cube(
-        session,
-        metrics,
-        dimensions,
-        require_dimensions=False,
-    )
-    leading_metric_node = await Node.get_by_name(
-        session,
-        metrics[0],
-        options=[
-            joinedload(Node.current).options(
-                joinedload(NodeRevision.catalog).options(joinedload(Catalog.engines)),
-            ),
-        ],
-    )
-    if access_control:
-        access_control.add_request_by_node(leading_metric_node.current)  # type: ignore
-    available_engines = (
-        leading_metric_node.current.catalog.engines  # type: ignore
-        if leading_metric_node.current.catalog  # type: ignore
-        else []
-    )
-
-    # Try to find a built cube that already has the given metrics and dimensions
-    # The cube needs to have a materialization configured and an availability state
-    # posted in order for us to use the materialized datasource
-    cube = await find_existing_cube(
-        session,
-        metric_columns,
-        dimension_columns,
-        materialized=True,
-    )
-    materialized_cube_catalog = None
-    if cube:
-        materialized_cube_catalog = await get_catalog_by_name(
-            session,
-            cube.availability.catalog,  # type: ignore
-        )
-
-    # Check if selected engine is available
+    available_engines = [
+        eng
+        for eng in node.current.catalog.engines
+        if not dialect or eng.dialect == dialect
+    ]
     engine = (
         await get_engine(session, engine_name, engine_version)  # type: ignore
         if engine_name
@@ -671,101 +701,10 @@ async def build_sql_for_multiple_metrics(
     )
     if engine not in available_engines:
         raise DJInvalidInputException(  # pragma: no cover
-            f"The selected engine is not available for the node {metrics[0]}. "
+            f"The selected engine is not available for the node {node.name}. "
             f"Available engines include: {', '.join(engine.name for engine in available_engines)}",
         )
-
-    # Do not use the materialized cube if the chosen engine is not available for
-    # the materialized cube's catalog
-    if (
-        cube
-        and materialized_cube_catalog
-        and engine.name not in [eng.name for eng in materialized_cube_catalog.engines]
-    ):
-        cube = None
-
-    validate_orderby(orderby, metrics, dimensions)
-
-    if cube and cube.availability and use_materialized and materialized_cube_catalog:
-        if access_control:  # pragma: no cover
-            access_control.add_request_by_node(cube)
-            access_control.state = access.AccessControlState.INDIRECT
-            access_control.raise_if_invalid_requests()
-        query_ast = build_materialized_cube_node(
-            metric_columns,
-            dimension_columns,
-            cube,
-            filters,
-            orderby,
-            limit,
-        )
-        query_metric_columns = [
-            ColumnMetadata(
-                name=col.name,
-                type=str(col.type),
-                column=col.name,
-                node=col.node_revision().name,  # type: ignore
-            )
-            for col in metric_columns
-        ]
-        query_dimension_columns = [
-            ColumnMetadata(
-                name=(col.node_revision().name + SEPARATOR + col.name).replace(  # type: ignore
-                    SEPARATOR,
-                    f"_{LOOKUP_CHARS.get(SEPARATOR)}_",
-                ),
-                type=str(col.type),
-                node=col.node_revision().name,  # type: ignore
-                column=col.name,  # type: ignore
-            )
-            for col in dimension_columns
-        ]
-        engine = materialized_cube_catalog.engines[0]
-        return (
-            TranslatedSQL.create(
-                sql=str(query_ast),
-                columns=query_metric_columns + query_dimension_columns,
-                dialect=materialized_cube_catalog.engines[0].dialect,
-            ),
-            engine,
-            cube.catalog,
-        )
-
-    query_ast = await build_metric_nodes(
-        session,
-        metric_nodes,
-        filters=filters or [],
-        dimensions=dimensions or [],
-        orderby=orderby or [],
-        limit=limit,
-        access_control=access_control,
-        ignore_errors=ignore_errors,
-        query_parameters=query_parameters,
-    )
-    columns = [
-        assemble_column_metadata(col)  # type: ignore
-        for col in query_ast.select.projection
-    ]
-    upstream_tables = [tbl for tbl in query_ast.find_all(ast.Table) if tbl.dj_node]
-    for tbl in upstream_tables:
-        await refresh_if_needed(session, tbl.dj_node, ["availability"])
-    return (
-        TranslatedSQL.create(
-            sql=str(query_ast),
-            columns=columns,
-            dialect=engine.dialect if engine else None,
-            upstream_tables=[
-                f"{leading_metric_node.current.catalog.name}.{tbl.identifier()}"  # type: ignore
-                for tbl in upstream_tables
-                # If a table has a corresponding node with an associated physical table (either
-                # a source node or a node with a materialized table).
-                if cast(NodeRevision, tbl.dj_node).type == NodeType.SOURCE
-                or cast(NodeRevision, tbl.dj_node).availability is not None
-            ],
-        ),
-        engine,
-        leading_metric_node.current.catalog,  # type: ignore
-    )
+    return engine
 
 
 async def query_event_stream(
@@ -809,8 +748,8 @@ async def query_event_stream(
                 "query end state detected (%s), sending final event to the client",
                 query_next.state,
             )
-            if query_next.results.__root__:  # pragma: no cover
-                query_next.results.__root__[0].columns = columns or []
+            if query_next.results.root:  # pragma: no cover
+                query_next.results.root[0].columns = columns or []
             yield {
                 "event": "message",
                 "id": uuid.uuid4(),
@@ -892,24 +831,29 @@ async def build_sql_for_dj_query(  # pragma: no cover
 
 def assemble_column_metadata(
     column: ast.Column,
-    # node_name: Union[List[str], str],
+    use_semantic_metadata: bool = False,
 ) -> ColumnMetadata:
     """
     Extract column metadata from AST
     """
+    has_semantic_entity = hasattr(column, "semantic_entity") and column.semantic_entity
+
+    if use_semantic_metadata and has_semantic_entity:
+        column_name = column.semantic_entity.split(SEPARATOR)[-1]  # type: ignore
+        node_name = SEPARATOR.join(column.semantic_entity.split(SEPARATOR)[:-1])  # type: ignore
+    else:
+        column_name = getattr(column.name, "name", None)
+        node_name = (
+            from_amenable_name(column.table.alias_or_name.name)  # type: ignore
+            if hasattr(column, "table") and column.table
+            else None
+        )
+
     metadata = ColumnMetadata(
         name=column.alias_or_name.name,
         type=str(column.type),
-        column=(
-            column.semantic_entity.split(SEPARATOR)[-1]
-            if hasattr(column, "semantic_entity") and column.semantic_entity
-            else None
-        ),
-        node=(
-            SEPARATOR.join(column.semantic_entity.split(SEPARATOR)[:-1])
-            if hasattr(column, "semantic_entity") and column.semantic_entity
-            else None
-        ),
+        column=column_name,
+        node=node_name,
         semantic_entity=column.semantic_entity
         if hasattr(column, "semantic_entity")
         else None,
@@ -1002,13 +946,13 @@ def get_node_revision_materialization(
             )
             if materialization.strategy != MaterializationStrategy.INCREMENTAL_TIME:
                 info.urls = [info.urls[0]]
-            materialization_config_output = MaterializationConfigOutput.from_orm(
+            materialization_config_output = MaterializationConfigOutput.model_validate(
                 materialization,
             )
             materializations.append(
                 MaterializationConfigInfoUnified(
-                    **materialization_config_output.dict(),
-                    **info.dict(),
+                    **materialization_config_output.model_dump(),
+                    **info.model_dump(),
                 ),
             )
     return materializations

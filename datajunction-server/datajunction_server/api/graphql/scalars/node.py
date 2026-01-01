@@ -1,16 +1,23 @@
 """Node-related scalars."""
 
 import datetime
+from enum import Enum
 from typing import List, Optional
 
 import strawberry
 from strawberry.scalars import JSON
 from strawberry.types import Info
+from sqlalchemy.orm.attributes import InstrumentedAttribute
 
 from datajunction_server.api.graphql.scalars import BigInt
 from datajunction_server.api.graphql.scalars.availabilitystate import AvailabilityState
 from datajunction_server.api.graphql.scalars.catalog_engine import Catalog
-from datajunction_server.api.graphql.scalars.column import Column, NodeName, Partition
+from datajunction_server.api.graphql.scalars.column import (
+    Column,
+    NodeName,
+    NodeNameVersion,
+    Partition,
+)
 from datajunction_server.api.graphql.scalars.materialization import (
     MaterializationConfig,
 )
@@ -38,6 +45,30 @@ NodeStatus = strawberry.enum(NodeStatus_)
 NodeMode = strawberry.enum(NodeMode_)
 JoinType = strawberry.enum(JoinType_)
 JoinCardinality = strawberry.enum(JoinCardinality_)
+
+
+@strawberry.enum
+class NodeSortField(Enum):
+    """
+    Available node sort fields
+    """
+
+    NAME = ("name", DBNode.name)
+    DISPLAY_NAME = ("display_name", DBNodeRevision.display_name)
+    TYPE = ("type", DBNode.type)
+    STATUS = ("status", DBNodeRevision.status)
+    MODE = ("mode", DBNodeRevision.mode)
+    CREATED_AT = ("created_at", DBNode.created_at)
+    UPDATED_AT = ("updated_at", DBNodeRevision.updated_at)
+
+    # The database column that this sort field maps to
+    column: InstrumentedAttribute
+
+    def __new__(cls, value, column):
+        obj = object.__new__(cls)
+        obj._value_ = value  # GraphQL will serialize this
+        obj.column = column
+        return obj
 
 
 @strawberry.type
@@ -114,6 +145,7 @@ class NodeRevision:
     mode: Optional[NodeMode]  # type: ignore
     description: str = ""
     updated_at: datetime.datetime
+    custom_metadata: Optional[JSON] = None
 
     @strawberry.field
     def catalog(self, root: "DBNodeRevision") -> Optional[Catalog]:
@@ -123,11 +155,59 @@ class NodeRevision:
         return Catalog.from_pydantic(root.catalog)  # type: ignore
 
     query: Optional[str] = None
-    columns: List[Column]
+
+    @strawberry.field
+    def columns(
+        self,
+        root: "DBNodeRevision",
+        attributes: list[str] | None = None,
+    ) -> list[Column]:
+        """
+        The columns of the node
+        """
+        return [
+            Column(  # type: ignore
+                name=col.name,
+                display_name=col.display_name,
+                type=col.type,
+                attributes=col.attributes,
+                dimension=(
+                    NodeName(name=col.dimension.name)  # type: ignore
+                    if col.dimension
+                    else None
+                ),
+                partition=Partition(
+                    type_=col.partition.type_,  # type: ignore
+                    format=col.partition.format,
+                    granularity=col.partition.granularity,
+                    expression=col.partition.temporal_expression(),
+                )
+                if col.partition
+                else None,
+            )
+            for col in root.columns
+            if (
+                any(col.has_attribute(attr) for attr in attributes)
+                if attributes
+                else True
+            )
+        ]
 
     # Dimensions and data graph-related outputs
-    dimension_links: List[DimensionLink]
-    parents: List[NodeName]
+    @strawberry.field
+    def dimension_links(self) -> list[DimensionLink]:
+        """
+        Returns the dimension links for this node revision.
+        """
+        return [
+            link
+            for link in self.dimension_links
+            if link.dimension is not None  # handles hard-deleted dimension nodes
+            and link.dimension.deactivated_at
+            is None  # handles deactivated dimension nodes
+        ]
+
+    parents: List[NodeNameVersion]
 
     # Materialization-related outputs
     availability: Optional[AvailabilityState] = None
@@ -178,18 +258,25 @@ class NodeRevision:
         )
 
     @strawberry.field
-    def extracted_measures(self, root: "DBNodeRevision") -> DecomposedMetric | None:
+    async def extracted_measures(
+        self,
+        root: "DBNodeRevision",
+        info: Info,
+    ) -> DecomposedMetric | None:
         """
         A list of metric components for a metric node
         """
         if root.type != NodeType.METRIC:
             return None
-        extractor = MetricComponentExtractor.from_query_string(root.query)
-        components, derived_ast = extractor.extract()
+        session = info.context["session"]  # type: ignore
+        extractor = MetricComponentExtractor(root.id)
+        components, derived_ast = await extractor.extract(session)
+        # The derived_expression is the combiner (how to combine merged components)
+        combiner_expr = str(derived_ast.select.projection[0])
         return DecomposedMetric(  # type: ignore
             components=components,
+            combiner=combiner_expr,
             derived_query=str(derived_ast),
-            derived_expression=str(derived_ast.select.projection[0]),
         )
 
     # Only cubes will have these fields
@@ -268,13 +355,14 @@ class Node:
     deactivated_at: Optional[datetime.datetime]
 
     current: NodeRevision
-    revisions: List[NodeRevision]
+    revisions: list[NodeRevision]
 
-    tags: List[TagBase]
+    tags: list[TagBase]
     created_by: User
+    owners: list[User]
 
     @strawberry.field
-    def edited_by(self, root: "DBNode") -> List[str]:
+    def edited_by(self, root: "DBNode") -> list[str]:
         """
         The users who edited this node
         """

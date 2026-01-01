@@ -56,6 +56,13 @@ class ErrorCode(IntEnum):
     INVALID_PARENT = 600
     INVALID_DIMENSION = 601
     INVALID_METRIC = 602
+    INVALID_DIMENSION_LINK = 603
+    INVALID_CUBE = 604
+
+    # Deployment
+    TAG_NOT_FOUND = 700
+    CATALOG_NOT_FOUND = 701
+    INVALID_NAMESPACE = 702
 
 
 class DebugType(TypedDict, total=False):
@@ -90,7 +97,7 @@ class DJError(BaseModel):
 
     code: ErrorCode
     message: str
-    debug: Optional[Dict[str, Any]]
+    debug: Optional[Dict[str, Any]] = None
     context: str = ""
 
     def __str__(self) -> str:
@@ -127,7 +134,7 @@ class DJWarning(BaseModel):
 
     code: Optional[ErrorCode] = None
     message: str
-    debug: Optional[Dict[str, Any]]
+    debug: Optional[Dict[str, Any]] = None
 
 
 DBAPIExceptions = Literal[
@@ -194,8 +201,8 @@ class DJException(Exception):
         """
         return {
             "message": self.message,
-            "errors": [error.dict() for error in self.errors],
-            "warnings": [warning.dict() for warning in self.warnings],
+            "errors": [error.model_dump() for error in self.errors],
+            "warnings": [warning.model_dump() for warning in self.warnings],
         }
 
     def __str__(self) -> str:
@@ -245,6 +252,12 @@ class DJInvalidMetricQueryException(DJInvalidInputException):
     """
 
     http_status_code: int = HTTPStatus.BAD_REQUEST
+
+
+class DJInvalidDeploymentConfig(DJInvalidInputException):
+    """
+    Exception raised when the deployment configuration is incorrect.
+    """
 
 
 class DJNotImplementedException(DJException):

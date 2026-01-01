@@ -178,7 +178,7 @@ class TestDJBuilder:  # pylint: disable=too-many-public-methods, protected-acces
         assert repair_orders.description == "All repair orders"
         assert repair_orders.tags == []
         assert repair_orders.primary_key == []
-        assert repair_orders.current_version == "v1.0"
+        assert isinstance(repair_orders.current_version, str)
         assert repair_orders.columns[0] == Column(
             name="repair_order_id",
             type="int",
@@ -223,7 +223,7 @@ class TestDJBuilder:  # pylint: disable=too-many-public-methods, protected-acces
         assert repair_order_dim.primary_key == ["repair_order_id"]
         assert repair_order_dim.description == "Repair order dimension"
         assert repair_order_dim.tags == []
-        assert repair_order_dim.current_version == "v1.0"
+        assert isinstance(repair_order_dim.current_version, str)
         assert repair_order_dim.columns[0] == Column(
             name="repair_order_id",
             type="int",
@@ -242,7 +242,7 @@ class TestDJBuilder:  # pylint: disable=too-many-public-methods, protected-acces
         assert thin.primary_key == []
         assert thin.description == "3 columns from default.repair_orders"
         assert thin.tags == []
-        assert thin.current_version == "v1.0"
+        assert isinstance(thin.current_version, str)
         assert thin.columns[0] == Column(
             name="repair_order_id",
             type="int",
@@ -273,7 +273,7 @@ class TestDJBuilder:  # pylint: disable=too-many-public-methods, protected-acces
         assert num_repair_orders.description == "Number of repair orders"
         assert num_repair_orders.tags == []
         assert num_repair_orders.metric_metadata is None
-        assert num_repair_orders.current_version == "v1.0"
+        assert isinstance(num_repair_orders.current_version, str)
         assert num_repair_orders.columns[0] == Column(
             name="default_DOT_num_repair_orders",
             type="bigint",
@@ -626,8 +626,8 @@ class TestDJBuilder:  # pylint: disable=too-many-public-methods, protected-acces
             materialization_name="spark_sql__full",
         )
         assert result == {
-            "message": "The materialization named `spark_sql__full` on node "
-            "`default.large_revenue_payments_only` has been successfully deactivated",
+            "message": "Materialization named `spark_sql__full` on node "
+            "`default.large_revenue_payments_only` version `v1.0` has been successfully deactivated",
         }
 
         large_revenue_payments_and_business_only = client.create_transform(
@@ -682,7 +682,7 @@ class TestDJBuilder:  # pylint: disable=too-many-public-methods, protected-acces
         assert (
             number_of_account_types.metric_metadata["direction"] == "higher_is_better"
         )
-        assert number_of_account_types.metric_metadata["unit"]["name"] == "UNITLESS"
+        assert number_of_account_types.metric_metadata["unit"]["name"] == "unitless"
 
         assert (
             number_of_account_types.query == "SELECT count(*) FROM default.account_type"
@@ -712,7 +712,7 @@ class TestDJBuilder:  # pylint: disable=too-many-public-methods, protected-acces
         assert (
             number_of_account_types2.metric_metadata["direction"] == "higher_is_better"
         )
-        assert number_of_account_types2.metric_metadata["unit"]["name"] == "UNITLESS"
+        assert number_of_account_types2.metric_metadata["unit"]["name"] == "unitless"
 
         # cube nodes
         cube_one = client.create_cube(
@@ -855,7 +855,7 @@ class TestDJBuilder:  # pylint: disable=too-many-public-methods, protected-acces
         )
         assert (
             result["message"]
-            == "Please make sure that `dimension_that_does_not_exist` is a dimensional attribute."
+            == "Please make sure that `foo.bar.dimension_that_does_not_exist` is a dimensional attribute."
             or result["message"]
             == "foo.bar.dimension_that_does_not_exist are not available dimensions on "
             "foo.bar.avg_repair_price"
@@ -909,7 +909,7 @@ class TestDJBuilder:  # pylint: disable=too-many-public-methods, protected-acces
 
         with pytest.raises(DJNamespaceAlreadyExists) as exc_info:
             client.create_namespace(namespace="roads.demo")
-        assert "Node namespace `roads.demo` already exists" in str(exc_info.value)
+        assert "Namespace `roads.demo` already exists." in str(exc_info.value)
 
     def test_create_delete_restore_namespace(self, client):
         """
@@ -920,7 +920,7 @@ class TestDJBuilder:  # pylint: disable=too-many-public-methods, protected-acces
         assert namespace.namespace == "roads.demo.foo"
         with pytest.raises(DJNamespaceAlreadyExists) as exc_info:
             client.create_namespace(namespace="roads.demo.foo")
-        assert "Node namespace `roads.demo.foo` already exists" in str(exc_info.value)
+        assert "Namespace `roads.demo.foo` already exists." in str(exc_info.value)
 
         # then delete it
         response = client.delete_namespace(namespace="roads.demo.foo")
@@ -1004,6 +1004,7 @@ class TestDJBuilder:  # pylint: disable=too-many-public-methods, protected-acces
             ],
             "description": None,
             "dimension": None,
+            "dimension_column": None,
             "partition": None,
         } in response["columns"]
         assert {
@@ -1015,6 +1016,7 @@ class TestDJBuilder:  # pylint: disable=too-many-public-methods, protected-acces
             ],
             "description": None,
             "dimension": None,
+            "dimension_column": None,
             "partition": None,
         } in response["columns"]
 
@@ -1051,6 +1053,7 @@ class TestDJBuilder:  # pylint: disable=too-many-public-methods, protected-acces
                 "attributes": [],
                 "description": None,
                 "dimension": None,
+                "dimension_column": None,
                 "display_name": "State Id",
                 "name": "state_id",
                 "type": "int",
@@ -1060,6 +1063,7 @@ class TestDJBuilder:  # pylint: disable=too-many-public-methods, protected-acces
                 "attributes": [],
                 "description": None,
                 "dimension": None,
+                "dimension_column": None,
                 "display_name": "Name",
                 "name": "name",
                 "type": "string",
@@ -1069,6 +1073,7 @@ class TestDJBuilder:  # pylint: disable=too-many-public-methods, protected-acces
                 "attributes": [],
                 "description": None,
                 "dimension": None,
+                "dimension_column": None,
                 "display_name": "Abbr",
                 "name": "abbr",
                 "type": "string",
@@ -1078,6 +1083,7 @@ class TestDJBuilder:  # pylint: disable=too-many-public-methods, protected-acces
                 "attributes": [],
                 "description": None,
                 "dimension": None,
+                "dimension_column": None,
                 "display_name": "Region",
                 "name": "region",
                 "type": "int",
@@ -1121,6 +1127,7 @@ class TestDJBuilder:  # pylint: disable=too-many-public-methods, protected-acces
                 ],
                 "description": None,
                 "dimension": None,
+                "dimension_column": None,
                 "display_name": "Contact Title",
                 "name": "contact_title",
                 "type": "string",

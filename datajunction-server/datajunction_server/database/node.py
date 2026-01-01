@@ -4,12 +4,13 @@ import pickle
 import zlib
 from datetime import datetime, timezone
 from functools import partial
-from http import HTTPStatus
-from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 import sqlalchemy as sa
-from pydantic import Extra
-from sqlalchemy import JSON
+from pydantic import ConfigDict
+from sqlalchemy import JSON, and_, desc
+from sqlalchemy.orm import aliased
+
 from sqlalchemy import Column as SqlalchemyColumn
 from sqlalchemy import (
     DateTime,
@@ -25,7 +26,14 @@ from sqlalchemy import (
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.ext.hybrid import hybrid_property
-from sqlalchemy.orm import Mapped, joinedload, mapped_column, relationship, selectinload
+from sqlalchemy.orm import (
+    Mapped,
+    joinedload,
+    mapped_column,
+    relationship,
+    selectinload,
+    MappedColumn,
+)
 from sqlalchemy.sql.base import ExecutableOption
 from sqlalchemy.sql.operators import is_, or_
 
@@ -37,14 +45,23 @@ from datajunction_server.database.column import Column
 from datajunction_server.database.history import History
 from datajunction_server.database.materialization import Materialization
 from datajunction_server.database.metricmetadata import MetricMetadata
+from datajunction_server.database.nodeowner import NodeOwner
 from datajunction_server.database.tag import Tag
 from datajunction_server.database.user import User
 from datajunction_server.errors import (
     DJInvalidInputException,
-    DJInvalidMetricQueryException,
     DJNodeNotFound,
 )
 from datajunction_server.models.base import labelize
+from datajunction_server.models.deployment import (
+    CubeSpec,
+    DimensionReferenceLinkSpec,
+    DimensionSpec,
+    MetricSpec,
+    NodeSpec,
+    SourceSpec,
+    TransformSpec,
+)
 from datajunction_server.models.node import (
     DEFAULT_DRAFT_VERSION,
     BuildCriteria,
@@ -54,12 +71,13 @@ from datajunction_server.models.node import (
 )
 from datajunction_server.models.node_type import NodeType
 from datajunction_server.models.partition import PartitionType
-from datajunction_server.naming import amenable_name
+from datajunction_server.naming import amenable_name, from_amenable_name
 from datajunction_server.typing import UTCDatetime
 from datajunction_server.utils import SEPARATOR, execute_with_retry
 
 if TYPE_CHECKING:
     from datajunction_server.database.dimensionlink import DimensionLink
+    from datajunction_server.database.measure import FrozenMeasure
 
 
 class NodeRelationship(Base):
@@ -68,9 +86,17 @@ class NodeRelationship(Base):
     """
 
     __tablename__ = "noderelationship"
+    __table_args__ = (
+        Index("idx_noderelationship_parent_id", "parent_id"),
+        Index("idx_noderelationship_child_id", "child_id"),
+    )
 
     parent_id: Mapped[int] = mapped_column(
-        ForeignKey("node.id", name="fk_noderelationship_parent_id_node"),
+        ForeignKey(
+            "node.id",
+            name="fk_noderelationship_parent_id_node",
+            ondelete="CASCADE",
+        ),
         primary_key=True,
     )
 
@@ -79,7 +105,11 @@ class NodeRelationship(Base):
     parent_version: Mapped[Optional[str]] = mapped_column(default="latest")
 
     child_id: Mapped[int] = mapped_column(
-        ForeignKey("noderevision.id", name="fk_noderelationship_child_id_noderevision"),
+        ForeignKey(
+            "noderevision.id",
+            name="fk_noderelationship_child_id_noderevision",
+            ondelete="CASCADE",
+        ),
         primary_key=True,
     )
 
@@ -90,14 +120,23 @@ class CubeRelationship(Base):
     """
 
     __tablename__ = "cube"
+    __table_args__ = (Index("idx_cube_cube_id", "cube_id"),)
 
     cube_id: Mapped[int] = mapped_column(
-        ForeignKey("noderevision.id", name="fk_cube_cube_id_noderevision"),
+        ForeignKey(
+            "noderevision.id",
+            name="fk_cube_cube_id_noderevision",
+            ondelete="CASCADE",
+        ),
         primary_key=True,
     )
 
     cube_element_id: Mapped[int] = mapped_column(
-        ForeignKey("column.id", name="fk_cube_cube_element_id_column"),
+        ForeignKey(
+            "column.id",
+            name="fk_cube_cube_element_id_column",
+            ondelete="CASCADE",
+        ),
         primary_key=True,
     )
 
@@ -114,6 +153,7 @@ class BoundDimensionsRelationship(Base):
         ForeignKey(
             "noderevision.id",
             name="fk_metric_required_dimensions_metric_id_noderevision",
+            ondelete="CASCADE",
         ),
         primary_key=True,
     )
@@ -122,6 +162,7 @@ class BoundDimensionsRelationship(Base):
         ForeignKey(
             "column.id",
             name="fk_metric_required_dimensions_bound_dimension_id_column",
+            ondelete="CASCADE",
         ),
         primary_key=True,
     )
@@ -219,6 +260,19 @@ class Node(Base):
         default=None,
     )
 
+    owner_associations = relationship(
+        "NodeOwner",
+        back_populates="node",
+        cascade="all, delete-orphan",
+        overlaps="owners",
+    )
+    owners: Mapped[list[User]] = relationship(
+        "User",
+        secondary="node_owners",
+        back_populates="owned_nodes",
+        overlaps="owner_associations",
+    )
+
     revisions: Mapped[List["NodeRevision"]] = relationship(
         "NodeRevision",
         back_populates="node",
@@ -271,6 +325,130 @@ class Node(Base):
             {entry.user for entry in self.history if entry.user},
         )
 
+    def upstream_cache_key(self, node_type: NodeType | None = None) -> str:
+        base = f"upstream:{self.name}@{self.current_version}"
+        return f"{base}:{node_type.value}" if node_type is not None else base
+
+    async def to_spec(self, session: AsyncSession) -> NodeSpec:
+        """
+        Convert the node to a spec
+        """
+        node_spec_class_map: dict[NodeType, type[NodeSpec]] = {
+            NodeType.SOURCE: SourceSpec,
+            NodeType.TRANSFORM: TransformSpec,
+            NodeType.DIMENSION: DimensionSpec,
+            NodeType.METRIC: MetricSpec,
+            NodeType.CUBE: CubeSpec,
+        }
+
+        await session.refresh(self, ["owners"])
+
+        # Base kwargs common to all node types
+        base_kwargs = dict(
+            name=self.name,
+            node_type=self.type,
+            owners=[owner.username for owner in self.owners],
+            display_name=self.current.display_name,
+            description=self.current.description,
+            tags=[tag.name for tag in self.tags],
+            mode=self.current.mode,
+            custom_metadata=self.current.custom_metadata,
+        )
+
+        # Type-specific extra arguments
+        extra_kwargs: dict[str, Any] = {}
+
+        # Nodes with queries
+        if self.type in (NodeType.TRANSFORM, NodeType.DIMENSION, NodeType.METRIC):
+            extra_kwargs.update(
+                query=self.current.query,
+            )
+
+        if self.type in (
+            NodeType.TRANSFORM,
+            NodeType.DIMENSION,
+            NodeType.METRIC,
+            NodeType.CUBE,
+        ):
+            cols = [col.to_spec() for col in self.current.columns]
+            extra_kwargs.update(
+                columns=cols,
+            )
+
+        # Nodes with dimension links
+        if self.type in (NodeType.SOURCE, NodeType.DIMENSION, NodeType.TRANSFORM):
+            join_link_specs = [
+                link.to_spec()
+                for link in self.current.dimension_links  # type: ignore
+            ]
+            ref_link_specs = [
+                DimensionReferenceLinkSpec(
+                    node_column=col.name,
+                    dimension=f"{col.dimension.name}{SEPARATOR}{col.dimension_column}",
+                )
+                for col in self.current.columns
+                if col.dimension_id and col.dimension_column
+            ]
+            col_specs = [col.to_spec() for col in self.current.columns]
+            extra_kwargs.update(
+                primary_key=[
+                    col.name for col in col_specs if "primary_key" in col.attributes
+                ],
+                dimension_links=join_link_specs + ref_link_specs,
+            )
+
+        # Source-specific
+        if self.type == NodeType.SOURCE:
+            extra_kwargs.update(
+                catalog=self.current.catalog.name,
+                schema_=self.current.schema_,
+                table=self.current.table,
+                columns=[col.to_spec() for col in self.current.columns],
+            )
+
+        # Metric-specific
+        if self.type == NodeType.METRIC:
+            extra_kwargs.update(
+                required_dimensions=[
+                    col.name for col in self.current.required_dimensions
+                ],
+                direction=self.current.metric_metadata.direction
+                if self.current.metric_metadata
+                else None,
+                unit_enum=(
+                    self.current.metric_metadata.unit
+                    if self.current.metric_metadata
+                    and self.current.metric_metadata.unit
+                    else None
+                ),
+                significant_digits=self.current.metric_metadata.significant_digits
+                if self.current.metric_metadata
+                else None,
+                min_decimal_exponent=self.current.metric_metadata.min_decimal_exponent
+                if self.current.metric_metadata
+                else None,
+                max_decimal_exponent=self.current.metric_metadata.max_decimal_exponent
+                if self.current.metric_metadata
+                else None,
+            )
+
+        # Cube-specific
+        if self.type == NodeType.CUBE:
+            extra_kwargs.update(
+                metrics=self.current.cube_node_metrics,
+                dimensions=self.current.cube_node_dimensions,
+            )
+
+        node_spec_cls = node_spec_class_map[self.type]
+        return node_spec_cls(**base_kwargs, **extra_kwargs)
+
+    @classmethod
+    def cube_load_options(cls) -> List[ExecutableOption]:
+        return [
+            selectinload(Node.current).options(*NodeRevision.cube_load_options()),
+            selectinload(Node.tags),
+        ]
+
     @classmethod
     async def get_by_name(
         cls,
@@ -291,6 +469,7 @@ class Node(Base):
             ),
             selectinload(Node.tags),
             selectinload(Node.created_by),
+            selectinload(Node.owners),
         ]
         statement = statement.options(*options)
         if not include_inactive:
@@ -317,7 +496,7 @@ class Node(Base):
         include_inactive: bool = False,
     ) -> List["Node"]:
         """
-        Get a node by name
+        Get nodes by names
         """
         statement = select(Node).where(Node.name.in_(names))
         options = options or [
@@ -331,7 +510,9 @@ class Node(Base):
             statement = statement.where(is_(Node.deactivated_at, None))
         result = await session.execute(statement)
         nodes = result.unique().scalars().all()
-        return nodes
+        nodes_by_name = {node.name: node for node in nodes}
+        ordered_nodes = [nodes_by_name[name] for name in names if name in nodes_by_name]
+        return ordered_nodes
 
     @classmethod
     async def get_cube_by_name(
@@ -354,7 +535,7 @@ class Node(Base):
                         Materialization.backfills,
                     ),
                     selectinload(NodeRevision.cube_elements)
-                    .selectinload(Column.node_revisions)
+                    .selectinload(Column.node_revision)
                     .options(
                         selectinload(NodeRevision.node),
                     ),
@@ -371,17 +552,15 @@ class Node(Base):
         cls,
         session: AsyncSession,
         node_id: int,
-        *options: ExecutableOption,
+        options: list[ExecutableOption] = None,
     ) -> Optional["Node"]:
         """
         Get a node by id
         """
-        statement = (
-            select(Node).where(Node.id == node_id).options(*options)
-        )  # pragma: no cover
-        result = await session.execute(statement)  # pragma: no cover
-        node = result.unique().scalar_one_or_none()  # pragma: no cover
-        return node  # pragma: no cover
+        statement = select(Node).where(Node.id == node_id).options(*(options or []))
+        result = await session.execute(statement)
+        node = result.unique().scalar_one_or_none()
+        return node
 
     @classmethod
     async def find(
@@ -408,20 +587,35 @@ class Node(Base):
     async def find_by(
         cls,
         session: AsyncSession,
-        names: Optional[List[str]] = None,
-        fragment: Optional[str] = None,
-        node_types: Optional[List[NodeType]] = None,
-        tags: Optional[List[str]] = None,
-        edited_by: Optional[str] = None,
-        namespace: Optional[str] = None,
-        limit: Optional[int] = 100,
-        before: Optional[str] = None,
-        after: Optional[str] = None,
+        names: list[str] | None = None,
+        fragment: str | None = None,
+        node_types: list[NodeType] | None = None,
+        tags: list[str] | None = None,
+        edited_by: str | None = None,
+        namespace: str | None = None,
+        limit: int | None = 100,
+        before: str | None = None,
+        after: str | None = None,
+        order_by: MappedColumn | None = None,
+        ascending: bool = False,
         options: list[ExecutableOption] = None,
+        mode: NodeMode | None = None,
+        owned_by: str | None = None,
+        missing_description: bool = False,
+        missing_owner: bool = False,
+        dimensions: list[str] | None = None,
+        statuses: list[NodeStatus] | None = None,
+        has_materialization: bool = False,
+        orphaned_dimension: bool = False,
     ) -> List["Node"]:
         """
         Finds a list of nodes by prefix
         """
+        if not order_by:
+            order_by = Node.created_at
+
+        NodeRevisionAlias = aliased(NodeRevision)
+
         nodes_with_tags = []
         if tags:
             statement = (
@@ -435,7 +629,29 @@ class Node(Base):
             if not nodes_with_tags:  # pragma: no cover
                 return []
 
+        # Filter by dimensions (supports node names or attributes)
+        nodes_with_dimensions: list[str] | None = None
+        if dimensions:
+            nodes_with_dimensions = await cls._resolve_dimension_filter(
+                session,
+                dimensions,
+                node_types,
+            )
+            if nodes_with_dimensions is None:
+                return []  # Dimension not found
+
         statement = select(Node).where(is_(Node.deactivated_at, None))
+
+        # Join NodeRevision if needed for order_by, fragment filtering, or mode filtering
+        order_by_node_revision = (
+            order_by and getattr(order_by, "class_", None) is NodeRevision
+        )
+        join_revision = True if fragment or order_by_node_revision or mode else False
+        if join_revision:
+            statement = statement.join(NodeRevisionAlias, Node.current)
+            if order_by_node_revision:
+                order_by = getattr(NodeRevisionAlias, order_by.key)
+
         if namespace:
             statement = statement.where(
                 (Node.namespace.like(f"{namespace}.%")) | (Node.namespace == namespace),
@@ -444,32 +660,108 @@ class Node(Base):
             statement = statement.where(
                 Node.id.in_(nodes_with_tags),
             )  # pragma: no cover
+        if nodes_with_dimensions:
+            statement = statement.where(
+                Node.name.in_(nodes_with_dimensions),
+            )
         if names:
             statement = statement.where(
                 Node.name.in_(names),  # type: ignore
             )
         if fragment:
-            statement = statement.join(NodeRevision, Node.current).where(
+            statement = statement.where(
                 or_(
-                    Node.name.like(f"%{fragment}%"),  # type: ignore
-                    NodeRevision.display_name.ilike(f"%{fragment}%"),  # type: ignore
+                    Node.name.like(f"%{fragment}%"),
+                    NodeRevisionAlias.display_name.ilike(f"%{fragment}%"),
                 ),
             )
 
         if node_types:
             statement = statement.where(Node.type.in_(node_types))
+        if mode:
+            statement = statement.where(NodeRevisionAlias.mode == mode)
         if edited_by:
             edited_node_subquery = (
                 select(History.entity_name)
-                .where((History.user == edited_by))
+                .where(History.user == edited_by)
                 .distinct()
                 .subquery()
             )
+            # Use WHERE IN instead of JOIN + DISTINCT to avoid ORDER BY conflicts
+            statement = statement.where(
+                Node.name.in_(select(edited_node_subquery.c.entity_name)),
+            )
 
-            statement = statement.join(
-                edited_node_subquery,
-                onclause=(edited_node_subquery.c.entity_name == Node.name),
-            ).distinct()
+        # Filter by owner username
+        if owned_by:
+            owned_node_subquery = (
+                select(NodeOwner.node_id)
+                .join(User, NodeOwner.user_id == User.id)
+                .where(User.username == owned_by)
+                .distinct()
+                .subquery()
+            )
+            statement = statement.where(Node.id.in_(select(owned_node_subquery)))
+
+        # Filter nodes missing descriptions (actionable item)
+        if missing_description:
+            if not join_revision:  # pragma: no branch
+                statement = statement.join(NodeRevisionAlias, Node.current)
+                join_revision = True
+            statement = statement.where(
+                or_(
+                    NodeRevisionAlias.description.is_(None),
+                    NodeRevisionAlias.description == "",
+                ),
+            )
+
+        # Filter nodes missing owners (actionable item)
+        if missing_owner:
+            nodes_with_owners_subquery = select(NodeOwner.node_id).distinct().subquery()
+            statement = statement.where(
+                ~Node.id.in_(select(nodes_with_owners_subquery)),
+            )
+
+        # Filter by node statuses
+        if statuses:
+            if not join_revision:  # pragma: no branch
+                statement = statement.join(NodeRevisionAlias, Node.current)
+                join_revision = True
+            # Strawberry enums need to be converted to their lowercase values for DB comparison
+            status_values = [
+                s.value.lower() if hasattr(s, "value") else str(s).lower()
+                for s in statuses
+            ]
+            statement = statement.where(NodeRevisionAlias.status.in_(status_values))
+
+        # Filter to nodes with materializations configured
+        if has_materialization:
+            if not join_revision:  # pragma: no branch
+                statement = statement.join(NodeRevisionAlias, Node.current)
+                join_revision = True
+            nodes_with_mat_subquery = (
+                select(Materialization.node_revision_id)
+                .where(Materialization.deactivated_at.is_(None))
+                .distinct()
+                .subquery()
+            )
+            statement = statement.where(
+                NodeRevisionAlias.id.in_(select(nodes_with_mat_subquery)),
+            )
+
+        # Filter to orphaned dimensions (dimension nodes not linked to by any other node)
+        if orphaned_dimension:
+            from datajunction_server.database.dimensionlink import DimensionLink
+
+            # Only dimension nodes can be orphaned
+            statement = statement.where(Node.type == NodeType.DIMENSION)
+            # Find dimensions that have no DimensionLink pointing to them
+            linked_dimension_subquery = (
+                select(DimensionLink.dimension_id).distinct().subquery()
+            )
+            statement = statement.where(
+                ~Node.id.in_(select(linked_dimension_subquery)),
+            )
 
         if after:
             cursor = NodeCursor.decode(after)
@@ -481,9 +773,17 @@ class Node(Base):
             statement = statement.where(
                 (Node.created_at, Node.id) >= (cursor.created_at, cursor.id),
             )
-            statement = statement.order_by(Node.created_at.asc(), Node.id.asc())
+            statement = statement.order_by(
+                order_by.asc() if ascending else order_by.desc(),
+                Node.created_at.asc(),
+                Node.id.asc(),
+            )
         else:
-            statement = statement.order_by(Node.created_at.desc(), Node.id.desc())
+            statement = statement.order_by(
+                order_by.asc() if ascending else order_by.desc(),
+                Node.created_at.desc(),
+                Node.id.desc(),
+            )
 
         limit = limit if limit and limit > 0 else 100
         statement = statement.limit(limit)
@@ -494,6 +794,62 @@ class Node(Base):
         if before:
             nodes.reverse()
         return nodes
+
+    @classmethod
+    async def _resolve_dimension_filter(
+        cls,
+        session: AsyncSession,
+        dimensions: list[str],
+        node_types: list[NodeType] | None,
+    ) -> list[str] | None:
+        """
+        Resolve dimension inputs to matching node names.
+
+        Accepts both dimension node names (e.g., "default.hard_hat") and
+        dimension attributes (e.g., "default.hard_hat.city").
+
+        Returns None if any dimension input cannot be resolved (no matches possible).
+        """
+        from datajunction_server.sql.dag import get_nodes_with_common_dimensions
+
+        # Build candidates: each input + its parent (before last dot)
+        candidates = set()
+        input_to_candidates = {d: [d] for d in dimensions}
+        for dim in dimensions:
+            candidates.add(dim)
+            if SEPARATOR in dim:  # pragma: no branch
+                parent = dim.rsplit(SEPARATOR, 1)[0]
+                input_to_candidates[dim].append(parent)
+                candidates.add(parent)
+
+        # Find existing nodes among candidates
+        result = await session.execute(
+            select(Node.name).where(
+                Node.name.in_(candidates),
+                is_(Node.deactivated_at, None),
+            ),
+        )
+        existing_names = {row[0] for row in result.all()}
+
+        # Resolve each input to first matching candidate
+        resolved_names = []
+        for dim in dimensions:
+            resolved = next(
+                (c for c in input_to_candidates[dim] if c in existing_names),
+                None,
+            )
+            if not resolved:
+                return None  # Dimension not found, no matches possible
+            if resolved not in resolved_names:  # pragma: no cover
+                resolved_names.append(resolved)
+
+        dim_nodes = await cls.get_by_names(
+            session,
+            resolved_names,
+            include_inactive=False,
+        )
+        result = await get_nodes_with_common_dimensions(session, dim_nodes, node_types)
+        return [n.name for n in result]
 
 
 class CompressedPickleType(TypeDecorator):
@@ -591,7 +947,7 @@ class NodeRevision(
         default=str(DEFAULT_DRAFT_VERSION),
     )
     node_id: Mapped[int] = mapped_column(
-        ForeignKey("node.id", name="fk_noderevision_node_id_node"),
+        ForeignKey("node.id", name="fk_noderevision_node_id_node", ondelete="CASCADE"),
     )
     node: Mapped[Node] = relationship(
         "Node",
@@ -635,7 +991,7 @@ class NodeRevision(
         secondary="cube",
         primaryjoin="NodeRevision.id==CubeRelationship.cube_id",
         secondaryjoin="Column.id==CubeRelationship.cube_element_id",
-        lazy="joined",
+        lazy="selectin",
         order_by="Column.order",
     )
 
@@ -663,10 +1019,9 @@ class NodeRevision(
     )
 
     columns: Mapped[List["Column"]] = relationship(
-        secondary="nodecolumns",
-        primaryjoin="NodeRevision.id==NodeColumns.node_id",
-        secondaryjoin="Column.id==NodeColumns.column_id",
-        cascade="all, delete",
+        "Column",
+        back_populates="node_revision",
+        cascade="all, delete-orphan",
         order_by="Column.order",
     )
 
@@ -706,8 +1061,15 @@ class NodeRevision(
 
     custom_metadata: Mapped[Optional[Dict]] = mapped_column(
         JSON,
-        default={},
+        default=None,
     )
+
+    # Measures
+    frozen_measures: Mapped[List["FrozenMeasure"]] = relationship(
+        secondary="node_revision_frozen_measures",
+        back_populates="used_by_node_revisions",
+    )
+    derived_expression: Mapped[Optional[str]]
 
     def __hash__(self) -> int:
         return hash(self.id)
@@ -752,6 +1114,20 @@ class NodeRevision(
             selectinload(NodeRevision.availability),
         )
 
+    @classmethod
+    def cube_load_options(cls):
+        """
+        Default options when loading a cube node
+        """
+        return (
+            *cls.default_load_options(),
+            selectinload(NodeRevision.cube_elements)
+            .selectinload(Column.node_revision)
+            .options(
+                selectinload(NodeRevision.node),
+            ),
+        )
+
     @staticmethod
     def format_metric_alias(query: str, name: str) -> str:
         """
@@ -768,6 +1144,23 @@ class NodeRevision(
         )
         return str(tree)
 
+    @classmethod
+    async def get_by_id(
+        cls,
+        session: AsyncSession,
+        node_revision_id: int,
+        options: list[ExecutableOption] = None,
+    ) -> Optional["NodeRevision"]:
+        """
+        Get a node revision by id
+        """
+        statement = select(NodeRevision).where(NodeRevision.id == node_revision_id)
+        if options:  # pragma: no cover
+            statement = statement.options(*options)
+        result = await session.execute(statement)
+        node_revision = result.unique().scalar_one_or_none()
+        return node_revision
+
     def check_metric(self):
         """
         Check if the Node defines a metric.
@@ -776,43 +1169,34 @@ class NodeRevision(
         projections and it should be an aggregation function.
         """
         from datajunction_server.sql.parsing.backends.antlr4 import parse
+        from datajunction_server.internal.validation import validate_metric_query
 
-        # must have a single expression
         tree = parse(self.query)
-        if len(tree.select.projection) != 1:
-            raise DJInvalidInputException(
-                http_status_code=HTTPStatus.BAD_REQUEST,
-                message="Metric queries can only have a single "
-                f"expression, found {len(tree.select.projection)}",
-            )
-        projection_0 = tree.select.projection[0]
+        return validate_metric_query(tree, self.name)
 
-        # must have an aggregation
-        if not projection_0.is_aggregation():
-            raise DJInvalidMetricQueryException(
-                f"Metric {self.name} has an invalid query, should have an aggregate expression",
-            )
+    @property
+    def is_derived_metric(self) -> bool:
+        """
+        Check if this metric references other metrics (making it a derived metric).
+        A derived metric is a metric whose parent(s) include other metric nodes.
+        """
+        if self.type != NodeType.METRIC:
+            return False
+        return any(parent.type == NodeType.METRIC for parent in self.parents)
 
-        if tree.select.where:
-            raise DJInvalidMetricQueryException(
-                "Metric cannot have a WHERE clause. Please use IF(<clause>, ...) instead",
-            )
+    @property
+    def metric_parents(self) -> List["Node"]:
+        """
+        Get the list of parent nodes that are metrics.
+        """
+        return [parent for parent in self.parents if parent.type == NodeType.METRIC]
 
-        clauses = [
-            "GROUP BY" if tree.select.group_by else None,
-            "HAVING" if tree.select.having else None,
-            "LATERAL VIEW" if tree.select.lateral_views else None,
-            "UNION or INTERSECT" if tree.select.set_op else None,
-            "LIMIT" if tree.select.limit else None,
-            "ORDER BY" if tree.select.organization.order else None,
-            "SORT BY" if tree.select.organization.sort else None,
-        ]
-        invalid_clauses = [clause for clause in clauses if clause is not None]
-        if invalid_clauses:
-            raise DJInvalidMetricQueryException(
-                "Metric has an invalid query. The following are not allowed: "
-                + ", ".join(invalid_clauses),
-            )
+    @property
+    def non_metric_parents(self) -> List["Node"]:
+        """
+        Get the list of parent nodes that are not metrics.
+        """
+        return [parent for parent in self.parents if parent.type != NodeType.METRIC]
 
     def extra_validation(self) -> None:
         """
@@ -850,8 +1234,7 @@ class NodeRevision(
                 col.attributes = old_columns_mapping[col.name].attributes or []
         return self
 
-    class Config:
-        extra = Extra.allow
+    model_config = ConfigDict(extra="allow")
 
     def has_available_materialization(self, build_criteria: BuildCriteria) -> bool:
         """
@@ -877,7 +1260,14 @@ class NodeRevision(
         """
         Cube elements along with their nodes
         """
-        return [(element, element.node_revision()) for element in self.cube_elements]
+        return [(element, element.node_revision) for element in self.cube_elements]
+
+    def metric_node_revisions(self) -> list[Optional["NodeRevision"]]:
+        """
+        Cube elements along with their nodes
+        """
+        node_revisions = [element.node_revision for element in self.cube_elements]
+        return [rev for rev in node_revisions if rev.type == NodeType.METRIC]
 
     def cube_metrics(self) -> List[Node]:
         """
@@ -906,24 +1296,17 @@ class NodeRevision(
         """
         if self.type != NodeType.CUBE:
             return []  # pragma: no cover
-        dimension_to_roles_mapping = {
-            col.name: col.dimension_column for col in self.columns
+        cube_metrics = {
+            from_amenable_name(elem.name): node
+            for elem, node in self.cube_elements_with_nodes()
+            if node.type == NodeType.METRIC  # type: ignore
         }
-        ordering = {
-            (col.name + (col.dimension_column or "")).split("[")[0]: col.order or idx
-            for idx, col in enumerate(self.columns)
-        }
-        return sorted(
-            [
-                node_revision.name
-                + SEPARATOR
-                + element.name
-                + dimension_to_roles_mapping.get(element.name, "")
-                for element, node_revision in self.cube_elements_with_nodes()
-                if node_revision and node_revision.type != NodeType.METRIC
-            ],
-            key=lambda x: ordering[x],
-        )
+        res = [
+            element.name + (element.dimension_column or "")
+            for element in self.columns
+            if not cube_metrics.get(element.name)
+        ]
+        return res
 
     @hybrid_property
     def cube_node_metrics(self) -> List[str]:
@@ -978,19 +1361,92 @@ class NodeRevision(
         """
         return None
 
+    def _find_cube_by_statement(
+        name: str | None = None,
+        version: str | None = None,
+        catalog: str | None = None,
+        page: int = 1,
+        page_size: int = 10,
+    ):
+        from datajunction_server.database.measure import FrozenMeasure
 
-class NodeColumns(Base):
-    """
-    Join table for node columns.
-    """
+        if not version or version == "latest":
+            version_condition = NodeRevision.version == Node.current_version
+        else:
+            version_condition = NodeRevision.version == version
 
-    __tablename__ = "nodecolumns"
+        statement = (
+            select(NodeRevision)
+            .select_from(Node)
+            .where(and_(is_(Node.deactivated_at, None), Node.type == NodeType.CUBE))
+            .join(
+                NodeRevision,
+                (NodeRevision.name == Node.name) & (version_condition),
+            )
+            .options(
+                selectinload(NodeRevision.columns),
+                selectinload(  # Ensure availability is loaded for filtering
+                    NodeRevision.availability,
+                ),
+                selectinload(NodeRevision.materializations).selectinload(
+                    Materialization.backfills,
+                ),
+                selectinload(NodeRevision.cube_elements)
+                .selectinload(Column.node_revision)
+                .options(
+                    joinedload(NodeRevision.node),
+                    selectinload(NodeRevision.frozen_measures).options(
+                        selectinload(FrozenMeasure.upstream_revision),
+                    ),
+                ),
+                selectinload(NodeRevision.node).options(selectinload(Node.tags)),
+            )
+        )
+        if name:
+            statement = statement.where(Node.name == name)
+        else:
+            statement = statement.order_by(desc(NodeRevision.updated_at))
+        if catalog:
+            statement = statement.join(
+                AvailabilityState,
+                NodeRevision.availability,
+            ).where(
+                AvailabilityState.catalog == catalog,
+            )
+        offset = (page - 1) * page_size
+        statement = statement.offset(offset).limit(page_size)
+        return statement
 
-    node_id: Mapped[int] = mapped_column(
-        ForeignKey("noderevision.id", name="fk_nodecolumns_node_id_noderevision"),
-        primary_key=True,
-    )
-    column_id: Mapped[int] = mapped_column(
-        ForeignKey("column.id", name="fk_nodecolumns_column_id_column"),
-        primary_key=True,
-    )
+    @classmethod
+    async def get_cube_revision(
+        cls,
+        session: AsyncSession,
+        name: str,
+        version: str | None = None,
+    ) -> Optional["NodeRevision"]:
+        """
+        Get a cube by name
+        """
+        statement = NodeRevision._find_cube_by_statement(name=name, version=version)
+        result = await session.execute(statement)
+        return result.unique().scalar_one_or_none()
+
+    @classmethod
+    async def get_cube_revisions(
+        cls,
+        session: AsyncSession,
+        catalog: Optional[str] = None,
+        page: int = 1,
+        page_size: int = 10,
+    ) -> list["NodeRevision"]:
+        """
+        Returns cube revision metadata for the latest version of all cubes, with pagination.
+        Optionally filters by the catalog in which the cube is available.
+        """
+        statement = NodeRevision._find_cube_by_statement(
+            catalog=catalog,
+            page=page,
+            page_size=page_size,
+        )
+        result = await session.execute(statement)
+        return result.unique().scalars().all()

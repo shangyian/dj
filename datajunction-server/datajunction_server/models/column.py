@@ -38,7 +38,10 @@ class ColumnTypeDecorator(TypeDecorator):
 
         if not value:
             return value
-        return parse_rule(value, "dataType")
+        try:
+            return parse_rule(value, "dataType")
+        except Exception:  # pragma: no cover
+            return value  # pragma: no cover
 
 
 class ColumnAttributeInput(BaseModel):

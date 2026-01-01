@@ -2,8 +2,10 @@
 Tests for the metrics API.
 """
 
+from unittest.mock import patch
 import pytest
-from pytest_mock import MockerFixture
+import pytest_asyncio
+
 from httpx import AsyncClient
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -12,7 +14,7 @@ from datajunction_server.database.attributetype import AttributeType, ColumnAttr
 from datajunction_server.database.column import Column
 from datajunction_server.database.database import Database
 from datajunction_server.database.node import Node, NodeRevision
-from datajunction_server.database.user import User
+from datajunction_server.database.user import User, OAuthProvider
 from datajunction_server.models.node_type import NodeType
 from datajunction_server.sql.parsing.types import FloatType, IntegerType, StringType
 
@@ -396,11 +398,11 @@ async def test_read_metrics(module__client_with_roads: AsyncClient) -> None:
     assert data["metric_metadata"] == {
         "direction": "higher_is_better",
         "unit": {
-            "abbreviation": None,
-            "category": None,
+            "abbreviation": "$",
+            "category": "currency",
             "description": None,
             "label": "Dollar",
-            "name": "DOLLAR",
+            "name": "dollar",
         },
         "max_decimal_exponent": None,
         "min_decimal_exponent": None,
@@ -408,6 +410,7 @@ async def test_read_metrics(module__client_with_roads: AsyncClient) -> None:
     }
     assert data["upstream_node"] == "default.repair_orders_fact"
     assert data["expression"] == "count(repair_order_id)"
+    assert data["custom_metadata"] == {"foo": "bar"}
 
     response = await module__client_with_roads.get(
         "/metrics/default.discounted_orders_rate",
@@ -418,7 +421,8 @@ async def test_read_metrics(module__client_with_roads: AsyncClient) -> None:
         {
             "aggregation": "SUM",
             "expression": "if(discount > 0.0, 1, 0)",
-            "name": "discount_sum_62846f49",
+            "name": "discount_sum_30b84e6c",
+            "merge": "SUM",
             "rule": {
                 "level": None,
                 "type": "full",
@@ -427,7 +431,8 @@ async def test_read_metrics(module__client_with_roads: AsyncClient) -> None:
         {
             "aggregation": "COUNT",
             "expression": "*",
-            "name": "count_3389dae3",
+            "merge": "SUM",
+            "name": "count_c8e42e74",
             "rule": {
                 "level": None,
                 "type": "full",
@@ -435,13 +440,37 @@ async def test_read_metrics(module__client_with_roads: AsyncClient) -> None:
         },
     ]
     assert data["derived_query"] == (
-        "SELECT  CAST(sum(discount_sum_62846f49) AS DOUBLE) / SUM(count_3389dae3) AS "
+        "SELECT  CAST(SUM(discount_sum_30b84e6c) AS DOUBLE) / SUM(count_c8e42e74) AS "
         "default_DOT_discounted_orders_rate \n FROM default.repair_orders_fact"
     )
     assert data["derived_expression"] == (
-        "CAST(sum(discount_sum_62846f49) AS DOUBLE) / SUM(count_3389dae3) "
+        "CAST(SUM(discount_sum_30b84e6c) AS DOUBLE) / SUM(count_c8e42e74) "
         "AS default_DOT_discounted_orders_rate"
     )
+    assert data["custom_metadata"] is None
+
+
+@pytest_asyncio.fixture(scope="module")
+async def module__current_user(module__session: AsyncSession) -> User:
+    """
+    A user fixture.
+    """
+    new_user = User(
+        username="dj",
+        password="dj",
+        email="dj@datajunction.io",
+        name="DJ",
+        oauth_provider=OAuthProvider.BASIC,
+        is_admin=False,
+    )
+    existing_user = await User.get_by_username(module__session, new_user.username)
+    if not existing_user:
+        module__session.add(new_user)
+        await module__session.commit()
+        user = new_user
+    else:
+        user = existing_user
+    return user
 
 
 @pytest.mark.asyncio
@@ -997,6 +1026,15 @@ async def test_get_multi_link_dimensions(
             "properties": [],
         },
         {
+            "filter_only": False,
+            "name": "default.user_dim.birth_date",
+            "node_display_name": "User Dim",
+            "node_name": "default.user_dim",
+            "path": [],
+            "properties": [],
+            "type": "int",
+        },
+        {
             "name": "default.user_dim.residence_country",
             "node_display_name": "User Dim",
             "node_name": "default.user_dim",
@@ -1087,12 +1125,14 @@ async def test_metric_expression_auto_aliased(module__client_with_roads: AsyncCl
     )
     assert response.status_code == 201
     data = response.json()
+    assert data["owners"] == [{"username": "dj"}]
     assert data["query"] == "SELECT SUM(counts.b) + SUM(counts.b) FROM basic.dreams_4"
     assert data["columns"] == [
         {
             "attributes": [],
             "description": None,
             "dimension": None,
+            "dimension_column": None,
             "display_name": "Dream Count 4",
             "name": "basic_DOT_dream_count_4",
             "partition": None,
@@ -1284,6 +1324,33 @@ async def test_list_metric_metadata(module__client: AsyncClient):
 
 
 @pytest.mark.asyncio
+async def test_create_valid_metrics(module__client_with_roads: AsyncClient):
+    """
+    Validate that creating a metric wo description is aOK.
+    """
+    # without description
+    response = await module__client_with_roads.post(
+        "/nodes/metric/",
+        json={
+            "query": ("SELECT sum(total_repair_cost) FROM default.repair_orders_fact"),
+            "mode": "published",
+            "name": "default.invalid_metric_example_wo_desc",
+        },
+    )
+    assert response.status_code == 201
+
+    # without mode
+    response = await module__client_with_roads.post(
+        "/nodes/metric/",
+        json={
+            "query": ("SELECT sum(total_repair_cost) FROM default.repair_orders_fact"),
+            "name": "default.invalid_metric_example_wo_mode",
+        },
+    )
+    assert response.status_code == 201
+
+
+@pytest.mark.asyncio
 async def test_create_invalid_metric(module__client_with_roads: AsyncClient):
     """
     Validate that creating a metric with invalid SQL raises errors.
@@ -1336,30 +1403,50 @@ async def test_create_invalid_metric(module__client_with_roads: AsyncClient):
         "Metric has an invalid query. The following are not allowed: GROUP BY, HAVING, ORDER BY"
     )
 
+    response = await module__client_with_roads.post(
+        "/nodes/metric/",
+        json={
+            "query": (
+                "SELECT sum(non_existent_column) FROM default.repair_orders_fact"
+            ),
+            "description": "Metric with non-existent column",
+            "mode": "published",
+            "name": "default.invalid_metric_missing_column",
+        },
+    )
+    data = response.json()
+    assert response.status_code == 400
+    assert (
+        "Metric definition references missing columns: non_existent_column"
+        in data["message"]
+    )
+
 
 @pytest.mark.asyncio
 async def test_read_metrics_when_cached(
     module__client: AsyncClient,
-    mocker: MockerFixture,
 ) -> None:
     """
     Test ``GET /metrics/`` with mocked cache returning a list of strings.
     """
-    mock_list_nodes = mocker.patch(
+    with patch(
         "datajunction_server.api.metrics.list_nodes",
         return_value=["metric1", "metric2", "metric3"],
-    )
+    ) as mock_list_nodes:
+        # Should be a cache miss
+        response1 = await module__client.get(
+            "/metrics/",
+            headers={"Cache-Control": "no-cache"},
+        )
+        assert response1.status_code == 200
 
-    # Should be a cache miss, triggering a cache in a background task
-    response1 = await module__client.get(
-        "/metrics/",
-        headers={"Cache-Control": "no-cache"},
-    )
-    assert response1.status_code == 200
+        # list_nodes should be called
+        assert mock_list_nodes.call_count == 1
 
-    # Should be a cache hit
-    response2 = await module__client.get("/metrics/")
-    assert response2.status_code == 200
+        # Should be a cache miss and repopulate the cache
+        response1 = await module__client.get("/metrics/")
+        assert response1.status_code == 200
 
-    # list_nodes should only be called once since the second used the cache
-    mock_list_nodes.assert_called_once()
+        # Should be a cache hit
+        response2 = await module__client.get("/metrics/")
+        assert response2.status_code == 200

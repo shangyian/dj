@@ -12,10 +12,11 @@ from sqlalchemy.orm import joinedload
 
 from datajunction_server.database import Node, NodeRevision
 from datajunction_server.database.column import Column
-from datajunction_server.database.measure import Measure
+from datajunction_server.database.measure import Measure, FrozenMeasure
 from datajunction_server.errors import DJAlreadyExistsException, DJDoesNotExistException
 from datajunction_server.internal.access.authentication.http import SecureAPIRouter
 from datajunction_server.models.measure import (
+    FrozenMeasureOutput,
     CreateMeasure,
     EditMeasure,
     MeasureOutput,
@@ -35,7 +36,19 @@ async def get_measure_by_name(
 ) -> Measure:
     """Retrieve a measure by name"""
     measure = (
-        (await session.execute(select(Measure).where(Measure.name == measure_name)))
+        (
+            await session.execute(
+                select(Measure)
+                .where(Measure.name == measure_name)
+                .options(
+                    joinedload(Measure.columns).options(
+                        joinedload(Column.node_revision).options(
+                            *NodeRevision.default_load_options(),
+                        ),
+                    ),
+                ),
+            )
+        )
         .unique()
         .scalars()
         .one_or_none()
@@ -68,6 +81,8 @@ async def get_node_columns(
             for col in node.current.columns  # type: ignore
             if col.name == node_column.column
         ]
+        for col in available:
+            await session.refresh(col, ["node_revision"])
         if len(available) == 0:
             raise DJDoesNotExistException(
                 message=f"Column `{node_column.column}` does not exist on "
@@ -171,3 +186,27 @@ async def edit_measure(
     await session.commit()
     await session.refresh(measure)
     return measure
+
+
+@router.get("/frozen-measures/", response_model=list[FrozenMeasureOutput])
+async def list_frozen_measures(
+    prefix: Optional[str] = None,
+    aggregation: Optional[str] = None,
+    upstream_name: Optional[str] = None,
+    upstream_version: Optional[str] = None,
+    session: AsyncSession = Depends(get_session),
+) -> list[FrozenMeasureOutput]:
+    """
+    List all frozen measures, with optional filters:
+    - prefix: only measures whose names start with this prefix
+    - aggregation: filter by aggregation type (e.g., SUM, COUNT)
+    - upstream_name: filter by the upstream node revision's name
+    - upstream_version: filter by the upstream node revision's version
+    """
+    return await FrozenMeasure.find_by(
+        session,
+        prefix=prefix,
+        aggregation=aggregation,
+        upstream_name=upstream_name,
+        upstream_version=upstream_version,
+    )

@@ -17,17 +17,34 @@ export const DataJunctionAPI = {
     before,
     after,
     limit,
+    sortConfig,
+    mode,
+    {
+      ownedBy = null,
+      statuses = null,
+      missingDescription = false,
+      hasMaterialization = false,
+      orphanedDimension = false,
+    } = {},
   ) {
     const query = `
-      query ListNodes($namespace: String, $nodeTypes: [NodeType!], $tags: [String!], $editedBy: String, $before: String, $after: String, $limit: Int) {
+      query ListNodes($namespace: String, $nodeTypes: [NodeType!], $tags: [String!], $editedBy: String, $mode: NodeMode, $before: String, $after: String, $limit: Int, $orderBy: NodeSortField, $ascending: Boolean, $ownedBy: String, $statuses: [NodeStatus!], $missingDescription: Boolean, $hasMaterialization: Boolean, $orphanedDimension: Boolean) {
         findNodesPaginated(
           namespace: $namespace
           nodeTypes: $nodeTypes
           tags: $tags
           editedBy: $editedBy
+          mode: $mode
           limit: $limit
           before: $before
           after: $after
+          orderBy: $orderBy
+          ascending: $ascending
+          ownedBy: $ownedBy
+          statuses: $statuses
+          missingDescription: $missingDescription
+          hasMaterialization: $hasMaterialization
+          orphanedDimension: $orphanedDimension
         ) {
           pageInfo {
             hasNextPage
@@ -48,6 +65,7 @@ export const DataJunctionAPI = {
               current {
                 displayName
                 status
+                mode
                 updatedAt
               }
               createdBy {
@@ -58,6 +76,13 @@ export const DataJunctionAPI = {
         }
       }
     `;
+    const sortOrderMapping = {
+      name: 'NAME',
+      displayName: 'DISPLAY_NAME',
+      type: 'TYPE',
+      status: 'STATUS',
+      updatedAt: 'UPDATED_AT',
+    };
 
     return await (
       await fetch(DJ_GQL, {
@@ -73,9 +98,17 @@ export const DataJunctionAPI = {
             nodeTypes: nodeTypes,
             tags: tags,
             editedBy: editedBy,
+            mode: mode || null,
             before: before,
             after: after,
             limit: limit,
+            orderBy: sortOrderMapping[sortConfig.key],
+            ascending: sortConfig.direction === 'ascending',
+            ownedBy: ownedBy,
+            statuses: statuses,
+            missingDescription: missingDescription,
+            hasMaterialization: hasMaterialization,
+            orphanedDimension: orphanedDimension,
           },
         }),
       })
@@ -86,6 +119,128 @@ export const DataJunctionAPI = {
     return await (
       await fetch(`${DJ_URL}/whoami/`, { credentials: 'include' })
     ).json();
+  },
+
+  querySystemMetric: async function ({
+    metric,
+    dimensions = [],
+    filters = [],
+    orderby = [],
+  }) {
+    const params = new URLSearchParams();
+    dimensions.forEach(d => params.append('dimensions', d));
+    filters.forEach(f => params.append('filters', f));
+    orderby.forEach(o => params.append('orderby', o));
+
+    const url = `${DJ_URL}/system/data/${metric}?${params.toString()}`;
+    const res = await fetch(url, { credentials: 'include' });
+
+    if (!res.ok) {
+      throw new Error(`Failed to fetch metric data ${metric}: ${res.status}`);
+    }
+    return await res.json();
+  },
+
+  querySystemMetricSingleDimension: async function ({
+    metric,
+    dimension,
+    filters = [],
+    orderby = [],
+  }) {
+    const results = await DataJunctionAPI.querySystemMetric({
+      metric: metric,
+      dimensions: [dimension],
+      filters: filters,
+      orderby: orderby,
+    });
+    return results.map(row => {
+      return {
+        name:
+          row.find(entry => entry.col === dimension)?.value?.toString() ??
+          'unknown',
+        value: row.find(entry => entry.col === metric)?.value ?? 0,
+      };
+    });
+  },
+
+  system: {
+    node_counts_by_active: async function () {
+      return DataJunctionAPI.querySystemMetricSingleDimension({
+        metric: 'system.dj.number_of_nodes',
+        dimension: 'system.dj.is_active.active_id',
+      });
+    },
+    node_counts_by_type: async function () {
+      return DataJunctionAPI.querySystemMetricSingleDimension({
+        metric: 'system.dj.number_of_nodes',
+        dimension: 'system.dj.node_type.type',
+        filters: ['system.dj.is_active.active_id=true'],
+        orderby: ['system.dj.node_type.type'],
+      });
+    },
+    node_counts_by_status: async function () {
+      return DataJunctionAPI.querySystemMetricSingleDimension({
+        metric: 'system.dj.number_of_nodes',
+        dimension: 'system.dj.nodes.status',
+        filters: ['system.dj.is_active.active_id=true'],
+        orderby: ['system.dj.nodes.status'],
+      });
+    },
+    nodes_without_description: async function () {
+      return DataJunctionAPI.querySystemMetricSingleDimension({
+        metric: 'system.dj.node_without_description',
+        dimension: 'system.dj.node_type.type',
+        filters: ['system.dj.is_active.active_id=true'],
+        orderby: ['system.dj.node_type.type'],
+      });
+    },
+    node_trends: async function () {
+      const results = await (
+        await fetch(
+          `${DJ_URL}/system/data/system.dj.number_of_nodes?dimensions=system.dj.nodes.created_at_week&dimensions=system.dj.node_type.type&filters=system.dj.nodes.created_at_week>=20240101&orderby=system.dj.nodes.created_at_week`,
+          { credentials: 'include' },
+        )
+      ).json();
+      const byDateint = {};
+      results.forEach(row => {
+        const dateint = row.find(
+          r => r.col === 'system.dj.nodes.created_at_week',
+        )?.value;
+        const nodeType = row.find(
+          r => r.col === 'system.dj.node_type.type',
+        )?.value;
+        const count = row.find(
+          r => r.col === 'system.dj.number_of_nodes',
+        )?.value;
+        if (!byDateint[dateint]) {
+          byDateint[dateint] = { date: dateint };
+        }
+        byDateint[dateint][nodeType] =
+          (byDateint[dateint][nodeType] || 0) + count;
+      });
+      return Object.entries(byDateint).map(([dateint, data]) => {
+        return {
+          date: dateint,
+          ...data,
+        };
+      });
+    },
+    materialization_counts_by_type: async function () {
+      return DataJunctionAPI.querySystemMetricSingleDimension({
+        metric: 'system.dj.number_of_materializations',
+        dimension: 'system.dj.node_type.type',
+        filters: ['system.dj.is_active.active_id=true'],
+        orderby: ['system.dj.node_type.type'],
+      });
+    },
+
+    dimensions: async function () {
+      return await (
+        await fetch(`${DJ_URL}/system/dimensions`, {
+          credentials: 'include',
+        })
+      ).json();
+    },
   },
 
   logout: async function () {
@@ -151,10 +306,14 @@ export const DataJunctionAPI = {
               name
             }
             mode
+            customMetadata
           }
-          tags { 
+          tags {
             name
             displayName
+          }
+          owners {
+            username
           }
         }
       }
@@ -179,6 +338,41 @@ export const DataJunctionAPI = {
       return null;
     }
     return results.data.findNodes[0];
+  },
+
+  // Fetch basic node info for multiple nodes by name (for Settings page)
+  getNodesByNames: async function (names) {
+    if (!names || names.length === 0) {
+      return [];
+    }
+    const query = `
+      query GetNodesByNames($names: [String!]) {
+        findNodes(names: $names) {
+          name
+          type
+          current {
+            displayName
+            status
+            mode
+          }
+        }
+      }
+    `;
+
+    const results = await (
+      await fetch(DJ_GQL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        credentials: 'include',
+        body: JSON.stringify({
+          query,
+          variables: { names },
+        }),
+      })
+    ).json();
+    return results.data?.findNodes || [];
   },
 
   getMetric: async function (name) {
@@ -218,6 +412,57 @@ export const DataJunctionAPI = {
         }),
       })
     ).json();
+    return results.data.findNodes[0];
+  },
+
+  getCubeForEditing: async function (name) {
+    const query = `
+      query GetCubeForEditing($name: String!) {
+        findNodes(names: [$name]) {
+          name
+          type
+          owners {
+            username
+          }
+          current {
+            displayName
+            description
+            mode
+            cubeMetrics {
+              name
+            }
+            cubeDimensions {
+              name
+              attribute
+              properties
+            }
+          }
+          tags {
+            name
+            displayName
+          }
+        }
+      }
+    `;
+
+    const results = await (
+      await fetch(DJ_GQL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        credentials: 'include',
+        body: JSON.stringify({
+          query,
+          variables: {
+            name: name,
+          },
+        }),
+      })
+    ).json();
+    if (results.data.findNodes.length === 0) {
+      return null;
+    }
     return results.data.findNodes[0];
   },
 
@@ -283,6 +528,7 @@ export const DataJunctionAPI = {
     metric_direction,
     metric_unit,
     required_dimensions,
+    custom_metadata,
   ) {
     const metricMetadata =
       metric_direction || metric_unit
@@ -306,6 +552,7 @@ export const DataJunctionAPI = {
         primary_key: primary_key,
         metric_metadata: metricMetadata,
         required_dimensions: required_dimensions,
+        custom_metadata: custom_metadata,
       }),
       credentials: 'include',
     });
@@ -323,6 +570,8 @@ export const DataJunctionAPI = {
     metric_unit,
     significant_digits,
     required_dimensions,
+    owners,
+    custom_metadata,
   ) {
     try {
       const metricMetadata =
@@ -346,6 +595,8 @@ export const DataJunctionAPI = {
           primary_key: primary_key,
           metric_metadata: metricMetadata,
           required_dimensions: required_dimensions,
+          owners: owners,
+          custom_metadata: custom_metadata,
         }),
         credentials: 'include',
       });
@@ -391,8 +642,10 @@ export const DataJunctionAPI = {
     metrics,
     dimensions,
     filters,
+    owners,
   ) {
-    const response = await fetch(`${DJ_URL}/nodes/${name}`, {
+    const url = `${DJ_URL}/nodes/${name}`;
+    const response = await fetch(url, {
       method: 'PATCH',
       headers: {
         'Content-Type': 'application/json',
@@ -404,7 +657,21 @@ export const DataJunctionAPI = {
         dimensions: dimensions,
         filters: filters || [],
         mode: mode,
+        owners: owners,
       }),
+      credentials: 'include',
+    });
+    return { status: response.status, json: await response.json() };
+  },
+
+  refreshLatestMaterialization: async function (name) {
+    const url = `${DJ_URL}/nodes/${name}?refresh_materialization=true`;
+    const response = await fetch(url, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({}),
       credentials: 'include',
     });
     return { status: response.status, json: await response.json() };
@@ -438,6 +705,49 @@ export const DataJunctionAPI = {
         credentials: 'include',
       })
     ).json();
+  },
+
+  // GraphQL-based upstream/downstream queries - more efficient as they only fetch needed fields
+  upstreamsGQL: async function (nodeNames) {
+    const names = Array.isArray(nodeNames) ? nodeNames : [nodeNames];
+    const query = `
+      query GetUpstreamNodes($nodeNames: [String!]!) {
+        upstreamNodes(nodeNames: $nodeNames) {
+          name
+          type
+        }
+      }
+    `;
+    const results = await (
+      await fetch(DJ_GQL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ query, variables: { nodeNames: names } }),
+      })
+    ).json();
+    return results.data?.upstreamNodes || [];
+  },
+
+  downstreamsGQL: async function (nodeNames) {
+    const names = Array.isArray(nodeNames) ? nodeNames : [nodeNames];
+    const query = `
+      query GetDownstreamNodes($nodeNames: [String!]!) {
+        downstreamNodes(nodeNames: $nodeNames) {
+          name
+          type
+        }
+      }
+    `;
+    const results = await (
+      await fetch(DJ_GQL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ query, variables: { nodeNames: names } }),
+      })
+    ).json();
+    return results.data?.downstreamNodes || [];
   },
 
   node_dag: async function (name) {
@@ -563,7 +873,20 @@ export const DataJunctionAPI = {
 
   materializations: async function (node) {
     const data = await (
-      await fetch(`${DJ_URL}/nodes/${node}/materializations/`, {
+      await fetch(
+        `${DJ_URL}/nodes/${node}/materializations?show_inactive=true&include_all_revisions=true`,
+        {
+          credentials: 'include',
+        },
+      )
+    ).json();
+
+    return data;
+  },
+
+  availabilityStates: async function (node) {
+    const data = await (
+      await fetch(`${DJ_URL}/nodes/${node}/availability/`, {
         credentials: 'include',
       })
     ).json();
@@ -866,10 +1189,10 @@ export const DataJunctionAPI = {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        dimensionNode: dimensionNode,
-        joinType: joinType,
-        joinOn: joinOn,
-        joinCardinality: joinCardinality,
+        dimension_node: dimensionNode,
+        join_type: joinType,
+        join_on: joinOn,
+        join_cardinality: joinCardinality,
         role: role,
       }),
       credentials: 'include',
@@ -888,11 +1211,51 @@ export const DataJunctionAPI = {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        dimensionNode: dimensionNode,
+        dimension_node: dimensionNode,
         role: role,
       }),
       credentials: 'include',
     });
+    return { status: response.status, json: await response.json() };
+  },
+
+  addReferenceDimensionLink: async function (
+    nodeName,
+    nodeColumn,
+    dimensionNode,
+    dimensionColumn,
+    role = null,
+  ) {
+    const url = new URL(
+      `${DJ_URL}/nodes/${nodeName}/columns/${nodeColumn}/link`,
+    );
+    url.searchParams.append('dimension_node', dimensionNode);
+    url.searchParams.append('dimension_column', dimensionColumn);
+    if (role) {
+      url.searchParams.append('role', role);
+    }
+
+    const response = await fetch(url.toString(), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      credentials: 'include',
+    });
+    return { status: response.status, json: await response.json() };
+  },
+
+  removeReferenceDimensionLink: async function (nodeName, nodeColumn) {
+    const response = await fetch(
+      `${DJ_URL}/nodes/${nodeName}/columns/${nodeColumn}/link`,
+      {
+        method: 'DELETE',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        credentials: 'include',
+      },
+    );
     return { status: response.status, json: await response.json() };
   },
 
@@ -1096,17 +1459,22 @@ export const DataJunctionAPI = {
     );
     return { status: response.status, json: await response.json() };
   },
-  deleteMaterialization: async function (nodeName, materializationName) {
-    const response = await fetch(
-      `${DJ_URL}/nodes/${nodeName}/materializations?materialization_name=${materializationName}`,
-      {
-        method: 'DELETE',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        credentials: 'include',
+  deleteMaterialization: async function (
+    nodeName,
+    materializationName,
+    nodeVersion = null,
+  ) {
+    let url = `${DJ_URL}/nodes/${nodeName}/materializations?materialization_name=${materializationName}`;
+    if (nodeVersion) {
+      url += `&node_version=${nodeVersion}`;
+    }
+    const response = await fetch(url, {
+      method: 'DELETE',
+      headers: {
+        'Content-Type': 'application/json',
       },
-    );
+      credentials: 'include',
+    });
     return { status: response.status, json: await response.json() };
   },
   listMetricMetadata: async function () {
@@ -1139,13 +1507,9 @@ export const DataJunctionAPI = {
   },
   // GET /notifications/
   getNotificationPreferences: async function (params = {}) {
-    const url = new URL(`${DJ_URL}/notifications/`);
-    Object.entries(params).forEach(([key, value]) =>
-      url.searchParams.append(key, value),
-    );
-
+    const query = new URLSearchParams(params).toString();
     return await (
-      await fetch(url, {
+      await fetch(`${DJ_URL}/notifications/${query ? `?${query}` : ''}`, {
         credentials: 'include',
       })
     ).json();
@@ -1184,7 +1548,7 @@ export const DataJunctionAPI = {
     url.searchParams.append('entity_type', entity_type);
     url.searchParams.append('entity_name', entity_name);
 
-    const response = await fetch(url, {
+    const response = await fetch(url.toString(), {
       method: 'DELETE',
       credentials: 'include',
     });
@@ -1193,5 +1557,51 @@ export const DataJunctionAPI = {
       status: response.status,
       json: await response.json(),
     };
+  },
+
+  // GET /history/ with only_subscribed filter
+  getSubscribedHistory: async function (limit = 10) {
+    return await (
+      await fetch(`${DJ_URL}/history/?only_subscribed=true&limit=${limit}`, {
+        credentials: 'include',
+      })
+    ).json();
+  },
+
+  // POST /notifications/mark-read
+  markNotificationsRead: async function () {
+    const response = await fetch(`${DJ_URL}/notifications/mark-read`, {
+      method: 'POST',
+      credentials: 'include',
+    });
+    return await response.json();
+  },
+
+  // Service Account APIs
+  listServiceAccounts: async function () {
+    const response = await fetch(`${DJ_URL}/service-accounts`, {
+      credentials: 'include',
+    });
+    return await response.json();
+  },
+
+  createServiceAccount: async function (name) {
+    const response = await fetch(`${DJ_URL}/service-accounts`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      credentials: 'include',
+      body: JSON.stringify({ name }),
+    });
+    return await response.json();
+  },
+
+  deleteServiceAccount: async function (clientId) {
+    const response = await fetch(`${DJ_URL}/service-accounts/${clientId}`, {
+      method: 'DELETE',
+      credentials: 'include',
+    });
+    return await response.json();
   },
 };

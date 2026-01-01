@@ -35,7 +35,10 @@ async def list_attributes(
     List all available attribute types.
     """
     attributes = await AttributeType.get_all(session)
-    return [AttributeTypeBase.from_orm(attr) for attr in attributes]
+    return [
+        AttributeTypeBase.model_validate(attr, from_attributes=True)
+        for attr in attributes
+    ]
 
 
 @router.post(
@@ -62,7 +65,7 @@ async def add_attribute_type(
             message=f"Attribute type `{data.name}` already exists!",
         )
     attribute_type = await AttributeType.create(session, data)
-    return AttributeTypeBase.from_orm(attribute_type)
+    return AttributeTypeBase.model_validate(attribute_type, from_attributes=True)
 
 
 async def default_attribute_types(session: AsyncSession = Depends(get_session)):
@@ -109,8 +112,7 @@ async def default_attribute_types(session: AsyncSession = Depends(get_session)):
         ),
     )
     attribute_types = (await session.execute(statement)).scalars().all()
-    for type_ in attribute_types:
-        # if type_:  # pragma: no cover
+    for type_ in attribute_types:  # pragma: no cover
         type_.name = default_attribute_type_names[type_.name].name
         type_.namespace = default_attribute_type_names[type_.name].namespace
         type_.description = default_attribute_type_names[type_.name].description

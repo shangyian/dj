@@ -4,17 +4,26 @@ import logging
 from functools import wraps
 
 import strawberry
-from fastapi import Depends
+from fastapi import Depends, Request, BackgroundTasks
 from strawberry.fastapi import GraphQLRouter
 from strawberry.types import Info
+
+from datajunction_server.internal.caching.cachelib_cache import get_cache
 from datajunction_server.api.graphql.queries.catalogs import list_catalogs
-from datajunction_server.api.graphql.queries.dag import common_dimensions
+from datajunction_server.api.graphql.queries.dag import (
+    common_dimensions,
+    downstream_nodes,
+    upstream_nodes,
+)
 from datajunction_server.api.graphql.queries.engines import list_engines, list_dialects
 from datajunction_server.api.graphql.queries.nodes import (
     find_nodes,
     find_nodes_paginated,
 )
-from datajunction_server.api.graphql.queries.sql import measures_sql
+from datajunction_server.api.graphql.queries.sql import (
+    measures_sql,
+    materialization_plan,
+)
 from datajunction_server.api.graphql.queries.tags import list_tag_types, list_tags
 from datajunction_server.api.graphql.scalars import Connection
 from datajunction_server.api.graphql.scalars.catalog_engine import (
@@ -23,7 +32,10 @@ from datajunction_server.api.graphql.scalars.catalog_engine import (
     DialectInfo,
 )
 from datajunction_server.api.graphql.scalars.node import DimensionAttribute, Node
-from datajunction_server.api.graphql.scalars.sql import GeneratedSQL
+from datajunction_server.api.graphql.scalars.sql import (
+    GeneratedSQL,
+    MaterializationPlan,
+)
 from datajunction_server.api.graphql.scalars.tag import Tag
 from datajunction_server.utils import get_session, get_settings
 
@@ -66,13 +78,21 @@ def log_resolver(func):
 
 
 async def get_context(
-    session=Depends(get_session),
-    settings=Depends(get_settings),
+    request: Request,
+    background_tasks: BackgroundTasks,
+    db_session=Depends(get_session),
+    cache=Depends(get_cache),
 ):
     """
     Provides the context for graphql requests
     """
-    return {"session": session, "settings": settings}
+    return {
+        "session": db_session,
+        "settings": get_settings(),
+        "request": request,
+        "background_tasks": background_tasks,
+        "cache": cache,
+    }
 
 
 @strawberry.type
@@ -110,11 +130,23 @@ class Query:
         resolver=log_resolver(common_dimensions),
         description="Get common dimensions for one or more nodes",
     )
+    downstream_nodes: list[Node] = strawberry.field(
+        resolver=log_resolver(downstream_nodes),
+        description="Find downstream nodes (optionally, of a given type) from a given node.",
+    )
+    upstream_nodes: list[Node] = strawberry.field(
+        resolver=log_resolver(upstream_nodes),
+        description="Find upstream nodes (optionally, of a given type) from a given node.",
+    )
 
     # Generate SQL queries
     measures_sql: list[GeneratedSQL] = strawberry.field(
         resolver=log_resolver(measures_sql),
         description="Get measures SQL for a list of metrics, dimensions, and filters.",
+    )
+    materialization_plan: MaterializationPlan = strawberry.field(
+        resolver=log_resolver(materialization_plan),
+        description="Get materialization plan for a list of metrics, dimensions, and filters.",
     )
 
     # Tags queries

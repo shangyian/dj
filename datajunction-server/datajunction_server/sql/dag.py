@@ -2,12 +2,15 @@
 DAG related functions.
 """
 
+import asyncio
 import itertools
-from typing import Dict, List, Optional, Set, Union, cast
+import logging
+from typing import Dict, List, Tuple, Union, cast
 
-from sqlalchemy import and_, func, join, literal, or_, select
+from sqlalchemy import and_, func, join, literal, or_, select, distinct
+from sqlalchemy.sql.base import ExecutableOption
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import aliased, contains_eager, joinedload, selectinload
+from sqlalchemy.orm import aliased, joinedload, selectinload
 from sqlalchemy.sql.operators import is_
 from sqlalchemy.dialects.postgresql import array
 
@@ -15,17 +18,18 @@ from datajunction_server.database.attributetype import AttributeType, ColumnAttr
 from datajunction_server.database.column import Column
 from datajunction_server.database.dimensionlink import DimensionLink
 from datajunction_server.database.node import (
+    CubeRelationship,
     Node,
-    NodeColumns,
     NodeRelationship,
     NodeRevision,
 )
-from datajunction_server.errors import DJDoesNotExistException, DJGraphCycleException
+from datajunction_server.errors import DJGraphCycleException
 from datajunction_server.models.attribute import ColumnAttributes
 from datajunction_server.models.node import DimensionAttributeOutput
-from datajunction_server.models.node_type import NodeType
+from datajunction_server.models.node_type import NodeType, NodeNameVersion
 from datajunction_server.utils import SEPARATOR, get_settings, refresh_if_needed
 
+logger = logging.getLogger(__name__)
 settings = get_settings()
 
 
@@ -51,6 +55,7 @@ def _node_output_options():
             ),
         ),
         selectinload(Node.tags),
+        selectinload(Node.owners),
     ]
 
 
@@ -61,15 +66,20 @@ async def get_downstream_nodes(
     include_deactivated: bool = True,
     include_cubes: bool = True,
     depth: int = -1,
-) -> List[Node]:
+    options: list[ExecutableOption] = None,
+) -> list[Node]:
     """
     Gets all downstream children of the given node, filterable by node type.
     Uses a recursive CTE query to build out all descendants from the node.
     """
+    # Use full options if none provided (for REST API DAGNodeOutput compatibility)
+    result_options = options if options is not None else _node_output_options()
+
+    # Initial lookup always uses light options (only need node.id)
     node = await Node.get_by_name(
         session,
         node_name,
-        options=_node_output_options(),
+        options=[joinedload(Node.current)],
     )
     if not node:
         return []
@@ -89,6 +99,28 @@ async def get_downstream_nodes(
     )
     if not include_cubes:
         initial_dag = initial_dag.where((NodeRevision.type != NodeType.CUBE))
+    if not include_deactivated:
+        initial_dag = initial_dag.where(Node.deactivated_at.is_(None))
+
+    initial_count = await session.scalar(
+        select(func.count()).select_from(initial_dag.subquery()),
+    )
+    if initial_count >= settings.fanout_threshold:
+        logger.info(
+            "Initial fanout for node %s (%d) is greater than threshold %d. Switching to BFS...",
+            node_name,
+            initial_count,
+            settings.fanout_threshold,
+        )
+        return await get_downstream_nodes_bfs(
+            session,
+            node,
+            depth,
+            include_deactivated,
+            include_cubes,
+            node_type,
+        )
+
     dag = initial_dag.cte("downstreams", recursive=True).suffix_with(
         "CYCLE node_id SET is_cycle USING path",
     )
@@ -105,6 +137,8 @@ async def get_downstream_nodes(
     )
     if not include_cubes:
         next_layer = next_layer.where(NodeRevision.type != NodeType.CUBE)
+    if not include_deactivated:
+        next_layer = next_layer.where(Node.deactivated_at.is_(None))
 
     paths = dag.union_all(next_layer)
 
@@ -132,7 +166,7 @@ async def get_downstream_nodes(
         final_select = final_select.where(max_depths.c.max_depth < depth)
 
     statement = final_select.order_by(max_depths.c.max_depth, Node.id).options(
-        *_node_output_options(),
+        *result_options,
     )
     results = (await session.execute(statement)).unique().scalars().all()
     return [
@@ -142,33 +176,211 @@ async def get_downstream_nodes(
     ]
 
 
+async def get_downstream_nodes_bfs(
+    session,
+    start_node: Node,
+    max_depth: int = -1,
+    include_deactivated: bool = True,
+    include_cubes: bool = True,
+    node_type: NodeType = None,
+) -> list[Node]:
+    """
+    Get all downstream nodes of a given node using BFS, which is more efficient for large graphs.
+    Each level is processed concurrently, with a limit on the number of concurrent tasks
+    configured by `max_concurrency`.
+    """
+    visited = set()
+    results = []
+    current_level: list[Tuple[int, int]] = [(start_node.id, 0)]
+
+    while current_level:
+        depth = current_level[0][1]
+        logger.info("Processing downstreams for %s at depth %s", start_node.name, depth)
+
+        current_ids = list(set([nid for nid, _ in current_level if nid not in visited]))
+        if not current_ids:
+            break  # pragma: no cover
+        visited.update(current_ids)
+
+        # Process nodes at this level concurrently
+        nodes_at_level = await _bfs_process_level_concurrently(
+            session,
+            current_ids,
+            include_deactivated,
+            include_cubes,
+            node_type,
+        )
+        results.extend(
+            [
+                node
+                for node in nodes_at_level
+                if node.id != start_node.id
+                and (node.type == node_type or node_type is None)
+            ],
+        )
+
+        if len(results) >= settings.node_list_max:
+            return results[: settings.node_list_max]
+
+        # Stop BFS if max depth reached
+        if max_depth != -1 and current_level[0][1] >= max_depth:
+            break
+
+        # Fetch children for next level
+        next_level = []
+        for node in nodes_at_level:
+            children_rows = await session.execute(
+                select(distinct(Node.id))
+                .select_from(NodeRelationship)
+                .join(NodeRevision, NodeRelationship.child_id == NodeRevision.id)
+                .join(Node, Node.id == NodeRevision.node_id)
+                .where(NodeRelationship.parent_id == node.id)
+                .where(
+                    Node.deactivated_at.is_(None) if not include_deactivated else True,
+                ),
+            )
+            children = [
+                (c[0], depth + 1)
+                for c in children_rows.fetchall()
+                if c[0] not in visited
+            ]
+            if children:
+                logger.info(
+                    "Processing downstreams for %s: extending from %s with %d children",
+                    start_node.name,
+                    node.name,
+                    len(children),
+                )
+                next_level.extend(children)
+
+        current_level = next_level
+
+    return results
+
+
+async def _bfs_process_level_concurrently(
+    session: AsyncSession,
+    node_ids: list[int],
+    include_deactivated: bool = True,
+    include_cubes: bool = True,
+    node_type: NodeType = None,
+):
+    """
+    Process all nodes at a BFS level concurrently with a concurrency limit.
+    """
+    effective_concurrency = min(
+        settings.max_concurrency,
+        max(1, settings.reader_db.pool_size // 2),
+    )
+    semaphore = asyncio.Semaphore(effective_concurrency)
+
+    async def _bfs_process_node(
+        session: AsyncSession,
+        node_id: int,
+        include_deactivated: bool = True,
+        include_cubes: bool = True,
+        node_type: NodeType = None,
+    ):
+        node = await Node.get_by_id(
+            session,
+            node_id,
+            options=_node_output_options(),
+        )
+        if not node:
+            return None  # pragma: no cover
+        if not include_deactivated and node.deactivated_at is not None:
+            return None  # pragma: no cover
+        if not include_cubes and node.type == NodeType.CUBE:
+            return None
+        return node
+
+    async def sem_task(node_id):
+        async with semaphore:
+            return await _bfs_process_node(
+                session,
+                node_id,
+                include_deactivated,
+                include_cubes,
+                node_type,
+            )
+
+    tasks = [sem_task(node_id) for node_id in node_ids]
+    processed = await asyncio.gather(*tasks)
+    return [node for node in processed if node is not None]
+
+
 async def get_upstream_nodes(
     session: AsyncSession,
-    node_name: str,
+    node_name: Union[str, List[str]],
     node_type: NodeType = None,
     include_deactivated: bool = True,
+    options: List = None,
 ) -> List[Node]:
     """
-    Gets all upstreams of the given node, filterable by node type.
-    Uses a recursive CTE query to build out all parents of the node.
+    Gets all upstreams of the given node(s), filterable by node type.
+    Uses a recursive CTE query to build out all parents of the nodes.
+
+    For metrics, we first get immediate parent IDs and then run the recursive
+    CTE from those parents. This is more efficient because metrics only have
+    one parent, and it avoids unnecessary traversal of shared parents.
     """
-    node = (
-        (
-            await session.execute(
-                select(Node)
-                .where(
-                    (Node.name == node_name) & (is_(Node.deactivated_at, None)),
-                )
-                .options(joinedload(Node.current)),
-            )
-        )
-        .unique()
-        .scalar()
+    # Normalize to list
+    node_names = [node_name] if isinstance(node_name, str) else node_name
+
+    # Use full options if none provided (for REST API DAGNodeOutput compatibility)
+    result_options = options if options is not None else _node_output_options()
+
+    # Initial lookup always uses light options (only need type and current.id)
+    nodes = await Node.get_by_names(
+        session,
+        node_names,
+        options=[joinedload(Node.current)],
     )
-    if not node:
-        raise DJDoesNotExistException(  # pragma: no cover
-            message=f"Node with name {node_name} does not exist",
+
+    if not nodes:
+        return []  # pragma: no cover
+
+    # Collect starting revision IDs and immediate parent IDs for metrics
+    starting_revision_ids: List[int] = []
+    immediate_parent_ids: List[int] = []
+    metric_revision_ids: List[int] = []
+    non_metric_revision_ids: List[int] = []
+
+    for node in nodes:
+        if node.type == NodeType.METRIC:
+            metric_revision_ids.append(node.current.id)
+        else:
+            non_metric_revision_ids.append(node.current.id)
+
+    # For metrics, get immediate parent IDs in a single query
+    if metric_revision_ids:
+        parent_ids_query = select(NodeRelationship.parent_id).where(
+            NodeRelationship.child_id.in_(metric_revision_ids),
         )
+        immediate_parent_ids = list(
+            (await session.execute(parent_ids_query)).scalars().all(),
+        )
+
+        if immediate_parent_ids:
+            # Get the current revision IDs for those parent nodes
+            revision_ids_query = (
+                select(NodeRevision.id)
+                .join(Node, Node.id == NodeRevision.node_id)
+                .where(
+                    Node.id.in_(immediate_parent_ids),
+                    Node.current_version == NodeRevision.version,
+                )
+            )
+            starting_revision_ids.extend(
+                (await session.execute(revision_ids_query)).scalars().all(),
+            )
+
+    # Add non-metric revision IDs directly
+    starting_revision_ids.extend(non_metric_revision_ids)
+
+    if not starting_revision_ids:
+        # No parents to traverse
+        return []
 
     dag = (
         (
@@ -177,7 +389,7 @@ async def get_upstream_nodes(
                 NodeRevision.id,
                 NodeRevision.node_id,
             )
-            .where(NodeRelationship.child_id == node.current.id)
+            .where(NodeRelationship.child_id.in_(starting_revision_ids))
             .join(Node, NodeRelationship.parent_id == Node.id)
             .join(
                 NodeRevision,
@@ -216,10 +428,30 @@ async def get_upstream_nodes(
             (Node.current_version == NodeRevision.version)
             & (Node.id == NodeRevision.node_id),
         )
-        .options(*_node_output_options())
+        .options(*result_options)
     )
 
-    results = (await session.execute(statement)).unique().scalars().all()
+    results = list((await session.execute(statement)).unique().scalars().all())
+
+    # For metrics, include the immediate parents in the results
+    # (they are the starting point for the CTE, so not included by default)
+    if immediate_parent_ids:
+        # Load parents with same options for consistent output
+        parent_query = (
+            select(Node)
+            .where(Node.id.in_(immediate_parent_ids))
+            .options(*result_options)
+        )
+        if not include_deactivated:
+            parent_query = parent_query.where(is_(Node.deactivated_at, None))
+        loaded_parents = (await session.execute(parent_query)).unique().scalars().all()
+
+        # Add parents that aren't already in results
+        existing_ids = {r.id for r in results}
+        for parent in loaded_parents:
+            if parent.id not in existing_ids:
+                results.append(parent)
+
     return [
         upstream
         for upstream in results
@@ -276,9 +508,25 @@ async def get_dimension_attributes(
         ),
     )
     if node.type == NodeType.METRIC:
+        # For metrics, check if it's a base metric (parent is non-metric) or
+        # derived metric (parent is another metric)
         await refresh_if_needed(session, node.current, ["parents"])
-        node = node.current.parents[0]
-        await refresh_if_needed(session, node, ["current"])
+        first_parent = node.current.parents[0]
+        await refresh_if_needed(session, first_parent, ["current"])
+
+        if first_parent.type == NodeType.METRIC:
+            # Derived metric - use get_dimensions which handles intersection
+            dimensions = cast(
+                list[DimensionAttributeOutput],
+                await get_dimensions(session, node, with_attributes=True),
+            )
+            # Prepend the metric's name to each dimension's path
+            for dim in dimensions:
+                dim.path = [node_name] + dim.path
+            return dimensions
+        else:
+            # Base metric - use the parent directly (original behavior)
+            node = first_parent
 
     # Discover all dimension nodes in the given node's dimensions graph
     dimension_nodes_and_paths = await get_dimension_nodes(
@@ -448,13 +696,13 @@ async def get_dimensions_dag(
     graph_branches = (
         (
             select(
-                NodeColumns.node_id.label("node_revision_id"),
+                Column.node_revision_id,
                 Column.dimension_id,
                 Column.name,
                 Column.dimension_column,
             )
-            .select_from(NodeColumns)
-            .join(Column, NodeColumns.column_id == Column.id)
+            .select_from(Column)
+            .where(Column.dimension_id.isnot(None))
         )
         .union_all(
             select(
@@ -601,17 +849,7 @@ async def get_dimensions_dag(
             paths.c.join_path,
         )
         .select_from(paths)
-        .join(NodeColumns, NodeColumns.node_id == paths.c.node_revision_id)
-        .join(
-            column,
-            and_(
-                NodeColumns.column_id == column.id,
-                or_(
-                    is_(paths.c.dimension_column, None),
-                    paths.c.dimension_column == column.name,
-                ),
-            ),
-        )
+        .join(column, column.node_revision_id == paths.c.node_revision_id)
         .join(ColumnAttribute, column.id == ColumnAttribute.column_id, isouter=True)
         .join(
             AttributeType,
@@ -637,8 +875,7 @@ async def get_dimensions_dag(
                 literal("").label("join_path"),
             )
             .select_from(NodeRevision)
-            .join(NodeColumns, NodeColumns.node_id == NodeRevision.id)
-            .join(Column, NodeColumns.column_id == Column.id)
+            .join(Column, Column.node_revision_id == NodeRevision.id)
             .join(
                 ColumnAttribute,
                 Column.id == ColumnAttribute.column_id,
@@ -728,23 +965,55 @@ async def get_dimensions(
     Return all available dimensions for a given node.
     * Setting `attributes` to True will return a list of dimension attributes,
     * Setting `attributes` to False will return a list of dimension nodes
+
+    For metrics, returns the intersection of dimensions available from
+    all non-metric parents.
     """
-    if node.type == NodeType.METRIC:
-        dag = await get_dimensions_dag(
-            session,
-            node.current.parents[0].current,
-            with_attributes,
-            depth=depth,
-        )
-    else:
+    if node.type != NodeType.METRIC:
         await session.refresh(node, attribute_names=["current"])
-        dag = await get_dimensions_dag(
+        return await get_dimensions_dag(
             session,
             node.current,
             with_attributes,
             depth=depth,
         )
-    return dag
+
+    # For metrics, get ultimate non-metric parents
+    # This handles both base metrics (returns immediate parents) and
+    # derived metrics (returns base metrics' parents)
+    ultimate_parents = await get_metric_parents(session, [node])
+
+    if not ultimate_parents:
+        return []  # pragma: no cover
+
+    # Get dimensions for all ultimate parents
+    all_dimensions: List[List[DimensionAttributeOutput]] = []
+    for parent in ultimate_parents:
+        await session.refresh(parent, attribute_names=["current"])
+        parent_dims = await get_dimensions_dag(
+            session,
+            parent.current,
+            with_attributes,
+            depth=depth,
+        )
+        all_dimensions.append(parent_dims)
+
+    if not all_dimensions:
+        return []  # pragma: no cover
+
+    if len(all_dimensions) == 1:
+        return all_dimensions[0]
+
+    # Find intersection by dimension name
+    common_names = set(d.name for d in all_dimensions[0])
+    for dims in all_dimensions[1:]:
+        common_names &= set(d.name for d in dims)
+
+    # Return dimensions from first parent that are in the intersection
+    return sorted(
+        [d for d in all_dimensions[0] if d.name in common_names],
+        key=lambda x: (x.name, ",".join(x.path)),
+    )
 
 
 async def get_filter_only_dimensions(
@@ -814,8 +1083,18 @@ async def get_metric_parents(
     metric_nodes: list[Node],
 ) -> list[Node]:
     """
-    Return a list of parent nodes of the metrics
+    Return a list of non-metric parent nodes of the metrics.
+
+    For derived metrics (metrics that reference base metrics), returns the
+    non-metric parents of those base metrics.
+
+    Note: Only 1 level of metric nesting is supported. Derived metrics can
+    reference base metrics, but not other derived metrics.
     """
+    if not metric_nodes:
+        return []  # pragma: no cover
+
+    # Query 1: Get all immediate parents for the input metrics
     find_latest_node_revisions = [
         and_(
             NodeRevision.name == metric_node.name,
@@ -837,7 +1116,42 @@ async def get_metric_parents(
             ),
         )
     )
-    return list(set((await session.execute(statement)).scalars().all()))
+    immediate_parents = list(set((await session.execute(statement)).scalars().all()))
+
+    # Separate metric and non-metric parents
+    metric_parents = [p for p in immediate_parents if p.type == NodeType.METRIC]
+    non_metric_parents = [p for p in immediate_parents if p.type != NodeType.METRIC]
+
+    # Query 2: For metric parents (base metrics), get their parents
+    # With 1-level nesting, these must be non-metrics
+    if metric_parents:
+        find_base_metric_revisions = [
+            and_(
+                NodeRevision.name == m.name,
+                NodeRevision.version == m.current_version,
+            )
+            for m in metric_parents
+        ]
+        statement = (
+            select(Node)
+            .where(or_(*find_base_metric_revisions))
+            .select_from(
+                join(
+                    join(
+                        NodeRevision,
+                        NodeRelationship,
+                    ),
+                    Node,
+                    NodeRelationship.parent_id == Node.id,
+                ),
+            )
+        )
+        base_metric_parents = list(
+            set((await session.execute(statement)).scalars().all()),
+        )
+        non_metric_parents.extend(base_metric_parents)
+
+    return list(set(non_metric_parents))
 
 
 async def get_common_dimensions(session: AsyncSession, nodes: list[Node]):
@@ -866,133 +1180,178 @@ async def get_common_dimensions(session: AsyncSession, nodes: list[Node]):
     )
 
 
-async def get_nodes_with_dimension(
-    session: AsyncSession,
-    dimension_node: Node,
-    node_types: Optional[List[NodeType]] = None,
-) -> List[NodeRevision]:
-    """
-    Find all nodes that can be joined to a given dimension
-    """
-    to_process = [dimension_node]
-    processed: Set[str] = set()
-    final_set: Set[NodeRevision] = set()
-    while to_process:
-        current_node = to_process.pop()
-        processed.add(current_node.name)
-
-        # Dimension nodes are used to expand the searchable graph by finding
-        # the next layer of nodes that are linked to this dimension
-        if current_node.type == NodeType.DIMENSION:
-            statement = (
-                select(NodeRevision)
-                .join(
-                    Node,
-                    onclause=(
-                        (NodeRevision.node_id == Node.id)
-                        & (Node.current_version == NodeRevision.version)
-                    ),
-                )
-                .join(
-                    NodeColumns,
-                    onclause=(NodeRevision.id == NodeColumns.node_id),
-                )
-                .join(
-                    Column,
-                    onclause=(NodeColumns.column_id == Column.id),
-                )
-                .where(
-                    Column.dimension_id.in_(  # type: ignore
-                        [current_node.id],
-                    ),
-                )
-            )
-            node_revisions = (
-                (
-                    await session.execute(
-                        statement.options(contains_eager(NodeRevision.node)),
-                    )
-                )
-                .unique()
-                .scalars()
-                .all()
-            )
-
-            dim_link_statement = (
-                select(NodeRevision)
-                .select_from(DimensionLink)
-                .join(
-                    NodeRevision,
-                    onclause=(DimensionLink.node_revision_id == NodeRevision.id),
-                )
-                .join(
-                    Node,
-                    onclause=(
-                        (NodeRevision.node_id == Node.id)
-                        & (Node.current_version == NodeRevision.version)
-                    ),
-                )
-                .where(DimensionLink.dimension_id.in_([current_node.id]))
-            )
-            nodes_via_dimension_link = (
-                (
-                    await session.execute(
-                        dim_link_statement.options(contains_eager(NodeRevision.node)),
-                    )
-                )
-                .unique()
-                .scalars()
-                .all()
-            )
-            for node_rev in node_revisions + nodes_via_dimension_link:
-                if node_rev.name not in processed:  # pragma: no cover
-                    to_process.append(node_rev.node)
-        else:
-            # All other nodes are added to the result set
-            current_node = await Node.get_by_name(  # type: ignore
-                session,
-                current_node.name,
-                options=[
-                    joinedload(Node.current).options(
-                        *NodeRevision.default_load_options(),
-                    ),
-                    selectinload(Node.children).options(
-                        selectinload(NodeRevision.node),
-                    ),
-                ],
-            )
-            if current_node:
-                final_set.add(current_node.current)
-                for child in current_node.children:
-                    if child.name not in processed:
-                        to_process.append(child.node)
-    if node_types:
-        return [node for node in final_set if node.type in node_types]
-    return list(final_set)
-
-
 async def get_nodes_with_common_dimensions(
     session: AsyncSession,
-    common_dimensions: List[Node],
-    node_types: Optional[List[NodeType]] = None,
-) -> List[NodeRevision]:
+    common_dimensions: list[Node],
+    node_types: list[NodeType] | None = None,
+) -> list[NodeNameVersion]:
     """
-    Find all nodes that share a list of common dimensions
+    Find all nodes that share a list of common dimensions.
+
+    This traverses the dimension graph recursively to find:
+    1. Nodes directly linked to any dimension in the graph that leads to the target dimensions
+    2. Metrics that inherit those dimensions from their parent nodes
+
+    For example, if dim A -> dim B -> dim C, searching for dim C will find nodes
+    linked to dim C, dim B, or dim A (since they all lead to dim C).
+
+    Args:
+        common_dimensions: List of dimension nodes to find common nodes for
+        node_types: Optional list of node types to filter by
+
+    Returns:
+        List of NodeNameVersion objects containing node name and version
     """
-    nodes_that_share_dimensions = set()
-    first = True
-    for dimension in common_dimensions:
-        new_nodes = await get_nodes_with_dimension(session, dimension, node_types)
-        if first:
-            nodes_that_share_dimensions = set(new_nodes)
-            first = False
-        else:
-            nodes_that_share_dimensions = nodes_that_share_dimensions.intersection(
-                set(new_nodes),
-            )
-            if not nodes_that_share_dimensions:
-                break
-    return list(nodes_that_share_dimensions)
+    if not common_dimensions:
+        return []
+
+    dimension_ids = [d.id for d in common_dimensions]
+    num_dimensions = len(dimension_ids)
+
+    # Build a CTE that merges column -> dimension and dimension link -> dimension relationships
+    # These are the "branches" of the dimensions graph
+    graph_branches = (
+        select(
+            Column.node_revision_id.label("node_revision_id"),
+            Column.dimension_id.label("dimension_id"),
+        )
+        .where(Column.dimension_id.isnot(None))
+        .union_all(
+            select(
+                DimensionLink.node_revision_id.label("node_revision_id"),
+                DimensionLink.dimension_id.label("dimension_id"),
+            ),
+        )
+    ).cte("graph_branches")
+
+    # Recursive CTE: find all dimensions that lead to each target dimension
+    # Base case: the target dimensions themselves
+    dimension_graph = (
+        select(
+            Node.id.label("target_dim_id"),  # The original target dimension
+            Node.id.label("reachable_dim_id"),  # Dimensions that can reach the target
+        )
+        .where(Node.id.in_(dimension_ids))
+        .where(Node.deactivated_at.is_(None))
+    ).cte("dimension_graph", recursive=True)
+
+    # Add cycle detection for PostgreSQL
+    dimension_graph = dimension_graph.suffix_with(
+        "CYCLE reachable_dim_id SET is_cycle USING path",
+    )
+
+    # Recursive case: find dimensions that link to dimensions already in our set
+    dimension_graph = dimension_graph.union_all(
+        select(
+            dimension_graph.c.target_dim_id,
+            Node.id.label("reachable_dim_id"),
+        )
+        .select_from(graph_branches)
+        .join(
+            NodeRevision,
+            graph_branches.c.node_revision_id == NodeRevision.id,
+        )
+        .join(
+            Node,
+            (NodeRevision.node_id == Node.id)
+            & (Node.current_version == NodeRevision.version),
+        )
+        .join(
+            dimension_graph,
+            graph_branches.c.dimension_id == dimension_graph.c.reachable_dim_id,
+        )
+        .where(Node.type == NodeType.DIMENSION)
+        .where(Node.deactivated_at.is_(None)),
+    )
+
+    # Find all node revisions that link to any dimension in the expanded graph
+    nodes_linked_to_expanded_dims = (
+        select(
+            graph_branches.c.node_revision_id,
+            dimension_graph.c.target_dim_id,
+        )
+        .select_from(graph_branches)
+        .join(
+            dimension_graph,
+            graph_branches.c.dimension_id == dimension_graph.c.reachable_dim_id,
+        )
+    ).subquery()
+
+    # Find node_revisions linked to all target dimensions
+    nodes_with_all_dims = (
+        select(nodes_linked_to_expanded_dims.c.node_revision_id)
+        .group_by(nodes_linked_to_expanded_dims.c.node_revision_id)
+        .having(
+            func.count(func.distinct(nodes_linked_to_expanded_dims.c.target_dim_id))
+            >= num_dimensions,
+        )
+    ).subquery()
+
+    # Find parent node IDs that have all dimensions
+    parents_with_all_dims = (
+        select(Node.id.label("parent_node_id"))
+        .select_from(nodes_with_all_dims)
+        .join(
+            NodeRevision,
+            nodes_with_all_dims.c.node_revision_id == NodeRevision.id,
+        )
+        .join(
+            Node,
+            (NodeRevision.node_id == Node.id)
+            & (Node.current_version == NodeRevision.version),
+        )
+        .where(Node.deactivated_at.is_(None))
+    ).subquery()
+
+    # Find metrics whose parents have all dimensions
+    metrics_via_parents = (
+        select(NodeRevision.id.label("node_revision_id"))
+        .select_from(NodeRelationship)
+        .join(
+            NodeRevision,
+            NodeRelationship.child_id == NodeRevision.id,
+        )
+        .join(
+            Node,
+            (NodeRevision.node_id == Node.id)
+            & (Node.current_version == NodeRevision.version),
+        )
+        .join(
+            parents_with_all_dims,
+            NodeRelationship.parent_id == parents_with_all_dims.c.parent_node_id,
+        )
+        .where(NodeRevision.type == NodeType.METRIC)
+        .where(Node.deactivated_at.is_(None))
+    )
+
+    # Combine: nodes directly linked + metrics via parents
+    all_matching_nodes = (
+        select(nodes_with_all_dims.c.node_revision_id)
+        .union(metrics_via_parents)
+        .subquery()
+    )
+
+    # Final query to get only node name and version (lightweight)
+    statement = (
+        select(Node.name, Node.current_version)
+        .select_from(all_matching_nodes)
+        .join(
+            NodeRevision,
+            all_matching_nodes.c.node_revision_id == NodeRevision.id,
+        )
+        .join(
+            Node,
+            (NodeRevision.node_id == Node.id)
+            & (Node.current_version == NodeRevision.version),
+        )
+        .where(Node.deactivated_at.is_(None))
+    )
+
+    if node_types:
+        statement = statement.where(NodeRevision.type.in_(node_types))
+
+    results = await session.execute(statement)
+    return [NodeNameVersion(name=row[0], version=row[1]) for row in results.all()]
 
 
 def topological_sort(nodes: List[Node]) -> List[Node]:
@@ -1010,9 +1369,19 @@ def topological_sort(nodes: List[Node]) -> List[Node]:
             parent for parent in node.current.parents if parent.name in all_nodes
         ]
         in_degrees[node.name] = 0
-    for parents in adjacency_list.values():
+
+    # Build reverse mapping: parent -> children, and set in-degrees
+    children_to_parents = adjacency_list.copy()  # Save for in-degree calc
+    adjacency_list = {}  # Reset to build parent->children mapping
+
+    for node in nodes:
+        adjacency_list[node.name] = []
+        in_degrees[node.name] = len(children_to_parents[node.name])
+
+    # Populate parent->children mapping
+    for node_name, parents in children_to_parents.items():
         for parent in parents:
-            in_degrees[parent.name] += 1
+            adjacency_list[parent.name].append(all_nodes[node_name])
 
     # Initialize queue with nodes having in-degree 0
     queue: List[Node] = [
@@ -1033,7 +1402,7 @@ def topological_sort(nodes: List[Node]) -> List[Node]:
     if len(sorted_nodes) != len(in_degrees):
         raise DJGraphCycleException("Graph has at least one cycle")
 
-    return sorted_nodes[::-1]
+    return sorted_nodes
 
 
 async def get_dimension_dag_indegree(session, node_names: List[str]) -> Dict[str, int]:
@@ -1050,9 +1419,76 @@ async def get_dimension_dag_indegree(session, node_names: List[str]) -> Dict[str
             func.count(DimensionLink.id),
         )
         .where(DimensionLink.dimension_id.in_(dimension_ids))
+        .join(NodeRevision, DimensionLink.node_revision_id == NodeRevision.id)
+        .join(
+            Node,
+            and_(
+                Node.id == NodeRevision.node_id,
+                Node.current_version == NodeRevision.version,
+            ),
+        )
         .group_by(DimensionLink.dimension_id)
     )
     result = await session.execute(statement)
     link_counts = {link[0]: link[1] for link in result.unique().all()}
     dimension_dag_indegree = {node.name: link_counts.get(node.id, 0) for node in nodes}
     return dimension_dag_indegree
+
+
+async def get_cubes_using_dimensions(
+    session: AsyncSession,
+    dimension_names: list[str],
+) -> dict[str, int]:
+    """
+    Find cube revisions that use all the specified dimension node
+    """
+    cubes_subquery = (
+        select(NodeRevision.id, Node.name)
+        .select_from(Node)
+        .join(
+            NodeRevision,
+            and_(
+                NodeRevision.node_id == Node.id,
+                Node.current_version == NodeRevision.version,
+            ),
+        )
+        .where(
+            Node.type == NodeType.CUBE,
+            Node.deactivated_at.is_(None),
+        )
+        .subquery()
+    )
+
+    dimensions_subquery = (
+        select(NodeRevision.id, Node.name)
+        .select_from(Node)
+        .join(
+            NodeRevision,
+            and_(
+                NodeRevision.node_id == Node.id,
+                Node.current_version == NodeRevision.version,
+            ),
+        )
+        .where(
+            Node.type == NodeType.DIMENSION,
+            Node.deactivated_at.is_(None),
+        )
+        .subquery()
+    )
+
+    find_statement = (
+        select(
+            dimensions_subquery.c.name,
+            func.count(func.distinct(CubeRelationship.cube_id)).label(
+                "cubes_using_dim",
+            ),
+        )
+        .select_from(cubes_subquery)
+        .join(CubeRelationship, cubes_subquery.c.id == CubeRelationship.cube_id)
+        .join(Column, CubeRelationship.cube_element_id == Column.id)
+        .join(dimensions_subquery, Column.node_revision_id == dimensions_subquery.c.id)
+        .where(dimensions_subquery.c.name.in_(dimension_names))
+        .group_by(dimensions_subquery.c.name)
+    )
+    result = await session.execute(find_statement)
+    return {res[0]: res[1] for res in result.fetchall()}

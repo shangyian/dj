@@ -4,20 +4,24 @@ Fixtures for testing DJ client.
 
 # pylint: disable=redefined-outer-name, invalid-name, W0611
 import asyncio
+from contextlib import ExitStack, asynccontextmanager, contextmanager
+from datetime import timedelta
 import os
 from http.client import HTTPException
 from pathlib import Path
-from typing import AsyncGenerator, Dict, Iterator, List, Optional
-from unittest.mock import MagicMock
+from typing import AsyncGenerator, Awaitable, Dict, Iterator, List, Optional
+from unittest.mock import MagicMock, patch
 
 import pytest
 import pytest_asyncio
 from cachelib import SimpleCache
-from datajunction_server.api.main import app
-from datajunction_server.config import Settings
+from datajunction_server.api.main import create_app
+from datajunction_server.config import Settings, DatabaseConfig
 from datajunction_server.database.base import Base
 from datajunction_server.database.column import Column
 from datajunction_server.database.engine import Engine
+from datajunction_server.database.user import OAuthProvider, User
+from datajunction_server.internal.access.authentication.tokens import create_token
 from datajunction_server.models.materialization import MaterializationInfo
 from datajunction_server.models.query import QueryCreate, QueryWithResults
 from datajunction_server.service_clients import QueryServiceClient
@@ -27,11 +31,11 @@ from datajunction_server.utils import (
     get_session,
     get_settings,
 )
-from fastapi import Request
+from fastapi import FastAPI, Request
 from pytest_mock import MockerFixture
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.pool import StaticPool
+from sqlalchemy.pool import StaticPool, NullPool
 from starlette.testclient import TestClient
 from testcontainers.core.waiting_utils import wait_for_logs
 from testcontainers.postgres import PostgresContainer
@@ -103,8 +107,9 @@ def module__settings(module_mocker: MockerFixture) -> Iterator[Settings]:
     """
     Custom settings for unit tests.
     """
+    writer_db = DatabaseConfig(uri="sqlite://")
     settings = Settings(
-        index="sqlite://",
+        writer_db=writer_db,
         repository="/path/to/repository",
         results_backend=SimpleCache(default_timeout=0),
         celery_broker=None,
@@ -276,16 +281,124 @@ def module__query_service_client(
     yield qs_client
 
 
+@contextmanager
+def patch_session_contexts(
+    session_factory,
+    use_patch: bool = True,
+) -> Iterator[None]:
+    patch_targets = (
+        [
+            "datajunction_server.internal.caching.query_cache_manager.session_context",
+            "datajunction_server.internal.nodes.session_context",
+            "datajunction_server.internal.materializations.session_context",
+            "datajunction_server.api.deployments.session_context",
+        ]
+        if use_patch
+        else []
+    )
+
+    @asynccontextmanager
+    async def fake_session_context(
+        request: Request = None,
+    ) -> AsyncGenerator[AsyncSession, None]:
+        session = await session_factory()
+        try:
+            yield session
+        finally:
+            await session.close()
+
+    with ExitStack() as stack:
+        for target in patch_targets:
+            stack.enter_context(patch(target, fake_session_context))
+        yield
+
+
+def create_session_factory(postgres_container) -> Awaitable[AsyncSession]:
+    """
+    Returns a factory function that creates a new AsyncSession each time it is called.
+    """
+    engine = create_async_engine(
+        url=postgres_container.get_connection_url(),
+        poolclass=NullPool,
+    )
+
+    async def init_db():
+        async with engine.begin() as conn:
+            await conn.execute(text("CREATE EXTENSION IF NOT EXISTS pg_trgm;"))
+            await conn.run_sync(Base.metadata.create_all)
+
+    # Make sure DB is initialized once
+    asyncio.get_event_loop().run_until_complete(init_db())
+
+    async_session_factory = async_sessionmaker(
+        bind=engine,
+        autocommit=False,
+        expire_on_commit=False,
+    )
+
+    # Return a callable that produces a new session
+    async def get_session_factory() -> AsyncSession:
+        return async_session_factory()
+
+    # Return the session factory and cleanup
+    return get_session_factory  # type: ignore
+
+
+@pytest.fixture(scope="module")
+def module__session_factory(module__postgres_container) -> Awaitable[AsyncSession]:
+    return create_session_factory(module__postgres_container)
+
+
+@pytest.fixture(scope="module")
+def jwt_token() -> str:
+    """
+    JWT token fixture for testing.
+    """
+    return create_token(
+        {"username": "dj"},
+        secret="a-fake-secretkey",
+        iss="http://localhost:8000/",
+        expires_delta=timedelta(hours=24),
+    )
+
+
+async def create_default_user(session: AsyncSession) -> User:
+    """
+    A user fixture.
+    """
+    new_user = User(
+        username="dj",
+        password="dj",
+        email="dj@datajunction.io",
+        name="DJ",
+        oauth_provider=OAuthProvider.BASIC,
+        is_admin=False,
+    )
+    existing_user = await User.get_by_username(session, new_user.username)
+    if not existing_user:
+        session.add(new_user)
+        await session.commit()
+        user = new_user
+    else:
+        user = existing_user
+    await session.refresh(user)
+    return user
+
+
 @pytest.fixture(scope="module")
 def module__server(  # pylint: disable=too-many-statements
     module__session: AsyncSession,
     module__settings: Settings,
     module__query_service_client: QueryServiceClient,
     module_mocker,
+    module__session_factory,
+    jwt_token,
 ) -> Iterator[TestClient]:
     """
     Create a mock server for testing APIs that contains a mock query service.
     """
+    from datajunction_server.api.attributes import default_attribute_types
+    from datajunction_server.internal.seed import seed_default_catalogs
 
     def get_query_service_client_override(
         request: Request = None,  # pylint: disable=unused-argument
@@ -298,34 +411,40 @@ def module__server(  # pylint: disable=too-many-statements
     def get_settings_override() -> Settings:
         return module__settings
 
+    @asynccontextmanager
+    async def noop_lifespan(app: FastAPI):
+        """
+        Lifespan context for initializing and tearing down app-wide resources, like the FastAPI cache
+        """
+        await default_attribute_types(module__session)
+        await seed_default_catalogs(module__session)
+        await create_default_user(module__session)
+
+        yield
+
     module_mocker.patch(
         "datajunction_server.api.materializations.get_query_service_client",
         get_query_service_client_override,
     )
 
-    app.dependency_overrides[get_session] = get_session_override
-    app.dependency_overrides[get_settings] = get_settings_override
-    app.dependency_overrides[get_query_service_client] = (
-        get_query_service_client_override
+    module_mocker.patch(
+        "datajunction_server.internal.caching.query_cache_manager.session_context",
+        return_value=module__session,
     )
+    with patch_session_contexts(
+        session_factory=module__session_factory,
+        use_patch=True,
+    ):
+        app = create_app(lifespan=noop_lifespan)
+        app.dependency_overrides[get_session] = get_session_override
+        app.dependency_overrides[get_settings] = get_settings_override
+        app.dependency_overrides[get_query_service_client] = (
+            get_query_service_client_override
+        )
 
-    with TestClient(app) as test_client:
-        test_client.post(
-            "/basic/user/",
-            data={
-                "email": "dj@datajunction.io",
-                "username": "datajunction",
-                "password": "datajunction",
-            },
-        )
-        test_client.post(
-            "/basic/login/",
-            data={
-                "username": "datajunction",
-                "password": "datajunction",
-            },
-        )
-        yield test_client
+        with TestClient(app) as test_client:
+            test_client.headers.update({"Authorization": f"Bearer {jwt_token}"})
+            yield test_client
 
     app.dependency_overrides.clear()
 
@@ -347,7 +466,7 @@ def module__postgres_container(request) -> PostgresContainer:
     """
     postgres = PostgresContainer(
         image="postgres:latest",
-        user="dj",
+        username="dj",
         password="dj",
         dbname=request.module.__name__,
         port=5432,

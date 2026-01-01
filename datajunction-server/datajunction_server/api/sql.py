@@ -2,37 +2,47 @@
 SQL related APIs.
 """
 
-import json
 import logging
-from collections import OrderedDict
 from http import HTTPStatus
-from typing import Any, List, Optional, Tuple, cast
+from typing import List, Optional
 
-from fastapi import BackgroundTasks, Depends, Query
+from fastapi import BackgroundTasks, Depends, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from datajunction_server.api.helpers import (
-    assemble_column_metadata,
-    build_sql_for_multiple_metrics,
-    get_query,
-    validate_orderby,
+from datajunction_server.construction.build_v3 import (
+    build_metrics_sql,
+    build_measures_sql,
 )
-from datajunction_server.database import Engine, Node
-from datajunction_server.database.queryrequest import QueryBuildType, QueryRequest
+from datajunction_server.models.dialect import Dialect
+from datajunction_server.sql.parsing import ast
+
+from datajunction_server.internal.caching.cachelib_cache import get_cache
+from datajunction_server.internal.caching.interface import Cache
+from datajunction_server.internal.caching.query_cache_manager import (
+    QueryCacheManager,
+    QueryRequestParams,
+)
+from datajunction_server.internal.caching.cachelib_cache import get_cache
+from datajunction_server.internal.caching.interface import Cache
+from datajunction_server.database import Node
+from datajunction_server.database.queryrequest import QueryBuildType
 from datajunction_server.database.user import User
 from datajunction_server.errors import DJInvalidInputException
 from datajunction_server.internal.access.authentication.http import SecureAPIRouter
 from datajunction_server.internal.access.authorization import validate_access
-from datajunction_server.internal.engines import get_engine
 from datajunction_server.models import access
-from datajunction_server.models.access import AccessControlStore
-from datajunction_server.models.metric import TranslatedSQL
+from datajunction_server.models.metric import TranslatedSQL, V3TranslatedSQL
 from datajunction_server.models.node_type import NodeType
+from datajunction_server.models.query import V3ColumnMetadata
+from datajunction_server.models.sql import (
+    ComponentResponse,
+    GrainGroupResponse,
+    MeasuresSQLResponse,
+    MetricFormulaResponse,
+)
 from datajunction_server.models.sql import GeneratedSQL
-from datajunction_server.models.user import UserOutput
 from datajunction_server.utils import (
-    Settings,
-    get_and_update_current_user,
+    get_current_user,
     get_session,
     get_settings,
 )
@@ -68,15 +78,17 @@ async def get_measures_sql_for_cube_v2(
             "for the metrics and dimensions in the cube"
         ),
     ),
-    settings: Settings = Depends(get_settings),
+    cache: Cache = Depends(get_cache),
     session: AsyncSession = Depends(get_session),
     engine_name: Optional[str] = None,
     engine_version: Optional[str] = None,
-    current_user: Optional[User] = Depends(get_and_update_current_user),
+    current_user: Optional[User] = Depends(get_current_user),
     validate_access: access.ValidateAccessFn = Depends(
         validate_access,
     ),
     use_materialized: bool = True,
+    background_tasks: BackgroundTasks,
+    request: Request,
 ) -> List[GeneratedSQL]:
     """
     Return measures SQL for a set of metrics with dimensions and filters.
@@ -89,240 +101,27 @@ async def get_measures_sql_for_cube_v2(
     and others are aggregations on measures in parent node B, this endpoint will generate
     two measures queries, one for A and one for B.
     """
-    from datajunction_server.construction.build_v2 import (
-        get_measures_query,
+    query_cache_manager = QueryCacheManager(
+        cache=cache,
+        query_type=QueryBuildType.MEASURES,
     )
-
-    metrics = list(OrderedDict.fromkeys(metrics))
-    return await get_measures_query(
-        session=session,
-        metrics=metrics,
-        dimensions=dimensions,
-        filters=filters,
-        orderby=orderby,
-        engine_name=engine_name,
-        engine_version=engine_version,
-        current_user=current_user,
-        validate_access=validate_access,
-        include_all_columns=include_all_columns,
-        use_materialized=use_materialized,
-        preagg_requested=preaggregate,
-        query_parameters=json.loads(query_params),
-    )
-
-
-async def build_and_save_node_sql(
-    node_name: str,
-    dimensions: List[str] = Query([]),
-    filters: List[str] = Query([]),
-    orderby: List[str] = Query([]),
-    limit: Optional[int] = None,
-    *,
-    session: AsyncSession = Depends(get_session),
-    engine: Engine,
-    access_control: AccessControlStore,
-    ignore_errors: bool = True,
-    use_materialized: bool = True,
-    query_parameters: dict[str, Any] | None = None,
-) -> QueryRequest:
-    """
-    Build node SQL and save it to query requests
-    """
-    node = cast(
-        Node,
-        await Node.get_by_name(session, node_name, raise_if_not_exists=True),
-    )
-
-    # If it's a cube, we'll build SQL for the metrics in the cube, along with any additional
-    # dimensions or filters provided in the arguments
-    if node.type == NodeType.CUBE:
-        node = cast(
-            Node,
-            await Node.get_cube_by_name(session, node_name),
-        )
-        dimensions = list(
-            OrderedDict.fromkeys(node.current.cube_node_dimensions + dimensions),
-        )
-        translated_sql, engine, _ = await build_sql_for_multiple_metrics(
-            session=session,
-            metrics=node.current.cube_node_metrics,
+    return await query_cache_manager.get_or_load(
+        background_tasks,
+        request,
+        QueryRequestParams(
+            nodes=metrics,
             dimensions=dimensions,
             filters=filters,
+            engine_name=engine_name,
+            engine_version=engine_version,
             orderby=orderby,
-            limit=limit,
-            engine_name=engine.name if engine else None,
-            engine_version=engine.version if engine else None,
-            access_control=access_control,
+            query_params=query_params,
+            include_all_columns=include_all_columns,
+            preaggregate=preaggregate,
             use_materialized=use_materialized,
-            query_parameters=query_parameters,
-        )
-        # We save the request for both the cube and the metrics, so that if someone makes either
-        # of these types of requests, they'll go to the cached query
-        requests_to_save = [
-            (node.current.cube_node_metrics, QueryBuildType.METRICS),
-            ([node_name], QueryBuildType.NODE),
-        ]
-        for nodes, query_type in requests_to_save:
-            if query_parameters:
-                continue  # pragma: no cover
-            request = await QueryRequest.save_query_request(
-                session=session,
-                nodes=nodes,
-                dimensions=dimensions,
-                filters=filters,
-                orderby=orderby,
-                limit=limit,
-                engine_name=engine.name if engine else None,
-                engine_version=engine.version if engine else None,
-                query_type=query_type,
-                query=translated_sql.sql,
-                columns=[col.dict() for col in translated_sql.columns],  # type: ignore
-            )
-        return request
-
-    # For all other nodes, build the node query
-    node = await Node.get_by_name(session, node_name, raise_if_not_exists=True)  # type: ignore
-    if node.type == NodeType.METRIC:
-        translated_sql, engine, _ = await build_sql_for_multiple_metrics(
-            session,
-            [node_name],
-            dimensions,
-            filters,
-            orderby,
-            limit,
-            engine.name if engine else None,
-            engine.version if engine else None,
-            access_control=access_control,
-            ignore_errors=ignore_errors,
-            use_materialized=use_materialized,
-            query_parameters=query_parameters,
-        )
-        query = translated_sql.sql
-        columns = translated_sql.columns
-    else:
-        query_ast = await get_query(
-            session=session,
-            node_name=node_name,
-            dimensions=dimensions,
-            filters=filters,
-            orderby=orderby,
-            limit=limit,
-            engine=engine,
-            access_control=access_control,
-            use_materialized=use_materialized,
-            query_parameters=query_parameters,
-            ignore_errors=ignore_errors,
-        )
-        columns = [
-            assemble_column_metadata(col)  # type: ignore
-            for col in query_ast.select.projection
-        ]
-        query = str(query_ast)
-
-    query_request = await QueryRequest.save_query_request(
-        session=session,
-        nodes=[node_name],
-        dimensions=dimensions,
-        filters=filters,
-        orderby=orderby,
-        limit=limit,
-        engine_name=engine.name if engine else None,
-        engine_version=engine.version if engine else None,
-        query_type=QueryBuildType.NODE,
-        query=query,
-        columns=[col.dict() for col in columns or []],
-    )
-    return query_request
-
-
-async def get_node_sql(
-    node_name: str,
-    dimensions: List[str] = Query([]),
-    filters: List[str] = Query([]),
-    orderby: List[str] = Query([]),
-    limit: Optional[int] = None,
-    *,
-    session: AsyncSession = Depends(get_session),
-    engine_name: Optional[str] = None,
-    engine_version: Optional[str] = None,
-    current_user: User,
-    validate_access: access.ValidateAccessFn,
-    background_tasks: BackgroundTasks,
-    ignore_errors: bool = True,
-    use_materialized: bool = True,
-    query_parameters: dict[str, Any] | None = None,
-) -> Tuple[TranslatedSQL, QueryRequest]:
-    """
-    Return SQL for a node.
-    """
-    dimensions = [dim for dim in dimensions if dim and dim != ""]
-    access_control = access.AccessControlStore(
-        validate_access=validate_access,
-        user=UserOutput.from_orm(current_user),
-        base_verb=access.ResourceRequestVerb.READ,
-    )
-
-    engine = (
-        await get_engine(session, engine_name, engine_version)  # type: ignore
-        if engine_name
-        else None
-    )
-    validate_orderby(orderby, [node_name], dimensions)
-
-    if query_request := await QueryRequest.get_query_request(
-        session,
-        nodes=[node_name],
-        dimensions=dimensions,
-        filters=filters,
-        orderby=orderby,
-        limit=limit,
-        engine_name=engine.name if engine else None,
-        engine_version=engine.version if engine else None,
-        query_type=QueryBuildType.NODE,
-    ):
-        # Update the node SQL in a background task to keep it up-to-date
-        background_tasks.add_task(
-            build_and_save_node_sql,
-            node_name=node_name,
-            dimensions=dimensions,
-            filters=filters,
-            orderby=orderby,
-            limit=limit,
-            session=session,
-            engine=engine,
-            access_control=access_control,
-            use_materialized=use_materialized,
-            query_parameters=query_parameters,
-        )
-        return (
-            TranslatedSQL.create(
-                sql=query_request.query,
-                columns=query_request.columns,
-                dialect=engine.dialect if engine else None,
-            ),
-            query_request,
-        )
-
-    query_request = await build_and_save_node_sql(
-        node_name=node_name,
-        dimensions=dimensions,
-        filters=filters,
-        orderby=orderby,
-        limit=limit,
-        session=session,
-        engine=engine,  # type: ignore
-        access_control=access_control,
-        ignore_errors=ignore_errors,
-        use_materialized=use_materialized,
-        query_parameters=query_parameters,
-    )
-    return (
-        TranslatedSQL.create(
-            sql=query_request.query,
-            columns=query_request.columns,
-            dialect=engine.dialect if engine else None,
+            current_user=current_user,
+            validate_access=validate_access,
         ),
-        query_request,
     )
 
 
@@ -342,34 +141,255 @@ async def get_sql(
     session: AsyncSession = Depends(get_session),
     engine_name: Optional[str] = None,
     engine_version: Optional[str] = None,
-    current_user: User = Depends(get_and_update_current_user),
+    current_user: User = Depends(get_current_user),
     validate_access: access.ValidateAccessFn = Depends(
         validate_access,
     ),
     background_tasks: BackgroundTasks,
     ignore_errors: Optional[bool] = True,
     use_materialized: Optional[bool] = True,
+    cache: Cache = Depends(get_cache),
+    request: Request,
 ) -> TranslatedSQL:
     """
     Return SQL for a node.
     """
-    translated_sql, _ = await get_node_sql(
-        node_name,
-        dimensions,
-        filters,
-        orderby,
-        limit,
-        session=session,
-        engine_name=engine_name,
-        engine_version=engine_version,
-        current_user=current_user,
-        validate_access=validate_access,
-        background_tasks=background_tasks,
-        ignore_errors=ignore_errors,  # type: ignore
-        use_materialized=use_materialized,  # type: ignore
-        query_parameters=json.loads(query_params),
+    query_cache_manager = QueryCacheManager(
+        cache=cache,
+        query_type=QueryBuildType.NODE,
     )
-    return translated_sql
+    return await query_cache_manager.get_or_load(
+        background_tasks,
+        request,
+        QueryRequestParams(
+            nodes=[node_name],
+            dimensions=dimensions,
+            filters=filters,
+            orderby=orderby,
+            limit=limit,
+            query_params=query_params,
+            engine_name=engine_name,
+            engine_version=engine_version,
+            use_materialized=use_materialized,
+            ignore_errors=ignore_errors,
+            current_user=current_user,
+            validate_access=validate_access,
+        ),
+    )
+
+
+@router.get(
+    "/sql/measures/v3/",
+    response_model=MeasuresSQLResponse,
+    name="Get Measures SQL V3",
+    tags=["sql", "v3"],
+)
+async def get_measures_sql_v3(
+    metrics: List[str] = Query([]),
+    dimensions: List[str] = Query([]),
+    filters: List[str] = Query([]),
+    use_materialized: bool = Query(True),
+    *,
+    session: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+) -> MeasuresSQLResponse:
+    """
+    Generate pre-aggregated measures SQL for the requested metrics.
+
+    Measures SQL represents the first stage of metric computation - it decomposes
+    each metric into its atomic aggregation components (e.g., SUM(amount), COUNT(*))
+    and produces SQL that computes these components at the requested dimensional grain.
+
+    Metrics are separated into grain groups, which represent sets of metrics that can be
+    computed together at a common grain. Each grain group produces its own SQL query, which
+    can be materialized independently to produce intermediate tables that are then queried
+    to compute final metric values.
+
+    Returns:
+        One or more `GrainGroupSQL` objects, each containing:
+        - SQL query computing metric components at the specified grain
+        - Column metadata with semantic types
+        - Component details for downstream re-aggregation
+
+    Args:
+        use_materialized: If True (default), use materialized tables when available.
+            Set to False when generating SQL for materialization refresh to avoid
+            circular references.
+
+    See also: `/sql/metrics/v3/` for the final combined query with metric expressions.
+    """
+    result = await build_measures_sql(
+        session=session,
+        metrics=metrics,
+        dimensions=dimensions,
+        filters=filters,
+        dialect=Dialect.SPARK,
+        use_materialized=use_materialized,
+    )
+
+    # Build a unified component_aliases map from all grain groups
+    # This maps component hash names -> actual SQL column aliases
+    all_component_aliases: dict[str, str] = {}
+    for gg in result.grain_groups:
+        all_component_aliases.update(gg.component_aliases)
+
+    # Build metric formulas from decomposed metrics
+    metric_formulas = []
+    for metric_name, decomposed in result.decomposed_metrics.items():
+        # Get the combiner expression and rewrite component names to actual SQL aliases
+        from copy import deepcopy
+
+        combiner_ast = deepcopy(decomposed.derived_ast.select.projection[0])
+
+        # Replace component hash names with actual SQL aliases in the combiner
+        for col in combiner_ast.find_all(ast.Column):
+            col_name = col.name.name if col.name else None
+            if col_name and col_name in all_component_aliases:
+                col.name = ast.Name(all_component_aliases[col_name])
+                col._table = None
+
+        combiner_str = str(combiner_ast)
+
+        # Determine parent node name from the first grain group that contains this metric
+        parent_name = None
+        for gg in result.grain_groups:
+            if metric_name in gg.metrics:
+                parent_name = gg.parent_name
+                break
+
+        # Check if this is a derived metric (references other metrics)
+        parent_names = result.ctx.parent_map.get(metric_name, [])
+        is_derived = decomposed.is_derived_for_parents(
+            parent_names,
+            result.ctx.nodes,
+        )
+
+        # Get component column names as they appear in SQL
+        # Use the unified component_aliases to resolve hash names -> actual aliases
+        component_names = [
+            all_component_aliases.get(comp.name, comp.name)
+            for comp in decomposed.components
+        ]
+
+        metric_formulas.append(
+            MetricFormulaResponse(
+                name=metric_name,
+                short_name=metric_name.split(".")[-1],
+                combiner=combiner_str,
+                components=component_names,
+                is_derived=is_derived,
+                parent_name=parent_name,
+            ),
+        )
+
+    return MeasuresSQLResponse(
+        grain_groups=[
+            GrainGroupResponse(
+                sql=gg.sql,
+                columns=[
+                    V3ColumnMetadata(
+                        name=col.name,
+                        type=col.type,
+                        semantic_entity=col.semantic_name,
+                        semantic_type=col.semantic_type,
+                    )
+                    for col in gg.columns
+                ],
+                grain=gg.grain,
+                aggregability=gg.aggregability.value
+                if hasattr(gg.aggregability, "value")
+                else str(gg.aggregability),
+                metrics=gg.metrics,
+                components=[
+                    ComponentResponse(
+                        # Use actual SQL alias (metric short name for single-component, hash for multi)
+                        name=gg.component_aliases.get(comp.name, comp.name),
+                        expression=comp.expression,
+                        aggregation=comp.aggregation,
+                        merge=comp.merge,
+                        aggregability=comp.rule.type.value
+                        if hasattr(comp.rule.type, "value")
+                        else str(comp.rule.type),
+                    )
+                    for comp in gg.components
+                ],
+                parent_name=gg.parent_name,
+            )
+            for gg in result.grain_groups
+        ],
+        metric_formulas=metric_formulas,
+        dialect=str(result.dialect) if result.dialect else None,
+        requested_dimensions=result.requested_dimensions,
+    )
+
+
+@router.get(
+    "/sql/metrics/v3/",
+    response_model=V3TranslatedSQL,
+    name="Get Metrics SQL V3",
+    tags=["sql", "v3"],
+)
+async def get_metrics_sql_v3(
+    metrics: List[str] = Query([]),
+    dimensions: List[str] = Query([]),
+    filters: List[str] = Query([]),
+    *,
+    session: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+) -> V3TranslatedSQL:
+    """
+    Generate final metrics SQL with fully computed metric expressions.
+
+    Metrics SQL is the second (and final) stage of metric computation - it takes
+    the pre-aggregated components from Measures SQL and applies combiner expressions
+    to produce the actual metric values requested.
+
+    - Metric components are re-aggregated as needed to match the requested
+    dimensional grain.
+
+    - Derived metrics (defined as expressions over other metrics)
+    (e.g., `conversion_rate = order_count / visitor_count`) are computed by
+    substituting component references with their re-aggregated expressions.
+
+    - When metrics come from different fact tables, their
+    grain groups are FULL OUTER JOINed on the common dimensions, with COALESCE
+    for dimension columns to handle NULLs from non-matching rows.
+
+    - Dimension references in metric expressions are resolved to their
+    final column aliases.
+
+    Returns:
+        A single SQL query that:
+        - Defines CTEs for each grain group (pre-aggregated component data) or
+        uses materialized pre-agg tables when available
+        - Joins grain groups on shared dimensions (if multiple)
+        - Builds dimensions with coalesce and metrics with combiner expressions
+        - Groups by dimensions to finalize re-aggregation
+
+    See also: `/sql/measures/v3/` for the underlying pre-aggregated components.
+    """
+
+    result = await build_metrics_sql(
+        session=session,
+        metrics=metrics,
+        dimensions=dimensions,
+        filters=filters,
+        dialect=Dialect.SPARK,
+    )
+
+    return V3TranslatedSQL(
+        sql=result.sql,
+        columns=[
+            V3ColumnMetadata(
+                name=col.name,
+                type=col.type,
+                semantic_entity=col.semantic_name,
+                semantic_type=col.semantic_type,
+            )
+            for col in result.columns
+        ],
+        dialect=result.dialect,
+    )
 
 
 @router.get("/sql/", response_model=TranslatedSQL, name="Get SQL For Metrics")
@@ -384,24 +404,19 @@ async def get_sql_for_metrics(
     session: AsyncSession = Depends(get_session),
     engine_name: Optional[str] = None,
     engine_version: Optional[str] = None,
-    current_user: User = Depends(get_and_update_current_user),
+    current_user: User = Depends(get_current_user),
     validate_access: access.ValidateAccessFn = Depends(
         validate_access,
     ),
     ignore_errors: Optional[bool] = True,
     use_materialized: Optional[bool] = True,
     background_tasks: BackgroundTasks,
+    cache: Cache = Depends(get_cache),
+    request: Request,
 ) -> TranslatedSQL:
     """
     Return SQL for a set of metrics with dimensions and filters
     """
-
-    access_control = access.AccessControlStore(
-        validate_access=validate_access,
-        user=current_user,
-        base_verb=access.ResourceRequestVerb.READ,
-    )
-
     # make sure all metrics exist and have correct node type
     nodes = [
         await Node.get_by_name(session, node, raise_if_not_exists=True)
@@ -416,105 +431,25 @@ async def get_sql_for_metrics(
             http_status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
         )
 
-    if (
-        query_request := await QueryRequest.get_query_request(
-            session,
+    query_cache_manager = QueryCacheManager(
+        cache=cache,
+        query_type=QueryBuildType.METRICS,
+    )
+    return await query_cache_manager.get_or_load(
+        background_tasks,
+        request,
+        QueryRequestParams(
             nodes=metrics,
             dimensions=dimensions,
             filters=filters,
-            orderby=orderby,
             limit=limit,
+            orderby=orderby,
+            query_params=query_params,
             engine_name=engine_name,
             engine_version=engine_version,
-            query_type=QueryBuildType.METRICS,
-        )
-    ) and not query_params:
-        # Update the node SQL in a background task to keep it up-to-date
-        background_tasks.add_task(  # pragma: no cover
-            build_and_save_sql_for_metrics,
-            session=session,
-            metrics=metrics,
-            dimensions=dimensions,
-            filters=filters,
-            orderby=orderby,
-            limit=limit,
-            engine_name=engine_name,
-            engine_version=engine_version,
-            access_control=access_control,
-            ignore_errors=ignore_errors,
             use_materialized=use_materialized,
-            query_parameters=json.loads(query_params),
-        )
-        engine = (  # pragma: no cover
-            await get_engine(session, engine_name, engine_version)  # type: ignore
-            if engine_name
-            else None
-        )
-        return TranslatedSQL.create(  # pragma: no cover
-            sql=query_request.query,
-            columns=query_request.columns,
-            dialect=engine.dialect if engine else None,
-        )
-
-    return await build_and_save_sql_for_metrics(
-        session,
-        metrics,
-        dimensions,
-        filters,
-        orderby,
-        limit,
-        engine_name,
-        engine_version,
-        access_control,
-        ignore_errors=ignore_errors,  # type: ignore
-        use_materialized=use_materialized,  # type: ignore
-        query_parameters=json.loads(query_params),
+            ignore_errors=ignore_errors,
+            current_user=current_user,
+            validate_access=validate_access,
+        ),
     )
-
-
-async def build_and_save_sql_for_metrics(
-    session: AsyncSession,
-    metrics: List[str],
-    dimensions: List[str],
-    filters: List[str] = None,
-    orderby: List[str] = None,
-    limit: Optional[int] = None,
-    engine_name: Optional[str] = None,
-    engine_version: Optional[str] = None,
-    access_control: Optional[access.AccessControlStore] = None,
-    ignore_errors: bool = True,
-    use_materialized: bool = True,
-    query_parameters: dict[str, Any] | None = None,
-):
-    """
-    Builds and saves SQL for metrics.
-    """
-    translated_sql, _, _ = await build_sql_for_multiple_metrics(
-        session,
-        metrics,
-        dimensions,
-        filters,
-        orderby,
-        limit,
-        engine_name,
-        engine_version,
-        access_control,
-        ignore_errors=ignore_errors,  # type: ignore
-        use_materialized=use_materialized,  # type: ignore
-        query_parameters=query_parameters,
-    )
-
-    await QueryRequest.save_query_request(
-        session=session,
-        nodes=metrics,
-        dimensions=dimensions,
-        filters=filters,  # type: ignore
-        orderby=orderby,  # type: ignore
-        limit=limit,
-        engine_name=engine_name,
-        engine_version=engine_version,
-        query_type=QueryBuildType.METRICS,
-        query=translated_sql.sql,
-        columns=[col.dict() for col in translated_sql.columns],  # type: ignore
-    )
-    return translated_sql

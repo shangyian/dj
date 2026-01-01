@@ -55,22 +55,44 @@ class DJBuilder(DJClient):  # pylint: disable=too-many-public-methods
         """
         Create a namespace with a given name.
         """
-        response = self._session.post(
-            f"/namespaces/{namespace}/",
-            timeout=self._timeout,
-        )
-        json_response = response.json()
-        if response.status_code == 409 and not skip_if_exists:
-            raise DJNamespaceAlreadyExists(json_response["message"])
+        try:
+            response = self._session.post(
+                f"/namespaces/{namespace}/",
+                timeout=self._timeout,
+            )
+        except DJClientException as exc:  # pragma: no cover
+            if "already exists" in str(exc):
+                if skip_if_exists:
+                    return Namespace(namespace=namespace, dj_client=self)
+                else:
+                    raise DJNamespaceAlreadyExists(ns_name=namespace)
+            raise exc
+
+        if response.status_code == 409:
+            if skip_if_exists:  # pragma: no cover
+                return Namespace(namespace=namespace, dj_client=self)
+            else:
+                raise DJNamespaceAlreadyExists(ns_name=namespace)
+        elif not response.status_code < 400:  # pragma: no cover
+            raise DJClientException(response.json()["message"])
+
         return Namespace(namespace=namespace, dj_client=self)
 
-    def delete_namespace(self, namespace: str, cascade: bool = False) -> None:
+    def delete_namespace(
+        self,
+        namespace: str,
+        cascade: bool = False,
+        hard: bool = False,
+    ) -> None:
         """
         Delete a namespace by name.
         """
+        endpoint = (
+            f"/namespaces/{namespace}/hard/" if hard else f"/namespaces/{namespace}/"
+        )
         response = self._session.request(
             "DELETE",
-            f"/namespaces/{namespace}/",
+            endpoint,
             timeout=self._timeout,
             params={
                 "cascade": cascade,
@@ -196,12 +218,13 @@ class DJBuilder(DJClient):  # pylint: disable=too-many-public-methods
         new_node.refresh()
         return new_node
 
-    def delete_node(self, node_name: str) -> None:
+    def delete_node(self, node_name: str, hard: bool = False) -> None:
         """
         Delete (aka deactivate) this node.
         """
+        endpoint = f"/nodes/{node_name}/hard/" if hard else f"/nodes/{node_name}/"
         response = self._session.delete(
-            f"/nodes/{node_name}/",
+            endpoint,
             timeout=self._timeout,
         )
         json_response = response.json()
@@ -266,7 +289,7 @@ class DJBuilder(DJClient):  # pylint: disable=too-many-public-methods
                 "mode": mode,
             },
             update_if_exists=update_if_exists,
-        )
+        )  # type: ignore
 
     def register_table(self, catalog: str, schema: str, table: str) -> Source:
         """
@@ -378,7 +401,7 @@ class DJBuilder(DJClient):  # pylint: disable=too-many-public-methods
                 "custom_metadata": custom_metadata,
             },
             update_if_exists=update_if_exists,
-        )
+        )  # type: ignore
 
     #
     # Nodes: DIMENSION
@@ -410,7 +433,7 @@ class DJBuilder(DJClient):  # pylint: disable=too-many-public-methods
                 "mode": mode,
             },
             update_if_exists=update_if_exists,
-        )
+        )  # type: ignore
 
     #
     # Nodes: METRIC
@@ -460,7 +483,7 @@ class DJBuilder(DJClient):  # pylint: disable=too-many-public-methods
                 "mode": mode,
             },
             update_if_exists=update_if_exists,
-        )
+        )  # type: ignore
 
     #
     # Nodes: CUBE
@@ -494,7 +517,7 @@ class DJBuilder(DJClient):  # pylint: disable=too-many-public-methods
                 "tags": tags,
             },
             update_if_exists=update_if_exists,
-        )
+        )  # type: ignore
 
     #
     # Tag

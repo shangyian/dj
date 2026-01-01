@@ -51,10 +51,9 @@ async def test_list_nodes_with_dimension(
     roads_nodes = {
         "default.repair_orders",
         "default.repair_order_details",
-        "default.regional_level_agg",
-        "default.national_level_agg",
-        "default.regional_repair_efficiency",
+        "default.repair_order",
         "default.num_repair_orders",
+        "default.num_unique_hard_hats_approx",
         "default.avg_repair_price",
         "default.repair_orders_fact",
         "default.total_repair_cost",
@@ -69,19 +68,23 @@ async def test_list_nodes_with_dimension(
         "/dimensions/default.repair_order/nodes/",
     )
     data = response.json()
-    assert {node["name"] for node in data} == roads_nodes
+    assert {node["name"] for node in data} == {
+        "default.repair_order_details",
+        "default.repair_orders",
+    }
 
     response = await module__client_with_roads_and_acc_revenue.get(
         "/dimensions/default.us_state/nodes/",
     )
     data = response.json()
     assert {node["name"] for node in data} == {
+        "default.avg_length_of_employment",
         "default.repair_orders",
         "default.repair_order_details",
-        "default.regional_level_agg",
-        "default.national_level_agg",
-        "default.regional_repair_efficiency",
+        "default.hard_hat",
+        "default.repair_order",
         "default.num_repair_orders",
+        "default.num_unique_hard_hats_approx",
         "default.avg_repair_price",
         "default.repair_orders_fact",
         "default.total_repair_cost",
@@ -90,7 +93,6 @@ async def test_list_nodes_with_dimension(
         "default.avg_repair_order_discounts",
         "default.avg_time_to_dispatch",
         "default.contractors",
-        "default.repair_type",
     }
 
     response = await module__client_with_roads_and_acc_revenue.get(
@@ -105,8 +107,6 @@ async def test_list_nodes_with_dimension(
     data = response.json()
     assert {node["name"] for node in data} == {
         "default.repair_type",
-        "default.regional_level_agg",
-        "default.regional_repair_efficiency",
     }
 
     response = await module__client_with_roads_and_acc_revenue.get(
@@ -114,8 +114,8 @@ async def test_list_nodes_with_dimension(
     )
     data = response.json()
     assert {node["name"] for node in data} == {
-        "default.regional_repair_efficiency",
         "default.num_repair_orders",
+        "default.num_unique_hard_hats_approx",
         "default.avg_repair_price",
         "default.total_repair_cost",
         "default.discounted_orders_rate",
@@ -137,12 +137,11 @@ async def test_list_nodes_with_common_dimension(
     )
     data = response.json()
     roads_nodes = {
+        "default.repair_order",
         "default.repair_orders",
         "default.repair_order_details",
-        "default.regional_level_agg",
-        "default.national_level_agg",
-        "default.regional_repair_efficiency",
         "default.num_repair_orders",
+        "default.num_unique_hard_hats_approx",
         "default.avg_repair_price",
         "default.total_repair_cost",
         "default.repair_orders_fact",
@@ -173,8 +172,8 @@ async def test_list_nodes_with_common_dimension(
     )
     data = response.json()
     assert {node["name"] for node in data} == {
-        "default.regional_repair_efficiency",
         "default.num_repair_orders",
+        "default.num_unique_hard_hats_approx",
         "default.avg_repair_price",
         "default.total_repair_cost",
         "default.discounted_orders_rate",

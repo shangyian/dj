@@ -1,13 +1,18 @@
 """Models related to cube materialization"""
 
 import hashlib
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union, Literal
 
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, field_validator, computed_field
 
-from datajunction_server.enum import StrEnum
 from datajunction_server.errors import DJInvalidInputException
 from datajunction_server.models.column import SemanticType
+from datajunction_server.models.decompose import (
+    Aggregability,
+    AggregationRule,
+    DecomposedMetric,
+    MetricComponent,
+)
 from datajunction_server.models.materialization import (
     DRUID_AGG_MAPPING,
     MaterializationJobTypeEnum,
@@ -17,67 +22,13 @@ from datajunction_server.models.node_type import NodeNameVersion
 from datajunction_server.models.partition import Granularity
 from datajunction_server.models.query import ColumnMetadata
 
-
-class Aggregability(StrEnum):
-    """
-    Type of allowed aggregation for a given metric component.
-    """
-
-    FULL = "full"
-    LIMITED = "limited"
-    NONE = "none"
-
-
-class AggregationRule(BaseModel):
-    """
-    The aggregation rule for the metric component. If the Aggregability type is LIMITED, the
-    `level` should be specified to highlight the level at which the metric component needs to
-    be aggregated in order to support the specified aggregation function.
-
-    For example, consider a metric like COUNT(DISTINCT user_id). It can be decomposed into a
-    single metric component with LIMITED aggregability, i.e., it is only aggregatable if the
-    component is calculated at the `user_id` level:
-    - name: num_users
-      expression: DISTINCT user_id
-      aggregation: COUNT
-      rule:
-        type: LIMITED
-        level: ["user_id"]
-    """
-
-    type: Aggregability = Aggregability.NONE
-    level: list[str] | None = None
-
-
-class MetricComponent(BaseModel):
-    """
-    A reusable, named building block of a metric definition.
-
-    A MetricComponent represents a SQL expression that can serve as an input to building
-    a metric. It may be an aggregatable fact (e.g. `view_secs` in `SUM(view_secs)`),
-    a conditional (e.g., `IF(x, y, z)` in `SUM(IF(x, y, z))`) or a distinct expression
-    (e.g. `DISTINCT IF(x, y, z)`), or any derived input used in computing metrics.
-
-    Components may be:
-    - Aggregated directly to form a simple metric (e.g. `SUM(view_secs)`)
-    - Combined with others to define derived metrics (e.g. `SUM(clicks) / SUM(view_secs)`)
-    - Reused across multiple metrics
-
-    Not all components require aggregation — some may be passed through as-is or grouped by,
-    with the group-by grain defined by the aggregation rule.
-
-    Attributes:
-        name: A unique name for the component, typically derived from its expression.
-        expression: The raw SQL expression that defines the component.
-        aggregation: The aggregation function to apply (e.g. 'SUM', 'COUNT'), or None if unaggregated.
-        rule: Aggregation rules that define how and when the component can be aggregated
-            (e.g., full or limited), and at what grain it can be aggregated.
-    """
-
-    name: str
-    expression: str  # A SQL expression for defining the measure
-    aggregation: str | None
-    rule: AggregationRule
+# Re-export for backward compatibility
+__all__ = [
+    "Aggregability",
+    "AggregationRule",
+    "DecomposedMetric",
+    "MetricComponent",
+]
 
 
 class MetricMeasures(BaseModel):
@@ -147,6 +98,7 @@ class MeasuresMaterialization(BaseModel):
 
         return ast.Table(name=ast.Name(self.output_table_name))
 
+    @computed_field  # type: ignore[misc]
     @property
     def output_table_name(self) -> str:
         """
@@ -165,10 +117,9 @@ class MeasuresMaterialization(BaseModel):
         unique_hash = hashlib.sha256(unique_string.encode()).hexdigest()[:16]
         return f"{self.node.name}_{self.node.version}_{unique_hash}".replace(".", "_")
 
-    def dict(self, **kwargs):
-        base = super().dict(**kwargs)
+    def model_dump(self, **kwargs):  # pragma: no cover
+        base = super().model_dump(**kwargs)
         base["output_table_name"] = self.output_table_name
-        # base["druid_spec"] = self.build_druid_spec()
         return base
 
     @classmethod
@@ -250,7 +201,7 @@ class UpsertCubeMaterialization(BaseModel):
     """
 
     # For cubes this is the only materialization type we support
-    job: MaterializationJobTypeEnum = MaterializationJobTypeEnum.DRUID_CUBE
+    job: Literal["druid_cube"]
 
     # Only FULL or INCREMENTAL_TIME is available for cubes
     strategy: MaterializationStrategy = MaterializationStrategy.INCREMENTAL_TIME
@@ -258,10 +209,13 @@ class UpsertCubeMaterialization(BaseModel):
     # Cron schedule
     schedule: str
 
+    # Configuration for the materialization (optional for compatibility)
+    config: Dict[str, Any] | None = None
+
     # Lookback window, only relevant if materialization strategy is INCREMENTAL_TIME
     lookback_window: str | None = "1 DAY"
 
-    @validator("job", pre=True)
+    @field_validator("job")
     def validate_job(
         cls,
         job: Union[str, MaterializationJobTypeEnum],
@@ -279,7 +233,7 @@ class UpsertCubeMaterialization(BaseModel):
                     f"Available job types: {[job.name for job in MaterializationJobTypeEnum]}",
                 )
             return MaterializationJobTypeEnum[job_name]
-        return job
+        return job  # pragma: no cover
 
 
 class CombineMaterialization(BaseModel):
@@ -290,7 +244,7 @@ class CombineMaterialization(BaseModel):
     """
 
     node: NodeNameVersion
-    query: str | None
+    query: str | None = None
     columns: List[ColumnMetadata]
     grain: list[str] = Field(
         description="The grain at which the node is being materialized.",
@@ -302,16 +256,22 @@ class CombineMaterialization(BaseModel):
         description="List of measures included in this materialization.",
     )
 
-    timestamp_column: str | None = Field(description="Timestamp column name")
+    timestamp_column: str | None = Field(
+        description="Timestamp column name",
+        default=None,
+    )
     timestamp_format: str | None = Field(
         description="Timestamp format. Example: `yyyyMMdd`",
+        default=None,
     )
 
     granularity: Granularity | None = Field(
         description="The time granularity for each materialization run. Examples: DAY, HOUR",
+        default=None,
     )
-    upstream_tables: list[str] = []
+    upstream_tables: list[str] = Field(default_factory=list)
 
+    @computed_field  # type: ignore[misc]
     @property
     def output_table_name(self) -> str:
         """
@@ -351,6 +311,14 @@ class CombineMaterialization(BaseModel):
             )
             in DRUID_AGG_MAPPING
         ]
+
+    @computed_field  # type: ignore[misc]
+    @property
+    def druid_spec(self) -> str:
+        """
+        Builds the Druid ingestion spec based on the materialization config.
+        """
+        return self.build_druid_spec()
 
     def build_druid_spec(self):
         """
@@ -402,8 +370,8 @@ class CombineMaterialization(BaseModel):
         }
         return druid_spec
 
-    def dict(self, **kwargs):
-        base = super().dict(**kwargs)
+    def model_dump(self, **kwargs):  # pragma: no cover
+        base = super().model_dump(**kwargs)
         base["druid_spec"] = self.build_druid_spec()
         base["output_table_name"] = self.output_table_name
         return base

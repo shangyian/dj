@@ -2,15 +2,11 @@
 Models for users and auth
 """
 
-from typing import List, Optional
-
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from datajunction_server.database.user import OAuthProvider
 from datajunction_server.models.catalog import CatalogInfo
-from datajunction_server.models.collection import CollectionInfo
 from datajunction_server.models.node import NodeType
-from datajunction_server.models.tag import TagOutput
 from datajunction_server.typing import UTCDatetime
 
 
@@ -22,17 +18,16 @@ class CreatedNode(BaseModel):
     namespace: str
     type: NodeType
     name: str
-    catalog: Optional[CatalogInfo]
-    schema_: Optional[str]
-    table: Optional[str]
+    catalog: CatalogInfo | None = None
+    schema_: str | None = None
+    table: str | None = None
     description: str = ""
-    query: Optional[str] = None
+    query: str | None = None
     created_at: UTCDatetime
     current_version: str
-    missing_table: Optional[bool] = False
+    missing_table: bool | None = False
 
-    class Config:
-        orm_mode = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class UserOutput(BaseModel):
@@ -40,16 +35,13 @@ class UserOutput(BaseModel):
 
     id: int
     username: str
-    email: Optional[str]
-    name: Optional[str]
+    email: str | None = None
+    name: str | None = None
     oauth_provider: OAuthProvider
     is_admin: bool = False
-    created_collections: Optional[List[CollectionInfo]] = []
-    created_nodes: Optional[List[CreatedNode]] = []
-    created_tags: Optional[List[TagOutput]] = []
+    last_viewed_notifications_at: UTCDatetime | None = None
 
-    class Config:
-        orm_mode = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class UserNameOnly(BaseModel):
@@ -59,8 +51,7 @@ class UserNameOnly(BaseModel):
 
     username: str
 
-    class Config:
-        orm_mode = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class UserActivity(BaseModel):

@@ -17,8 +17,8 @@ from datajunction_server.internal.access.authentication.http import SecureAPIRou
 from datajunction_server.internal.access.authorization import validate_access
 from datajunction_server.internal.materializations import build_cube_materialization
 from datajunction_server.internal.nodes import (
-    get_single_cube_revision_metadata,
     get_all_cube_revisions_metadata,
+    get_single_cube_revision_metadata,
 )
 from datajunction_server.models import access
 from datajunction_server.models.cube import (
@@ -40,7 +40,7 @@ from datajunction_server.models.query import QueryCreate
 from datajunction_server.naming import from_amenable_name
 from datajunction_server.service_clients import QueryServiceClient
 from datajunction_server.utils import (
-    get_and_update_current_user,
+    get_current_user,
     get_query_service_client,
     get_session,
     get_settings,
@@ -88,6 +88,19 @@ async def get_cube(
     Get information on a cube
     """
     return await get_single_cube_revision_metadata(session, name)
+
+
+@router.get("/cubes/{name}/versions/{version}", name="Get a Cube Revision")
+async def get_cube_by_version(
+    name: str,
+    version: str,
+    *,
+    session: AsyncSession = Depends(get_session),
+) -> CubeRevisionMetadata:
+    """
+    Get information on a specific cube revision
+    """
+    return await get_single_cube_revision_metadata(session, name, version=version)
 
 
 @router.get("/cubes/{name}/materialization", name="Cube Materialization Config")
@@ -146,7 +159,7 @@ async def cube_materialization_info(
         Granularity.YEAR: "0 0 1 1 *",  # Runs at midnight on January 1st every year
     }
     upsert = UpsertCubeMaterialization(
-        job=MaterializationJobTypeEnum.DRUID_CUBE,
+        job=MaterializationJobTypeEnum.DRUID_CUBE.value.name,
         strategy=(
             MaterializationStrategy.INCREMENTAL_TIME
             if temporal_partition
@@ -173,7 +186,7 @@ async def cube_materialization_info(
         metrics=cube_config.metrics,
         strategy=upsert.strategy,
         schedule=upsert.schedule,
-        job=upsert.job.name,
+        job=upsert.job.name,  # type: ignore
         measures_materializations=cube_config.measures_materializations,
         combiners=cube_config.combiners,
     )
@@ -194,7 +207,7 @@ async def get_cube_dimension_sql(
     ),
     include_counts: bool = False,
     session: AsyncSession = Depends(get_session),
-    current_user: User = Depends(get_and_update_current_user),
+    current_user: User = Depends(get_current_user),
     validate_access: access.ValidateAccessFn = Depends(
         validate_access,
     ),
@@ -237,7 +250,7 @@ async def get_cube_dimension_values(
     session: AsyncSession = Depends(get_session),
     request: Request,
     query_service_client: QueryServiceClient = Depends(get_query_service_client),
-    current_user: User = Depends(get_and_update_current_user),
+    current_user: User = Depends(get_current_user),
     validate_access: access.ValidateAccessFn = Depends(
         validate_access,
     ),
@@ -286,7 +299,7 @@ async def get_cube_dimension_values(
             value=row[0 : count_column[0]] if count_column else row,
             count=row[count_column[0]] if count_column else None,
         )
-        for row in result.results.__root__[0].rows
+        for row in result.results.root[0].rows
     ]
     return DimensionValues(  # pragma: no cover
         dimensions=[

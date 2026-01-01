@@ -1,4 +1,5 @@
 # mypy: ignore-errors
+import asyncio
 import collections
 import decimal
 import logging
@@ -29,7 +30,10 @@ from typing import (
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload, selectinload
 
+from datajunction_server.utils import refresh_if_needed
 from datajunction_server.construction.utils import get_dj_node, to_namespaced_name
+from datajunction_server.database.attributetype import ColumnAttribute
+from datajunction_server.database.column import Column as DBColumn
 from datajunction_server.database.dimensionlink import DimensionLink
 from datajunction_server.database.node import Node as DJNodeRef
 from datajunction_server.database.node import NodeRevision
@@ -68,7 +72,7 @@ from datajunction_server.sql.parsing.types import (
     WildcardType,
     YearMonthIntervalType,
 )
-from datajunction_server.utils import SEPARATOR
+from datajunction_server.utils import SEPARATOR, refresh_if_needed
 
 PRIMITIVES = {int, float, str, bool, type(None)}
 logger = logging.getLogger(__name__)
@@ -90,6 +94,7 @@ def flatten(maybe_iterables: Any) -> Iterator:
 class CompileContext:
     session: AsyncSession
     exception: DJException
+    dependencies_cache: dict[str, DJNodeRef] = field(default_factory=dict)
 
 
 # typevar used for node methods that return self
@@ -350,13 +355,20 @@ class Node(ABC):
 
     def contains(self, other: "Node") -> bool:
         """
-        Checks if the subtree of `self` contains the node
+        Checks if the subtree of `self` contains the node.
+        Optimized to walk up parent pointers instead of traversing the entire subtree.
         """
-        return any(self.filter(lambda node: node is other))
+        # Walk up from `other` to see if we reach `self`
+        current: Optional["Node"] = other
+        while current is not None:
+            if current is self:
+                return True
+            current = current.parent
+        return False
 
-    def is_ancestor_of(self, other: Optional["Node"]) -> bool:
+    def has_ancestor(self, other: Optional["Node"]) -> bool:
         """
-        Checks if `self` is an ancestor of the node
+        Checks if `other` is an ancestor of `self` (i.e., `self` is in `other`'s subtree).
         """
         return bool(other) and other.contains(self)
 
@@ -875,15 +887,19 @@ class Column(Aliasable, Named, Expression):
             Query,
             self.get_nearest_parent_of_type(Query),
         )
-        direct_tables = list(
-            filter(
-                lambda tbl: tbl.in_from_or_lateral()
-                and tbl.get_nearest_parent_of_type(Query) is query,
-                query.find_all(TableExpression),
-            ),
-        )
+
+        # Use cached table expressions to avoid repeated AST traversals
+        all_table_expressions = query.get_table_expressions()
+        direct_tables = [
+            tbl
+            for tbl in all_table_expressions
+            if tbl.in_from_or_lateral()
+            and tbl.get_nearest_parent_of_type(Query) is query
+        ]
+
         if hasattr(self, "child"):
             self.add_type(self.child.type)
+
         for table in direct_tables:
             if not table.is_compiled():
                 await table.compile(ctx)
@@ -933,13 +949,12 @@ class Column(Aliasable, Named, Expression):
             return found
 
         if not query.in_from_or_lateral():
-            correlation_tables = list(
-                filter(
-                    lambda tbl: tbl.in_from_or_lateral()
-                    and query.is_ancestor_of(tbl.get_nearest_parent_of_type(Query)),
-                    query.find_all(TableExpression),
-                ),
-            )
+            correlation_tables = [
+                tbl
+                for tbl in all_table_expressions
+                if tbl.in_from_or_lateral()
+                and query.has_ancestor(tbl.get_nearest_parent_of_type(Query))
+            ]
             for table in correlation_tables:
                 if not namespace or table.alias_or_name.identifier(False) == namespace:
                     if await table.add_ref_column(self, ctx):
@@ -954,13 +969,38 @@ class Column(Aliasable, Named, Expression):
             direct_table.alias_or_name.identifier() for direct_table in direct_tables
         }
         if isinstance(alpha_query, Query) and alpha_query.ctes:
+            # Get the column name we're looking for
+            column_name = self.name.name
             for cte in alpha_query.ctes:
                 cte_name = cte.alias_or_name.identifier(False)
                 if cte_name == namespace or (
                     not namespace and cte_name in direct_table_names
                 ):
-                    if await cte.add_ref_column(self, ctx):
-                        found.append(cte)
+                    # Quick check: see if CTE projection has a column with this name
+                    # before triggering expensive compilation
+                    if cte._columns:
+                        # CTE already compiled, use fast path
+                        if await cte.add_ref_column(self, ctx):
+                            found.append(cte)
+                    else:
+                        # Check if the CTE's projection might have this column
+                        # by looking at alias names in the projection
+                        might_have_column = False
+                        for proj_expr in cte.select.projection:
+                            if hasattr(proj_expr, "alias_or_name"):
+                                if proj_expr.alias_or_name.name == column_name:
+                                    might_have_column = True
+                                    break
+                            elif hasattr(proj_expr, "name") and hasattr(
+                                proj_expr.name,
+                                "name",
+                            ):
+                                if proj_expr.name.name == column_name:
+                                    might_have_column = True
+                                    break
+                        if might_have_column:
+                            if await cte.add_ref_column(self, ctx):
+                                found.append(cte)
 
         # If nothing was found in the initial AST, traverse through dimensions graph
         # to find another table in DJ that could be its origin
@@ -986,14 +1026,20 @@ class Column(Aliasable, Named, Expression):
                     current_table.set_dj_node(current_table.dj_node.current)
                 for dj_col in current_table.dj_node.columns:
                     if dj_col.dimension:
-                        col_dimension = await DJNodeRef.get_by_name(
-                            ctx.session,
+                        if not ctx.dependencies_cache.get(dj_col.dimension.name):
+                            ctx.dependencies_cache[
+                                dj_col.dimension.name
+                            ] = await DJNodeRef.get_by_name(
+                                ctx.session,
+                                dj_col.dimension.name,
+                                options=[
+                                    joinedload(DJNodeRef.current).options(
+                                        selectinload(DJNode.columns),
+                                    ),
+                                ],
+                            )
+                        col_dimension = ctx.dependencies_cache.get(
                             dj_col.dimension.name,
-                            options=[
-                                joinedload(DJNodeRef.current).options(
-                                    selectinload(DJNode.columns),
-                                ),
-                            ],
                         )
                         if col_dimension:
                             new_table = Table(
@@ -1040,12 +1086,22 @@ class Column(Aliasable, Named, Expression):
                             to_process.append((new_table, path + [link]))
         return found
 
+    def _get_parent_query(self) -> Optional["Query"]:
+        """Find the parent Query node for this column."""
+        node = self.parent
+        while node is not None:
+            if isinstance(node, Query):
+                return node
+            node = getattr(node, "parent", None)
+        return None
+
     async def compile(self, ctx: CompileContext):
         """
         Compile a column.
         Determines the table from which a column is from.
+        For metric references (columns with namespace but no table source),
+        resolves the type from the metric's output.
         """
-
         if self.is_compiled():
             return
 
@@ -1053,8 +1109,45 @@ class Column(Aliasable, Named, Expression):
         if self.table and isinstance(self.table.parent, Column):
             await self.table.add_ref_column(self, ctx)
         else:
-            found_sources = await self.find_table_sources(ctx)
+            found_sources = list(set(await self.find_table_sources(ctx)))
             if len(found_sources) < 1:
+                # No table sources found - check if this is a metric reference
+                # Only try metric resolution if:
+                # 1. Column has a namespace (e.g., default.total_repair_cost)
+                # 2. The parent query has NO FROM clause (derived metric pattern)
+                parent_query = self._get_parent_query()
+                has_from_clause = (
+                    parent_query is not None and parent_query.select.from_ is not None
+                )
+
+                # Metric references have exactly ONE namespace part (e.g., default.metric_name)
+                # Columns with 2+ namespace parts are table.column refs (e.g., default.table.column)
+                if self.namespace and len(self.namespace) == 1 and not has_from_clause:
+                    # Try to resolve as a metric node reference
+                    node_name = self.identifier()
+                    try:
+                        dj_node = await get_dj_node(
+                            ctx.session,
+                            node_name,
+                            {DJNodeType.METRIC},
+                        )
+                        if dj_node:
+                            # Found a metric - get its output type
+                            # Metrics have a single projection column
+                            # Need to refresh to ensure columns are loaded
+                            await refresh_if_needed(ctx.session, dj_node, ["columns"])
+                            if dj_node.columns:
+                                self._type = dj_node.columns[0].type
+                                self._is_compiled = True
+                                return
+                            else:
+                                # Metric found but no columns - this shouldn't happen
+                                # Fall through to error
+                                pass
+                    except DJErrorException:
+                        # Not a metric, fall through to normal error
+                        pass
+
                 ctx.exception.errors.append(
                     DJError(
                         code=ErrorCode.INVALID_COLUMN,
@@ -1260,6 +1353,14 @@ class TableExpression(Aliasable, Expression):
                 column.add_table(self)
                 column.add_expression(matching_column)
                 column.add_type(matching_column.type)
+                # Fast path: if we found it in column_mapping, we're done
+                # (unless it's a struct type that needs special handling)
+                if not (
+                    hasattr(matching_column, "_type")
+                    and matching_column._type
+                    and isinstance(matching_column.type, StructType)
+                ):
+                    return True
 
         # For table-valued functions, add the list of columns that gets
         # returned as reference columns and compile them
@@ -1388,20 +1489,47 @@ class Table(TableExpression, Named):
     async def compile(self, ctx: CompileContext):
         # things we can validate here:
         # - if the node is a dimension in a groupby, is it joinable?
+        if self.is_compiled():
+            return
+
         self._is_compiled = True
+
+        table_name = self.identifier(quotes=False)
+
+        # Skip DB lookup for names that don't look like DJ nodes
+        if SEPARATOR not in table_name:
+            return
+
         try:
             if not self.dj_node:
-                dj_node = await get_dj_node(
-                    ctx.session,
-                    self.identifier(quotes=False),
-                    {DJNodeType.SOURCE, DJNodeType.TRANSFORM, DJNodeType.DIMENSION},
-                )
+                db_node = ctx.dependencies_cache.get(table_name)
+                if db_node:
+                    await refresh_if_needed(ctx.session, db_node, ["current"])
+                    await refresh_if_needed(ctx.session, db_node.current, ["columns"])
+                    dj_node = db_node.current
+                else:
+                    # Include METRIC nodes to support derived metrics (metrics that reference
+                    # other metrics). This allows metric references in FROM clauses.
+                    dj_node = await get_dj_node(
+                        ctx.session,
+                        table_name,
+                        {
+                            DJNodeType.SOURCE,
+                            DJNodeType.TRANSFORM,
+                            DJNodeType.DIMENSION,
+                            DJNodeType.METRIC,
+                        },
+                    )
+                    # Cache successful lookups in context
+                    ctx.dependencies_cache[table_name] = dj_node
                 self.set_dj_node(dj_node)
             self._columns = [
                 Column(Name(col.name), _type=col.type, _table=self)
                 for col in self.dj_node.columns
             ]
         except DJErrorException as exc:
+            # Don't cache failed lookups - the node might be created later
+            # Only the pattern-based checks above should add to the cache
             ctx.exception.errors.append(exc.dj_error)
 
 
@@ -1457,6 +1585,36 @@ class UnaryOp(Operation):
             raise_unop_exception()
 
         raise DJParseException(f"Unary operation {self.op} not supported!")
+
+
+class ArithmeticUnaryOpKind(DJEnum):
+    """
+    Arithmetic unary operations
+    """
+
+    Minus = "-"
+    Plus = "+"
+    BitwiseNot = "~"
+
+    def __str__(self):
+        return self.value
+
+
+@dataclass(eq=False)
+class ArithmeticUnaryOp(Operation):
+    """
+    An operation that operates on a single expression
+    """
+
+    op: ArithmeticUnaryOpKind
+    expr: Expression
+
+    def __str__(self) -> str:
+        return f"{self.op}{self.expr}"
+
+    @property
+    def type(self) -> ColumnType:
+        return self.expr.type
 
 
 class BinaryOpKind(DJEnum):
@@ -1551,6 +1709,14 @@ class BinaryOp(Operation):
             return f"({ret})"
         return ret
 
+    # Module-level constant for numeric type ordering (avoids repeated instantiation)
+    _NUMERIC_TYPES_ORDER = {
+        "double": 0,
+        "float": 1,
+        "bigint": 2,
+        "int": 3,
+    }
+
     @property
     def type(self) -> ColumnType:
         kind = self.op
@@ -1563,17 +1729,7 @@ class BinaryOp(Operation):
                 f"{self}. Got left {left_type}, right {right_type}.",
             )
 
-        numeric_types = {
-            type_: idx
-            for idx, type_ in enumerate(
-                [
-                    str(DoubleType()),
-                    str(FloatType()),
-                    str(BigIntType()),
-                    str(IntegerType()),
-                ],
-            )
-        }
+        numeric_types = self._NUMERIC_TYPES_ORDER
 
         def resolve_numeric_types_binary_operations(
             left: ColumnType,
@@ -1589,6 +1745,11 @@ class BinaryOp(Operation):
                 return left
             return left
 
+        def check_integer_types(left, right):
+            if str(left) == "int" and str(right) == "int":
+                return IntegerType()
+            return raise_binop_exception()
+
         BINOP_TYPE_COMBO_LOOKUP: Dict[
             BinaryOpKind,
             Callable[[ColumnType, ColumnType], ColumnType],
@@ -1603,22 +1764,14 @@ class BinaryOp(Operation):
             BinaryOpKind.Lt: lambda left, right: BooleanType(),
             BinaryOpKind.GtEq: lambda left, right: BooleanType(),
             BinaryOpKind.LtEq: lambda left, right: BooleanType(),
-            BinaryOpKind.BitwiseOr: lambda left, right: IntegerType()
-            if str(left) == str(IntegerType()) and str(right) == str(IntegerType())
-            else raise_binop_exception(),
-            BinaryOpKind.BitwiseAnd: lambda left, right: IntegerType()
-            if str(left) == str(IntegerType()) and str(right) == str(IntegerType())
-            else raise_binop_exception(),
-            BinaryOpKind.BitwiseXor: lambda left, right: IntegerType()
-            if str(left) == str(IntegerType()) and str(right) == str(IntegerType())
-            else raise_binop_exception(),
+            BinaryOpKind.BitwiseOr: check_integer_types,
+            BinaryOpKind.BitwiseAnd: check_integer_types,
+            BinaryOpKind.BitwiseXor: check_integer_types,
             BinaryOpKind.Multiply: resolve_numeric_types_binary_operations,
             BinaryOpKind.Divide: resolve_numeric_types_binary_operations,
             BinaryOpKind.Plus: resolve_numeric_types_binary_operations,
             BinaryOpKind.Minus: resolve_numeric_types_binary_operations,
-            BinaryOpKind.Modulo: lambda left, right: IntegerType()
-            if str(left) == str(IntegerType()) and str(right) == str(IntegerType())
-            else raise_binop_exception(),
+            BinaryOpKind.Modulo: check_integer_types,
         }
         return BINOP_TYPE_COMBO_LOOKUP[kind](left_type, right_type)
 
@@ -2227,7 +2380,7 @@ class Lambda(Expression):
             id_str = self.identifiers[0]
         else:
             id_str = "(" + ", ".join(str(iden) for iden in self.identifiers) + ")"
-        return f"{id_str} -> {self.expr}"
+        return f"{id_str}->{self.expr}"
 
     @property
     def type(self) -> Union[ColumnType, List[ColumnType]]:
@@ -2544,7 +2697,7 @@ class SelectExpression(Aliasable, Expression):
     """
 
     quantifier: str = ""  # Distinct, All
-    projection: List[Union[Aliasable, Expression]] = field(default_factory=list)
+    projection: List[Union[Aliasable, Expression, Column]] = field(default_factory=list)
     from_: Optional[From] = None
     group_by: List[Expression] = field(default_factory=list)
     having: Optional[Expression] = None
@@ -2606,7 +2759,7 @@ class SelectExpression(Aliasable, Expression):
     @property
     def semantic_column_mapping(self) -> Dict[str, "Column"]:
         """
-        Returns a dictionary with the output column names mapped to the columns
+        Returns a dictionary with the semantic entity names mapped to the output columns
         """
         return {col.semantic_entity: col for col in self.projection}
 
@@ -2713,6 +2866,24 @@ class Query(TableExpression, UnNamed):
 
     select: SelectExpression = field(default_factory=SelectExpression)
     ctes: List["Query"] = field(default_factory=list)
+    # Cache for find_all(TableExpression) to avoid repeated traversals
+    _table_expr_cache: Optional[List["TableExpression"]] = field(
+        default=None,
+        repr=False,
+    )
+
+    def get_table_expressions(self) -> List["TableExpression"]:
+        """
+        Get all TableExpression nodes in this query's subtree.
+        Results are cached for performance.
+        """
+        if self._table_expr_cache is None:
+            self._table_expr_cache = list(self.find_all(TableExpression))
+        return self._table_expr_cache
+
+    def invalidate_table_expr_cache(self):
+        """Clear the table expression cache (call after AST modifications)."""
+        self._table_expr_cache = None
 
     def is_compiled(self) -> bool:
         return not any(
@@ -2763,12 +2934,8 @@ class Query(TableExpression, UnNamed):
             cte.alias_or_name.name: cte
             for cte in (nearest_query.ctes if nearest_query else [])
         }
-        referenced_dimension_options = [
-            Table(Name(col.identifier().rsplit(SEPARATOR, 1)[0]))
-            for col in self.select.find_all(Column)
-            if SEPARATOR in col.identifier().rsplit(SEPARATOR, 1)[0]
-        ]
-        table_options = (
+        # Get tables from FROM clause first
+        from_tables = (
             [
                 tbl
                 for tbl in self.select.from_.find_all(TableExpression)
@@ -2776,16 +2943,75 @@ class Query(TableExpression, UnNamed):
             ]
             if self.select.from_
             else []
-        ) + referenced_dimension_options
+        )
+        # Get the identifiers of tables already in FROM clause to avoid duplicates
+        from_table_identifiers = {
+            tbl.identifier() for tbl in from_tables if isinstance(tbl, Table)
+        }
+        # Only add referenced_dimension_options for tables NOT already in FROM clause
+        referenced_dimension_options = [
+            Table(Name(col.identifier().rsplit(SEPARATOR, 1)[0]))
+            for col in self.select.find_all(Column)
+            if SEPARATOR in col.identifier().rsplit(SEPARATOR, 1)[0]
+            and col.identifier().rsplit(SEPARATOR, 1)[0] not in from_table_identifiers
+        ]
+        table_options = from_tables + referenced_dimension_options
+
         if table_options:
+            # Only look up tables not already in the cache
+            table_names_to_lookup = {
+                option.identifier()
+                for option in table_options
+                if isinstance(option, Table)
+                and option.identifier() not in ctx.dependencies_cache
+            }
+            if table_names_to_lookup:
+                # Load options for AST compilation
+                # Includes parents/materializations for Pydantic serialization in validation
+                eager_options = [
+                    joinedload(DJNodeRef.current).options(
+                        # Columns with attributes for proper type resolution
+                        selectinload(NodeRevision.columns).options(
+                            joinedload(DBColumn.attributes).joinedload(
+                                ColumnAttribute.attribute_type,
+                            ),
+                            joinedload(DBColumn.dimension),
+                        ),
+                        # Catalog needed for get_table_for_node (SOURCE nodes)
+                        joinedload(NodeRevision.catalog),
+                        # Availability needed for get_table_for_node (materialized nodes)
+                        selectinload(NodeRevision.availability),
+                        # Dimension links for dimension graph traversal
+                        selectinload(NodeRevision.dimension_links).options(
+                            joinedload(DimensionLink.dimension).options(
+                                joinedload(DJNodeRef.current).options(
+                                    selectinload(NodeRevision.columns),
+                                ),
+                            ),
+                        ),
+                        # Parents and materializations needed for Pydantic serialization
+                        selectinload(NodeRevision.parents),
+                        selectinload(NodeRevision.materializations),
+                    ),
+                ]
+                referenced_nodes = await DJNodeRef.get_by_names(
+                    ctx.session,
+                    table_names_to_lookup,
+                    options=eager_options,
+                )
+                ctx.dependencies_cache.update(
+                    {node.name: node for node in referenced_nodes},
+                )
+
             for idx, option in enumerate(table_options):
-                if isinstance(option, Table):
-                    if option.name.name in cte_mapping:
-                        table_options[idx] = cte_mapping[option.name.name]
-                await table_options[idx].compile(ctx)
+                if isinstance(option, Table) and option.name.name in cte_mapping:
+                    option = cte_mapping[option.name.name]
+                    table_options[idx] = option
+                await option.compile(ctx)
 
             expressions_to_compile = [
                 self.select.projection,
+                self.select.from_,
                 self.select.group_by,
                 self.select.having,
                 self.select.where,
@@ -2800,13 +3026,14 @@ class Query(TableExpression, UnNamed):
                         col for expr in expression for col in expr.find_all(Column)
                     ]
 
-            with ThreadPoolExecutor() as executor:
-                list(
-                    executor.map(
-                        _compile,
-                        [(col, table_options) for col in columns_to_compile],
-                    ),
-                )
+            if columns_to_compile:
+                with ThreadPoolExecutor() as executor:
+                    list(
+                        executor.map(
+                            _compile,
+                            [(col, table_options) for col in columns_to_compile],
+                        ),
+                    )
 
         for child in self.children:
             if child is not self and not child.is_compiled():
@@ -2876,26 +3103,75 @@ class Query(TableExpression, UnNamed):
         context: Optional[CompileContext] = None,
     ) -> Tuple[Dict[NodeRevision, List[Table]], Dict[str, List[Table]]]:
         """
-        Find all dependencies in a compiled query
+        Find all dependencies in a compiled query.
+
+        For queries with FROM clauses: finds Table references.
+        For queries without FROM (e.g., derived metrics): finds Column references
+        with namespaces that point to node names (e.g., default.metric_a).
         """
-
-        if not self.is_compiled():
-            if not context:
-                raise DJQueryBuildException(
-                    "Context not provided for query compilation!",
-                )
-            await self.compile(context)
-
         deps: Dict[NodeRevision, List[Table]] = {}
         danglers: Dict[str, List[Table]] = {}
-        for table in self.find_all(Table):
-            if node := table.dj_node:
-                deps[node] = deps.get(node, [])
-                deps[node].append(table)
-            else:
-                name = table.identifier(quotes=False)
-                danglers[name] = danglers.get(name, [])
-                danglers[name].append(table)
+
+        # Check if this is a query without FROM (e.g., derived metric)
+        has_from = self.select.from_ is not None
+
+        if has_from:
+            # Standard case: compile and extract Table references
+            if not self.is_compiled():
+                if not context:
+                    raise DJQueryBuildException(
+                        "Context not provided for query compilation!",
+                    )
+                await self.compile(context)
+
+            for table in self.find_all(Table):
+                if node := table.dj_node:
+                    deps[node] = deps.get(node, [])
+                    deps[node].append(table)
+                else:
+                    name = table.identifier(quotes=False)
+                    danglers[name] = danglers.get(name, [])
+                    danglers[name].append(table)
+        else:
+            # No FROM clause (derived metric): look for Column references with namespaces
+            # These are node references like default.metric_a, default.metric_b
+            if not context:
+                raise DJQueryBuildException(
+                    "Context not provided for dependency extraction!",
+                )
+
+            for col in self.find_all(Column):
+                # Metric references have exactly ONE namespace part (e.g., default.metric_name)
+                # Columns with 2+ namespace parts are table.column refs (e.g., default.table.column)
+                if col.namespace and len(col.namespace) == 1:
+                    # Column with single namespace is a node reference (e.g., default.metric_a)
+                    node_name = col.identifier()
+                    if node_name in [d.name for d in deps.keys()]:
+                        continue  # Already found this dependency
+
+                    # Look up the node - for derived metrics, we expect metric references
+                    try:
+                        dj_node = await get_dj_node(
+                            context.session,
+                            node_name,
+                            {
+                                DJNodeType.SOURCE,
+                                DJNodeType.TRANSFORM,
+                                DJNodeType.DIMENSION,
+                                DJNodeType.METRIC,
+                            },
+                        )
+                        if dj_node:
+                            deps[dj_node] = deps.get(dj_node, [])
+                            # Store None for table since there's no Table AST node
+                    except DJErrorException:
+                        # Node doesn't exist - add to danglers
+                        danglers[node_name] = danglers.get(node_name, [])
+
+            # Also compile the query to resolve column types for derived metrics
+            # This triggers Column.compile which handles metric reference type resolution
+            if not self.is_compiled():
+                await self.compile(context)
 
         return deps, danglers
 

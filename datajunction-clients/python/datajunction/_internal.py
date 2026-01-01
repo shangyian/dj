@@ -175,7 +175,7 @@ class DJClient:
         """
         response = self._session.post(
             "/basic/user/",
-            data={"email": email, "username": username, "password": password},
+            json={"email": email, "username": username, "password": password},
         )
         return response.json()
 
@@ -195,6 +195,27 @@ class DJClient:
             },
         )
         return response
+
+    def deploy(self, deployment_spec: Dict[str, Any]):
+        """
+        Deploy a deployment spec to the target namespace.
+        """
+        response = self._session.post(
+            "/deployments",
+            json=deployment_spec,
+            timeout=self._timeout,
+        )
+        return response.json()
+
+    def check_deployment(self, deployment_uuid: str):
+        """
+        Check the status of a deployment spec in the target namespace.
+        """
+        response = self._session.get(
+            f"/deployments/{deployment_uuid}",
+            timeout=self._timeout,
+        )
+        return response.json()
 
     @staticmethod
     def _primary_key_from_columns(columns) -> List[str]:
@@ -219,15 +240,23 @@ class DJClient:
         if "results" in results and results["results"]:
             columns = results["results"][0]["columns"]
             rows = results["results"][0]["rows"]
+
+            # Rename columns from the physical names to their semantic names
+            renamed_columns = [
+                col.get("semantic_entity")
+                if col["semantic_type"] != "metric"
+                else col.get("node") or col["name"]
+                for col in columns
+            ]
             try:
                 return pd.DataFrame(
                     rows,
-                    columns=[col["name"] for col in columns],
+                    columns=renamed_columns,
                 )
             except NameError:  # pragma: no cover
                 return Results(
                     data=rows,
-                    columns=tuple(col["name"] for col in columns),  # type: ignore
+                    columns=tuple(renamed_columns),  # type: ignore
                 )
         raise DJClientException("No data for query!")
 
@@ -246,6 +275,8 @@ class DJClient:
             f"/namespaces/{namespace}/" + (f"?type_={type_.value}" if type_ else ""),
         )
         node_details_list = response.json()
+        if "message" in node_details_list:
+            raise DJClientException(node_details_list["message"])
         nodes = [n["name"] for n in node_details_list]
         return nodes
 
@@ -612,6 +643,13 @@ class DJClient:
         Export an array of definitions contained within a namespace
         """
         response = self._session.get(f"/namespaces/{namespace}/export/")
+        return response.json()
+
+    def _export_namespace_spec(self, namespace):
+        """
+        Export a deployment spec for a namespace
+        """
+        response = self._session.get(f"/namespaces/{namespace}/export/spec/")
         return response.json()
 
     #

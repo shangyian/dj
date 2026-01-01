@@ -352,10 +352,116 @@ def infer_type(
     return ct.LongType()
 
 
+# =============================================================================
+# HLL (HyperLogLog) Sketch Functions
+# =============================================================================
+# DJ uses Spark function names as its internal canonical representation.
+# These are the three phases of HLL computation:
+#
+# 1. hll_sketch_agg(expr)       - Build sketch from raw data (ACCUMULATE phase)
+# 2. hll_union(sketch)          - Merge multiple sketches (MERGE phase)
+# 3. hll_sketch_estimate(sketch) - Extract cardinality from sketch (COMBINE phase)
+#
+# Dialect translations:
+# | DJ (Spark)          | Druid                        | Trino           |
+# |---------------------|------------------------------|-----------------|
+# | hll_sketch_agg      | DS_HLL                       | approx_set      |
+# | hll_union           | DS_HLL (with sketch input)   | merge           |
+# | hll_sketch_estimate | APPROX_COUNT_DISTINCT_DS_HLL | cardinality     |
+# =============================================================================
+
+
+class HllSketchAgg(Function):
+    """
+    hll_sketch_agg(expr [, precision]) - Build an HLL sketch from raw values.
+
+    Args:
+        expr: Column to aggregate
+        precision: Optional log2 of sketch size (default varies by engine)
+
+    Returns: Binary HLL sketch
+    """
+
+    is_aggregation = True
+    dialects = [Dialect.SPARK, Dialect.DRUID, Dialect.TRINO]
+
+
+@HllSketchAgg.register
+def infer_type(
+    expr: ct.ColumnType,
+    precision: ct.IntegerType,
+) -> ct.BinaryType:
+    return ct.BinaryType()
+
+
+@HllSketchAgg.register
+def infer_type(
+    expr: ct.ColumnType,
+) -> ct.BinaryType:
+    return ct.BinaryType()
+
+
+class HllUnion(Function):
+    """
+    hll_union(sketch) - Merge multiple HLL sketches into one.
+
+    Used in the MERGE phase to combine pre-aggregated sketches.
+
+    Returns: Binary HLL sketch
+    """
+
+    is_aggregation = True
+    dialects = [Dialect.SPARK, Dialect.DRUID, Dialect.TRINO]
+
+
+@HllUnion.register
+def infer_type(
+    sketch: ct.ColumnType,
+) -> ct.BinaryType:
+    return ct.BinaryType()
+
+
+class HllSketchEstimate(Function):
+    """
+    hll_sketch_estimate(sketch) - Extract approximate distinct count from an HLL sketch.
+
+    Used in the COMBINE phase to produce the final cardinality estimate.
+
+    Returns: Long (approximate distinct count)
+    """
+
+    is_aggregation = False  # Scalar function, not an aggregation
+    dialects = [Dialect.SPARK, Dialect.DRUID, Dialect.TRINO]
+
+
+@HllSketchEstimate.register
+def infer_type(
+    sketch: ct.ColumnType,
+) -> ct.LongType:
+    return ct.LongType()
+
+
+# -----------------------------------------------------------------------------
+# Legacy Druid-specific HLL functions (kept for backward compatibility)
+# -----------------------------------------------------------------------------
+
+
+class HllSketchUnion(Function):
+    """Legacy Druid-specific sketch union. Prefer HllUnion for new code."""
+
+    is_aggregation = True
+    dialects = [Dialect.DRUID]
+
+
+@HllSketchUnion.register
+def infer_type(
+    sketch: ct.BinaryType,
+) -> ct.BinaryType:
+    return ct.BinaryType()  # pragma: no cover
+
+
 class ApproxCountDistinctDsHll(Function):
-    """
-    Counts distinct values of an HLL sketch column or a regular column
-    """
+    """Druid's DS_HLL based approximate count distinct."""
 
     is_aggregation = True
     dialects = [Dialect.DRUID]
@@ -369,9 +475,7 @@ def infer_type(
 
 
 class ApproxCountDistinctDsTheta(Function):
-    """
-    Counts distinct values of a Theta sketch column or a regular column.
-    """
+    """Druid's Theta sketch based approximate count distinct."""
 
     is_aggregation = True
     dialects = [Dialect.DRUID]
@@ -1153,6 +1257,8 @@ class Corr(Function):
     corr(expr1, expr2) - Compute the correlation of expr1 and expr2.
     """
 
+    is_aggregation = True
+
 
 @Corr.register  # type: ignore
 def infer_type(
@@ -1251,6 +1357,8 @@ class CovarPop(Function):
     covar_pop(expr1, expr2) - Returns the population covariance of expr1 and expr2.
     """
 
+    is_aggregation = True
+
 
 @CovarPop.register  # type: ignore
 def infer_type(
@@ -1264,6 +1372,8 @@ class CovarSamp(Function):
     """
     covar_samp(expr1, expr2) - Returns the sample covariance of expr1 and expr2.
     """
+
+    is_aggregation = True
 
 
 @CovarSamp.register  # type: ignore
@@ -2582,6 +2692,8 @@ class Lag(Function):
     before the current row in a window partition.
     """
 
+    dialects = [Dialect.SPARK, Dialect.DRUID]
+
 
 @Lag.register  # type: ignore
 def infer_type(
@@ -3238,6 +3350,13 @@ def infer_type(
 def infer_type(
     arg: ct.TimestampType,
 ) -> ct.TimestampType:
+    return arg.type  # pragma: no cover
+
+
+@Max.register  # type: ignore
+def infer_type(
+    arg: ct.BooleanType,
+) -> ct.BooleanType:
     return arg.type  # pragma: no cover
 
 
@@ -4455,7 +4574,7 @@ class UnixTimestamp(Function):
 
 @UnixTimestamp.register  # type: ignore
 def infer_type(
-    time_exp: Optional[ct.StringType] = None,
+    time_exp: Optional[Union[ct.TimestampType, ct.DateType, ct.StringType]] = None,
     fmt: Optional[ct.StringType] = None,
 ) -> ct.BigIntType:
     return ct.BigIntType()

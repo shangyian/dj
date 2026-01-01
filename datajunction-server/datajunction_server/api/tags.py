@@ -21,7 +21,7 @@ from datajunction_server.models.node import NodeMinimumDetail
 from datajunction_server.models.node_type import NodeType
 from datajunction_server.models.tag import CreateTag, TagOutput, UpdateTag
 from datajunction_server.utils import (
-    get_and_update_current_user,
+    get_current_user,
     get_session,
     get_settings,
 )
@@ -79,11 +79,26 @@ async def list_tags(
     """
     List all available tags.
     """
-    statement = select(Tag)
+    statement = select(
+        Tag.name,
+        Tag.tag_type,
+        Tag.description,
+        Tag.display_name,
+        Tag.tag_metadata,
+    )
     if tag_type:
         statement = statement.where(Tag.tag_type == tag_type)
     result = await session.execute(statement)
-    return result.scalars().all()
+    return [
+        TagOutput(
+            name=tag[0],
+            tag_type=tag[1],
+            description=tag[2],
+            display_name=tag[3],
+            tag_metadata=tag[4],
+        )
+        for tag in result.all()
+    ]
 
 
 @router.get("/tags/{name}/", response_model=TagOutput)
@@ -103,7 +118,7 @@ async def get_a_tag(
 async def create_a_tag(
     data: CreateTag,
     session: AsyncSession = Depends(get_session),
-    current_user: User = Depends(get_and_update_current_user),
+    current_user: User = Depends(get_current_user),
     save_history: Callable = Depends(get_save_history),
 ) -> TagOutput:
     """
@@ -143,7 +158,7 @@ async def update_a_tag(
     name: str,
     data: UpdateTag,
     session: AsyncSession = Depends(get_session),
-    current_user: User = Depends(get_and_update_current_user),
+    current_user: User = Depends(get_current_user),
     save_history: Callable = Depends(get_save_history),
 ) -> TagOutput:
     """
@@ -168,7 +183,7 @@ async def update_a_tag(
             entity_type=EntityType.TAG,
             entity_name=tag.name,
             activity_type=ActivityType.UPDATE,
-            details=data.dict(),
+            details=data.model_dump(),
             user=current_user.username,
         ),
         session=session,
