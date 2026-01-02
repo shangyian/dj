@@ -1646,4 +1646,70 @@ export const DataJunctionAPI = {
     });
     return await response.json();
   },
+
+  // =================================
+  // Pre-aggregation API
+  // =================================
+
+  // List pre-aggregations with optional filters
+  listPreaggs: async function (filters = {}) {
+    const params = new URLSearchParams();
+    if (filters.node_name) params.append('node_name', filters.node_name);
+    if (filters.grain) params.append('grain', filters.grain);
+    if (filters.status) params.append('status', filters.status);
+
+    return await (
+      await fetch(`${DJ_URL}/preaggs/?${params}`, {
+        credentials: 'include',
+      })
+    ).json();
+  },
+
+  // Plan pre-aggregations for given metrics and dimensions
+  planPreaggs: async function (
+    metrics,
+    dimensions,
+    strategy = null,
+    schedule = null,
+    lookbackWindow = null,
+  ) {
+    const body = {
+      metrics,
+      dimensions,
+    };
+    if (strategy) body.strategy = strategy;
+    if (schedule) body.schedule = schedule;
+    if (lookbackWindow) body.lookback_window = lookbackWindow;
+
+    const response = await fetch(`${DJ_URL}/preaggs/plan`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+    });
+    return await response.json();
+  },
+
+  // Get a specific pre-aggregation by ID
+  getPreagg: async function (preaggId) {
+    return await (
+      await fetch(`${DJ_URL}/preaggs/${preaggId}`, {
+        credentials: 'include',
+      })
+    ).json();
+  },
+
+  // Trigger materialization for a pre-aggregation
+  materializePreagg: async function (preaggId) {
+    const response = await fetch(`${DJ_URL}/preaggs/${preaggId}/materialize`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+    });
+    return await response.json();
+  },
 };

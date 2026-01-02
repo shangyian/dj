@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Light as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { atomOneLight } from 'react-syntax-highlighter/src/styles/hljs';
@@ -19,6 +20,93 @@ function getDimensionNodeName(dimPath) {
 }
 
 /**
+ * Helper to normalize grain columns to short names for lookup key
+ */
+function normalizeGrain(grainCols) {
+  return (grainCols || [])
+    .map(col => col.split('.').pop())
+    .sort()
+    .join(',');
+}
+
+/**
+ * Helper to get a human-readable schedule summary from cron expression
+ */
+function getScheduleSummary(schedule) {
+  if (!schedule) return null;
+
+  // Basic cron parsing for common patterns
+  const parts = schedule.split(' ');
+  if (parts.length < 5) return schedule;
+
+  const [minute, hour, dayOfMonth, month, dayOfWeek] = parts;
+
+  // Daily at specific hour
+  if (dayOfMonth === '*' && month === '*' && dayOfWeek === '*') {
+    const hourNum = parseInt(hour, 10);
+    const minuteNum = parseInt(minute, 10);
+    if (!isNaN(hourNum) && !isNaN(minuteNum)) {
+      const period = hourNum >= 12 ? 'pm' : 'am';
+      const displayHour = hourNum > 12 ? hourNum - 12 : hourNum || 12;
+      const displayMinute = minuteNum.toString().padStart(2, '0');
+      return `Daily @ ${displayHour}:${displayMinute}${period}`;
+    }
+  }
+
+  // Weekly
+  if (dayOfMonth === '*' && month === '*' && dayOfWeek !== '*') {
+    const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+    const dayNum = parseInt(dayOfWeek, 10);
+    if (!isNaN(dayNum) && dayNum >= 0 && dayNum <= 6) {
+      return `Weekly on ${days[dayNum]}`;
+    }
+  }
+
+  return schedule;
+}
+
+/**
+ * Helper to get status display info
+ */
+function getStatusInfo(preagg) {
+  if (!preagg) {
+    return {
+      icon: '○',
+      text: 'Not planned',
+      className: 'status-not-planned',
+      color: '#94a3b8',
+    };
+  }
+
+  // Check availability for materialization status
+  if (preagg.availability) {
+    return {
+      icon: '●',
+      text: 'Materialized',
+      className: 'status-materialized',
+      color: '#059669',
+    };
+  }
+
+  // Check if configured but not yet materialized
+  if (preagg.strategy) {
+    return {
+      icon: '◐',
+      text: 'Pending',
+      className: 'status-pending',
+      color: '#d97706',
+    };
+  }
+
+  return {
+    icon: '○',
+    text: 'Not planned',
+    className: 'status-not-planned',
+    color: '#94a3b8',
+  };
+}
+
+/**
  * QueryOverviewPanel - Default view showing metrics SQL and pre-agg summary
  *
  * Shown when no node is selected in the graph
@@ -28,9 +116,28 @@ export function QueryOverviewPanel({
   metricsResult,
   selectedMetrics,
   selectedDimensions,
+  plannedPreaggs = {},
+  onPlanMaterialization,
+  onTriggerMaterialization,
 }) {
+  const [expandedCards, setExpandedCards] = useState({});
+  const [configuringCard, setConfiguringCard] = useState(null); // grainKey of card being configured
+  const [configForm, setConfigForm] = useState({
+    strategy: 'full',
+    schedule: '',
+    lookbackWindow: '',
+  });
+  const [isSaving, setIsSaving] = useState(false);
+
   const copyToClipboard = text => {
     navigator.clipboard.writeText(text);
+  };
+
+  const toggleCardExpanded = cardKey => {
+    setExpandedCards(prev => ({
+      ...prev,
+      [cardKey]: !prev[cardKey],
+    }));
   };
 
   // No selection yet
@@ -92,6 +199,16 @@ export function QueryOverviewPanel({
                 gg.components?.some(pc => pc.name === comp),
               ),
             );
+
+            // Look up existing pre-agg by normalized grain key
+            const grainKey = `${gg.parent_name}|${normalizeGrain(gg.grain)}`;
+            const existingPreagg = plannedPreaggs[grainKey];
+            const statusInfo = getStatusInfo(existingPreagg);
+            const isExpanded = expandedCards[grainKey] || false;
+            const scheduleSummary = existingPreagg?.schedule
+              ? getScheduleSummary(existingPreagg.schedule)
+              : null;
+
             return (
               <div key={i} className="preagg-summary-card">
                 <div className="preagg-summary-header">
@@ -121,12 +238,244 @@ export function QueryOverviewPanel({
                     </span>
                   </div>
                 </div>
-                <div className="preagg-summary-status">
-                  <span className="status-indicator status-not-materialized">
-                    ○
-                  </span>
-                  <span>Not materialized</span>
-                </div>
+
+                {/* Materialization Status Header */}
+                {configuringCard === grainKey ? (
+                  /* Configuration Form */
+                  <div className="materialization-config-form">
+                    <div className="config-form-header">
+                      <span>Configure Materialization</span>
+                      <button
+                        className="config-close-btn"
+                        type="button"
+                        onClick={() => setConfiguringCard(null)}
+                      >
+                        ×
+                      </button>
+                    </div>
+                    <div className="config-form-body">
+                      <div className="config-form-row">
+                        <label className="config-form-label">Strategy</label>
+                        <div className="config-form-options">
+                          <label className="radio-option">
+                            <input
+                              type="radio"
+                              name={`strategy-${i}`}
+                              value="full"
+                              checked={configForm.strategy === 'full'}
+                              onChange={e =>
+                                setConfigForm(prev => ({
+                                  ...prev,
+                                  strategy: e.target.value,
+                                }))
+                              }
+                            />
+                            <span>Full</span>
+                          </label>
+                          <label className="radio-option">
+                            <input
+                              type="radio"
+                              name={`strategy-${i}`}
+                              value="incremental_time"
+                              checked={
+                                configForm.strategy === 'incremental_time'
+                              }
+                              onChange={e =>
+                                setConfigForm(prev => ({
+                                  ...prev,
+                                  strategy: e.target.value,
+                                }))
+                              }
+                            />
+                            <span>Incremental (Time)</span>
+                          </label>
+                        </div>
+                      </div>
+                      <div className="config-form-row">
+                        <label className="config-form-label">
+                          Schedule (cron)
+                        </label>
+                        <input
+                          type="text"
+                          className="config-form-input"
+                          placeholder="0 6 * * * (daily at 6am)"
+                          value={configForm.schedule}
+                          onChange={e =>
+                            setConfigForm(prev => ({
+                              ...prev,
+                              schedule: e.target.value,
+                            }))
+                          }
+                        />
+                      </div>
+                      {configForm.strategy === 'incremental_time' && (
+                        <div className="config-form-row">
+                          <label className="config-form-label">
+                            Lookback Window
+                          </label>
+                          <input
+                            type="text"
+                            className="config-form-input"
+                            placeholder="3 days"
+                            value={configForm.lookbackWindow}
+                            onChange={e =>
+                              setConfigForm(prev => ({
+                                ...prev,
+                                lookbackWindow: e.target.value,
+                              }))
+                            }
+                          />
+                        </div>
+                      )}
+                    </div>
+                    <div className="config-form-actions">
+                      <button
+                        className="action-btn action-btn-secondary"
+                        type="button"
+                        onClick={() => setConfiguringCard(null)}
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        className="action-btn action-btn-primary"
+                        type="button"
+                        disabled={isSaving}
+                        onClick={async () => {
+                          if (!onPlanMaterialization) return;
+                          setIsSaving(true);
+                          try {
+                            await onPlanMaterialization(gg, configForm);
+                            setConfiguringCard(null);
+                            setConfigForm({
+                              strategy: 'full',
+                              schedule: '',
+                              lookbackWindow: '',
+                            });
+                          } catch (err) {
+                            console.error('Failed to save:', err);
+                          }
+                          setIsSaving(false);
+                        }}
+                      >
+                        {isSaving ? 'Saving...' : 'Save'}
+                      </button>
+                    </div>
+                  </div>
+                ) : existingPreagg ? (
+                  /* Existing Pre-agg Status Header */
+                  <>
+                    <div
+                      className="materialization-header clickable"
+                      onClick={() => toggleCardExpanded(grainKey)}
+                    >
+                      <div className="materialization-status">
+                        <span
+                          className={`status-indicator ${statusInfo.className}`}
+                          style={{ color: statusInfo.color }}
+                        >
+                          {statusInfo.icon}
+                        </span>
+                        <span className="status-text">{statusInfo.text}</span>
+                        {scheduleSummary && (
+                          <>
+                            <span className="status-separator">|</span>
+                            <span className="schedule-summary">
+                              {scheduleSummary}
+                            </span>
+                          </>
+                        )}
+                      </div>
+                      <button
+                        className="expand-toggle"
+                        type="button"
+                        aria-label={isExpanded ? 'Collapse' : 'Expand'}
+                      >
+                        {isExpanded ? '▲' : '▼'}
+                      </button>
+                    </div>
+
+                    {/* Expandable Materialization Details */}
+                    {isExpanded && (
+                      <div className="materialization-details">
+                        <div className="materialization-config">
+                          <div className="config-row">
+                            <span className="config-label">Strategy:</span>
+                            <span className="config-value">
+                              {existingPreagg.strategy === 'incremental_time'
+                                ? 'Incremental (Time-based)'
+                                : existingPreagg.strategy === 'full'
+                                ? 'Full'
+                                : existingPreagg.strategy || 'Not set'}
+                            </span>
+                          </div>
+                          {existingPreagg.schedule && (
+                            <div className="config-row">
+                              <span className="config-label">Schedule:</span>
+                              <span className="config-value config-mono">
+                                {existingPreagg.schedule}
+                              </span>
+                            </div>
+                          )}
+                          {existingPreagg.lookback_window && (
+                            <div className="config-row">
+                              <span className="config-label">Lookback:</span>
+                              <span className="config-value">
+                                {existingPreagg.lookback_window}
+                              </span>
+                            </div>
+                          )}
+                          {existingPreagg.availability?.updated_at && (
+                            <div className="config-row">
+                              <span className="config-label">Last Run:</span>
+                              <span className="config-value">
+                                {new Date(
+                                  existingPreagg.availability.updated_at,
+                                ).toLocaleString()}{' '}
+                                <span className="run-status success">✓</span>
+                              </span>
+                            </div>
+                          )}
+                        </div>
+                        <div className="materialization-actions">
+                          {onTriggerMaterialization && existingPreagg.id && (
+                            <button
+                              className="action-btn action-btn-primary"
+                              type="button"
+                              onClick={e => {
+                                e.stopPropagation();
+                                onTriggerMaterialization(existingPreagg.id);
+                              }}
+                            >
+                              Trigger Now
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    )}
+                  </>
+                ) : (
+                  /* Not Planned - Show Configure Button */
+                  <div className="materialization-header">
+                    <div className="materialization-status">
+                      <span
+                        className={`status-indicator ${statusInfo.className}`}
+                        style={{ color: statusInfo.color }}
+                      >
+                        {statusInfo.icon}
+                      </span>
+                      <span className="status-text">{statusInfo.text}</span>
+                    </div>
+                    {onPlanMaterialization && (
+                      <button
+                        className="action-btn action-btn-small"
+                        type="button"
+                        onClick={() => setConfiguringCard(grainKey)}
+                      >
+                        Configure
+                      </button>
+                    )}
+                  </div>
+                )}
               </div>
             );
           })}

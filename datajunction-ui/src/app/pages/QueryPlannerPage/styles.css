@@ -1249,3 +1249,324 @@
 .planner-details::-webkit-scrollbar-thumb:hover {
   background: var(--planner-text-dim);
 }
+
+/* =================================
+   Materialization Status Section
+   ================================= */
+
+/* Status Header - Compact row with status + expand toggle */
+.materialization-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 10px;
+  margin-top: 8px;
+  background: var(--planner-bg);
+  border: 1px solid var(--planner-border);
+  border-radius: var(--radius-sm);
+  transition: all 0.15s ease;
+}
+
+.materialization-header.clickable {
+  cursor: pointer;
+}
+
+.materialization-header.clickable:hover {
+  background: var(--planner-surface-hover);
+  border-color: var(--accent-primary);
+}
+
+.materialization-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+}
+
+.status-indicator {
+  font-size: 10px;
+  line-height: 1;
+}
+
+.status-text {
+  font-weight: 500;
+  color: var(--planner-text);
+}
+
+.status-separator {
+  color: var(--planner-text-dim);
+  margin: 0 2px;
+}
+
+.schedule-summary {
+  color: var(--planner-text-muted);
+  font-size: 10px;
+}
+
+/* Status Colors */
+.status-not-planned {
+  color: var(--planner-text-dim);
+}
+
+.status-materialized {
+  color: var(--accent-success);
+}
+
+.status-pending {
+  color: var(--accent-warning);
+}
+
+.status-running {
+  color: var(--accent-primary);
+}
+
+.status-failed {
+  color: var(--accent-error);
+}
+
+/* Expand Toggle Button */
+.expand-toggle {
+  background: transparent;
+  border: none;
+  padding: 2px 6px;
+  font-size: 10px;
+  color: var(--planner-text-muted);
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  transition: all 0.15s ease;
+}
+
+.expand-toggle:hover {
+  background: var(--planner-border);
+  color: var(--planner-text);
+}
+
+/* Expandable Materialization Details */
+.materialization-details {
+  margin-top: 8px;
+  padding: 10px 12px;
+  background: var(--planner-surface);
+  border: 1px solid var(--planner-border);
+  border-radius: var(--radius-sm);
+  animation: slideDown 0.15s ease-out;
+}
+
+@keyframes slideDown {
+  from {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Config Rows */
+.materialization-config {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.config-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+}
+
+.config-label {
+  color: var(--planner-text-muted);
+  min-width: 70px;
+}
+
+.config-value {
+  color: var(--planner-text);
+  font-weight: 500;
+}
+
+.config-value.config-mono {
+  font-family: var(--font-display);
+  font-size: 10px;
+  background: var(--planner-bg);
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+}
+
+.run-status {
+  font-size: 10px;
+}
+
+.run-status.success {
+  color: var(--accent-success);
+}
+
+.run-status.failed {
+  color: var(--accent-error);
+}
+
+/* Action Buttons */
+.materialization-actions {
+  display: flex;
+  gap: 8px;
+  padding-top: 10px;
+  border-top: 1px solid var(--planner-border);
+}
+
+.action-btn {
+  padding: 6px 12px;
+  font-size: 11px;
+  font-weight: 500;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all 0.15s ease;
+  border: 1px solid var(--planner-border);
+  background: var(--planner-surface);
+  color: var(--planner-text);
+}
+
+.action-btn:hover {
+  background: var(--planner-surface-hover);
+}
+
+.action-btn-primary {
+  background: var(--accent-primary);
+  border-color: var(--accent-primary);
+  color: white;
+}
+
+.action-btn-primary:hover {
+  background: #2563eb;
+  border-color: #2563eb;
+}
+
+.action-btn-secondary {
+  background: transparent;
+  border-color: var(--planner-border);
+  color: var(--planner-text-muted);
+}
+
+.action-btn-secondary:hover {
+  background: var(--planner-surface-hover);
+  color: var(--planner-text);
+}
+
+.action-btn-small {
+  padding: 4px 10px;
+  font-size: 10px;
+}
+
+/* =================================
+   Materialization Config Form
+   ================================= */
+
+.materialization-config-form {
+  margin-top: 8px;
+  background: var(--planner-surface);
+  border: 1px solid var(--accent-primary);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  animation: slideDown 0.15s ease-out;
+}
+
+.config-form-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 12px;
+  background: rgba(59, 130, 246, 0.1);
+  border-bottom: 1px solid var(--planner-border);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent-primary);
+}
+
+.config-close-btn {
+  background: transparent;
+  border: none;
+  font-size: 16px;
+  color: var(--planner-text-muted);
+  cursor: pointer;
+  padding: 0;
+  line-height: 1;
+}
+
+.config-close-btn:hover {
+  color: var(--planner-text);
+}
+
+.config-form-body {
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.config-form-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.config-form-label {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--planner-text-muted);
+}
+
+.config-form-options {
+  display: flex;
+  gap: 12px;
+}
+
+.radio-option {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--planner-text);
+  cursor: pointer;
+}
+
+.radio-option input[type='radio'] {
+  margin: 0;
+  accent-color: var(--accent-primary);
+}
+
+.config-form-input {
+  padding: 6px 10px;
+  font-size: 11px;
+  border: 1px solid var(--planner-border);
+  border-radius: var(--radius-sm);
+  background: var(--planner-bg);
+  color: var(--planner-text);
+  font-family: var(--font-display);
+}
+
+.config-form-input:focus {
+  outline: none;
+  border-color: var(--accent-primary);
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.1);
+}
+
+.config-form-input::placeholder {
+  color: var(--planner-text-dim);
+}
+
+.config-form-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 10px 12px;
+  border-top: 1px solid var(--planner-border);
+  background: var(--planner-bg);
+}
+
+.action-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
