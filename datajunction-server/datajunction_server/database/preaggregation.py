@@ -170,6 +170,13 @@ class PreAggregation(Base):
     # Lookback window for incremental materialization (e.g., "3 days")
     lookback_window: Mapped[Optional[str]] = mapped_column(String, nullable=True)
 
+    # === Workflow State ===
+    # URL to the scheduled workflow definition (set when workflow is created)
+    scheduled_workflow_url: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+
+    # Workflow status: "active" | "paused" | None (no workflow)
+    workflow_status: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+
     # === Availability ===
     availability_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey(

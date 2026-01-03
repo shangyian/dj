@@ -20,6 +20,7 @@ from http import HTTPStatus
 from typing import List, Optional
 
 from fastapi import Depends, Query, Request
+from pydantic import BaseModel, Field
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
@@ -36,22 +37,37 @@ from datajunction_server.database.preaggregation import (
 from datajunction_server.errors import (
     DJDoesNotExistException,
     DJInvalidInputException,
+    DJQueryServiceClientException,
 )
 from datajunction_server.internal.access.authentication.http import SecureAPIRouter
 from datajunction_server.models.dialect import Dialect
 from datajunction_server.models.materialization import MaterializationStrategy
 from datajunction_server.models.preaggregation import (
+    BackfillRequest,
+    BackfillResponse,
+    CreateWorkflowRequest,
     PlanPreAggregationsRequest,
     PlanPreAggregationsResponse,
     PreAggregationInfo,
     PreAggregationListResponse,
+    TemporalPartitionColumn,
     UpdatePreAggregationAvailabilityRequest,
+    WorkflowResponse,
 )
 from datajunction_server.service_clients import QueryServiceClient
 from datajunction_server.utils import get_query_service_client, get_session
 
 _logger = logging.getLogger(__name__)
 router = SecureAPIRouter(tags=["preaggregations"])
+
+def _compute_output_table(node_name: str, grain_group_hash: str) -> str:
+    """
+    Compute the output table name for a pre-aggregation.
+    
+    Format: {node_short}_preagg_{hash[:8]}
+    """
+    node_short = node_name.replace(".", "_")
+    return f"{node_short}_preagg_{grain_group_hash[:8]}"
 
 
 def _preagg_to_info(preagg: PreAggregation) -> PreAggregationInfo:
@@ -68,6 +84,8 @@ def _preagg_to_info(preagg: PreAggregation) -> PreAggregationInfo:
         strategy=preagg.strategy,
         schedule=preagg.schedule,
         lookback_window=preagg.lookback_window,
+        scheduled_workflow_url=preagg.scheduled_workflow_url,
+        workflow_status=preagg.workflow_status,
         status=preagg.status,
         materialized_table_ref=preagg.materialized_table_ref,
         max_partition=preagg.max_partition,
@@ -284,6 +302,10 @@ async def plan_preaggregations(
 
     # Build measures SQL - this computes grain groups from metrics + dimensions
     # We set use_materialized=False since we're generating SQL for materialization
+    # For INCREMENTAL_TIME strategy, include temporal filters with DJ_LOGICAL_TIMESTAMP()
+    include_temporal_filters = (
+        data.strategy == MaterializationStrategy.INCREMENTAL_TIME
+    )
     measures_result = await build_measures_sql(
         session=session,
         metrics=data.metrics,
@@ -291,6 +313,8 @@ async def plan_preaggregations(
         filters=data.filters,
         dialect=Dialect.SPARK,
         use_materialized=False,
+        include_temporal_filters=include_temporal_filters,
+        lookback_window=data.lookback_window if include_temporal_filters else None,
     )
 
     created_preaggs: list[PreAggregation] = []
@@ -307,6 +331,19 @@ async def plan_preaggregations(
             continue
 
         node_revision_id = parent_node.current.id
+
+        # Validate: INCREMENTAL_TIME requires temporal partition columns
+        if data.strategy == MaterializationStrategy.INCREMENTAL_TIME:
+            source_temporal_cols = parent_node.current.temporal_partition_columns()
+            if not source_temporal_cols:
+                raise DJInvalidInputException(
+                    message=(
+                        f"INCREMENTAL_TIME strategy requires the source node "
+                        f"'{grain_group.parent_name}' to have temporal partition columns. "
+                        f"Either add temporal partition columns to the source node or use "
+                        f"FULL strategy instead."
+                    ),
+                )
 
         # Convert grain to fully qualified dimension references
         # The grain_group.grain contains column aliases, we need the full refs
@@ -340,6 +377,15 @@ async def plan_preaggregations(
                 existing.id,
                 grain_group_hash,
             )
+            # Update config if provided (allows re-running plan with new settings)
+            if data.strategy:
+                existing.strategy = data.strategy
+            if data.schedule:
+                existing.schedule = data.schedule
+            if data.lookback_window:
+                existing.lookback_window = data.lookback_window
+            # Update SQL in case it changed
+            existing.sql = sql
             created_preaggs.append(existing)
         else:
             # Create new pre-aggregation
@@ -442,44 +488,74 @@ async def materialize_preaggregation(
             message="Schedule is required for INCREMENTAL_TIME strategy.",
         )
 
-    # Derive output table name: {node_short}__preagg_{hash[:8]}
+    # Check if source node has temporal partition columns (needed for INCREMENTAL_TIME)
+    source_temporal_cols = preagg.node_revision.temporal_partition_columns()
+    if (
+        preagg.strategy == MaterializationStrategy.INCREMENTAL_TIME
+        and not source_temporal_cols
+    ):
+        raise DJInvalidInputException(
+            message=(
+                f"INCREMENTAL_TIME strategy requires the source node "
+                f"'{preagg.node_revision.name}' to have temporal partition columns. "
+                f"Either add temporal partition columns to the source node or use "
+                f"FULL strategy instead."
+            ),
+        )
+
+    # Derive output table name: {node_short}_preagg_{hash[:8]}
+    # Note: Use single underscore to avoid '__' which is disallowed in workflow names
     node_short = preagg.node_revision.name.split(".")[-1]
-    output_table = f"{node_short}__preagg_{preagg.grain_group_hash[:8]}"
+    output_table = f"{node_short}_preagg_{preagg.grain_group_hash[:8]}"
 
     # Build temporal partition columns from source node (for incremental)
     # Supports multi-column partitions (e.g., dateint + hour for hourly)
     from datajunction_server.models.preaggregation import TemporalPartitionColumn
 
     temporal_partitions: list[TemporalPartitionColumn] = []
-    for temporal_col in preagg.node_revision.temporal_partition_columns():
+    for temporal_col in source_temporal_cols:
         temporal_partitions.append(
             TemporalPartitionColumn(
                 column_name=temporal_col.name,
-                format=temporal_col.partition.format_ if temporal_col.partition else None,
+                format=temporal_col.partition.format if temporal_col.partition else None,
                 granularity=(
-                    temporal_col.partition.granularity if temporal_col.partition else None
-                ),
-                expression=(
-                    temporal_col.partition.expression if temporal_col.partition else None
+                    str(temporal_col.partition.granularity.value)
+                    if temporal_col.partition and temporal_col.partition.granularity
+                    else None
                 ),
             )
         )
 
-    # Build columns metadata from grain + measures
+    # Build columns metadata from grain + temporal partitions + measures
     columns: list[ColumnMetadata] = []
+    added_col_names: set[str] = set()
 
     # Add grain columns
     for grain_col in preagg.grain_columns:
         # grain_col is fully qualified like "default.date_dim.date_id"
         col_name = grain_col.split(".")[-1]
-        columns.append(
-            ColumnMetadata(
-                name=col_name,
-                type="string",  # Simplified; could derive from node columns
-                semantic_entity=grain_col,
-                semantic_type="dimension",
+        if col_name not in added_col_names:
+            columns.append(
+                ColumnMetadata(
+                    name=col_name,
+                    type="string",  # Simplified; could derive from node columns
+                    semantic_entity=grain_col,
+                    semantic_type="dimension",
+                )
             )
-        )
+            added_col_names.add(col_name)
+
+    # Add temporal partition columns (if not already in grain)
+    for tp in temporal_partitions:
+        if tp.column_name not in added_col_names:
+            columns.append(
+                ColumnMetadata(
+                    name=tp.column_name,
+                    type="string",
+                    semantic_type="dimension",
+                )
+            )
+            added_col_names.add(tp.column_name)
 
     # Add measure columns
     for measure in preagg.measures:
@@ -517,10 +593,30 @@ async def materialize_preaggregation(
         preagg.strategy.value,
     )
     request_headers = dict(request.headers)
-    mat_result = query_service_client.materialize_preagg(
-        mat_input,
-        request_headers=request_headers,
-    )
+
+    try:
+        mat_result = query_service_client.materialize_preagg(
+            mat_input,
+            request_headers=request_headers,
+        )
+    except Exception as e:
+        _logger.exception(
+            "Failed to trigger materialization for preagg_id=%s: %s",
+            preagg_id,
+            str(e),
+        )
+        raise DJQueryServiceClientException(
+            message=f"Failed to trigger materialization: {e}",
+        )
+
+    # Check if materialization was actually scheduled (no URLs means failure)
+    if not mat_result.urls:
+        raise DJQueryServiceClientException(
+            message=(
+                "Query service did not return any workflow URLs. "
+                "Check query service logs for details."
+            ),
+        )
 
     _logger.info(
         "Materialization scheduled for preagg_id=%s, urls=%s",
@@ -528,8 +624,535 @@ async def materialize_preaggregation(
         mat_result.urls,
     )
 
-    # Return pre-agg info (status still "pending" until query service callbacks)
+    # Return pre-agg info with workflow URLs and "running" status
+    preagg_info = _preagg_to_info(preagg)
+    preagg_info.status = "running"  # Override to reflect that job is running
+    preagg_info.workflow_urls = mat_result.urls
+    return preagg_info
+
+
+class UpdatePreAggregationConfigRequest(BaseModel):
+    """Request model for updating a pre-aggregation's materialization config."""
+
+    strategy: Optional[MaterializationStrategy] = Field(
+        default=None,
+        description="Materialization strategy (FULL or INCREMENTAL_TIME)",
+    )
+    schedule: Optional[str] = Field(
+        default=None,
+        description="Cron expression for scheduled materialization",
+    )
+    lookback_window: Optional[str] = Field(
+        default=None,
+        description="Lookback window for incremental materialization (e.g., '3 days')",
+    )
+
+
+@router.patch(
+    "/preaggs/{preagg_id}/config",
+    response_model=PreAggregationInfo,
+    name="Update Pre-aggregation Config",
+)
+async def update_preaggregation_config(
+    preagg_id: int,
+    data: UpdatePreAggregationConfigRequest,
+    *,
+    session: AsyncSession = Depends(get_session),
+) -> PreAggregationInfo:
+    """
+    Update the materialization configuration of a single pre-aggregation.
+
+    Use this endpoint to configure individual pre-aggs with different
+    strategies, schedules, or lookback windows.
+    """
+    # Get the pre-aggregation
+    stmt = (
+        select(PreAggregation)
+        .options(
+            joinedload(PreAggregation.node_revision),
+            joinedload(PreAggregation.availability),
+        )
+        .where(PreAggregation.id == preagg_id)
+    )
+    result = await session.execute(stmt)
+    preagg = result.scalar_one_or_none()
+
+    if not preagg:
+        raise DJDoesNotExistException(f"Pre-aggregation with ID {preagg_id} not found")
+
+    # Update only the fields that are provided
+    if data.strategy is not None:
+        preagg.strategy = data.strategy
+    if data.schedule is not None:
+        preagg.schedule = data.schedule
+    if data.lookback_window is not None:
+        preagg.lookback_window = data.lookback_window
+
+    await session.commit()
+    await session.refresh(preagg, ["node_revision", "availability"])
+
+    _logger.info(
+        "Updated config for pre-aggregation id=%s strategy=%s schedule=%s lookback=%s",
+        preagg_id,
+        preagg.strategy,
+        preagg.schedule,
+        preagg.lookback_window,
+    )
+
     return _preagg_to_info(preagg)
+
+
+# =============================================================================
+# Workflow Management Endpoints
+# =============================================================================
+
+
+@router.post(
+    "/preaggs/{preagg_id}/workflow",
+    response_model=WorkflowResponse,
+    name="Create Scheduled Workflow",
+)
+async def create_preagg_workflow(
+    preagg_id: int,
+    data: CreateWorkflowRequest = CreateWorkflowRequest(),
+    *,
+    session: AsyncSession = Depends(get_session),
+    request: Request,
+    query_service_client: QueryServiceClient = Depends(get_query_service_client),
+) -> WorkflowResponse:
+    """
+    Create and optionally activate a scheduled workflow for this pre-aggregation.
+
+    This creates the recurring workflow that will materialize the pre-agg
+    on the configured schedule. Use this after configuring the pre-agg with
+    PATCH /preaggs/{id}/config.
+
+    The workflow URL is stored on the pre-aggregation for future reference.
+    """
+    from datajunction_server.database.node import NodeRevision
+    from datajunction_server.models.node_type import NodeNameVersion
+    from datajunction_server.models.preaggregation import WorkflowInput
+    from datajunction_server.models.query import ColumnMetadata
+
+    # Get the pre-agg with node_revision and its columns/partitions
+    stmt = (
+        select(PreAggregation)
+        .options(
+            joinedload(PreAggregation.node_revision).options(
+                *NodeRevision.default_load_options(),
+            ),
+            joinedload(PreAggregation.availability),
+        )
+        .where(PreAggregation.id == preagg_id)
+    )
+    result = await session.execute(stmt)
+    preagg = result.scalar_one_or_none()
+
+    if not preagg:
+        raise DJDoesNotExistException(f"Pre-aggregation with ID {preagg_id} not found")
+
+    # Validate: need strategy and schedule configured
+    if not preagg.strategy:
+        raise DJInvalidInputException(
+            "Pre-aggregation must have a strategy configured. "
+            "Use PATCH /preaggs/{id}/config first.",
+        )
+
+    if not preagg.schedule:
+        raise DJInvalidInputException(
+            "Pre-aggregation must have a schedule configured. "
+            "Use PATCH /preaggs/{id}/config first.",
+        )
+
+    # Build output table name
+    node_short = preagg.node_revision.name.replace(".", "_")
+    output_table = f"{node_short}_preagg_{preagg.grain_group_hash[:8]}"
+
+    # Get temporal partition info
+    # We need to find the OUTPUT column name (which may be aliased in the pre-agg SQL)
+    # The grain columns contain the output names, so we look for grain columns that
+    # have the same base name or are linked to the temporal partition dimension
+    temporal_partitions = []
+    grain_col_short_names = {gc.split(".")[-1] for gc in preagg.grain_columns}
+    
+    # Common date column names that might be aliases for temporal partitions
+    DATE_LIKE_COLUMNS = {"dateint", "date", "ds", "dt", "day", "hour", "hourly"}
+    
+    if preagg.node_revision:
+        for temporal_col in preagg.node_revision.temporal_partition_columns():
+            # The source column name (e.g., 'utc_date')
+            source_name = temporal_col.name
+            output_name = source_name  # default to source name
+            
+            _logger.debug(
+                "Processing temporal column: source_name=%s, has_dimension=%s, grain_cols=%s",
+                source_name,
+                temporal_col.dimension is not None,
+                preagg.grain_columns,
+            )
+            
+            # Strategy 1: Check if source name is directly in grain (no aliasing)
+            if source_name in grain_col_short_names:
+                output_name = source_name
+                _logger.debug("Found source name directly in grain: %s", output_name)
+            
+            # Strategy 2: If temporal column is linked to a dimension, find matching grain
+            elif temporal_col.dimension:
+                dim_name = temporal_col.dimension.name
+                _logger.debug("Temporal col linked to dimension: %s", dim_name)
+                for gc in preagg.grain_columns:
+                    if gc.startswith(dim_name + "."):
+                        output_name = gc.split(".")[-1]
+                        _logger.debug("Found dimension match in grain: %s -> %s", gc, output_name)
+                        break
+            
+            # Strategy 3: Fallback - look for common date-like columns in grain
+            # This handles cases where dimension link is missing but output is aliased
+            if output_name == source_name and output_name not in grain_col_short_names:
+                for date_col in DATE_LIKE_COLUMNS:
+                    if date_col in grain_col_short_names:
+                        output_name = date_col
+                        _logger.info(
+                            "Using fallback date column: %s (source was %s)",
+                            output_name,
+                            source_name,
+                        )
+                        break
+            
+            _logger.info(
+                "Temporal partition: source=%s -> output=%s",
+                source_name,
+                output_name,
+            )
+            
+            temporal_partitions.append(
+                TemporalPartitionColumn(
+                    column_name=output_name,
+                    format=temporal_col.partition.format if temporal_col.partition else None,
+                    granularity=(
+                        str(temporal_col.partition.granularity.value)
+                        if temporal_col.partition and temporal_col.partition.granularity
+                        else None
+                    ),
+                )
+            )
+
+    # Build columns metadata (grain + temporal partitions + measures)
+    columns: list[ColumnMetadata] = []
+    added_col_names: set[str] = set()
+
+    # Build a lookup map of column name -> type from node revision columns
+    col_type_map: dict[str, str] = {}
+    if preagg.node_revision and preagg.node_revision.columns:
+        for col in preagg.node_revision.columns:
+            col_type_map[col.name] = str(col.type) if col.type else "string"
+    
+    # Also map temporal partition columns to their source types
+    # (e.g., if utc_date is int, and it maps to dateint, dateint should be int)
+    if preagg.node_revision:
+        for temporal_col in preagg.node_revision.temporal_partition_columns():
+            source_type = str(temporal_col.type) if temporal_col.type else "int"
+            # If this temporal col links to a dimension, the output col inherits the type
+            if temporal_col.dimension:
+                dim_name = temporal_col.dimension.name
+                for gc in preagg.grain_columns:
+                    if gc.startswith(dim_name + "."):
+                        output_col = gc.split(".")[-1]
+                        col_type_map[output_col] = source_type
+    
+    # Common date column patterns that should be int (yyyyMMdd format)
+    DATE_INT_COLUMNS = {"dateint", "date_int", "utc_date", "ds", "dt"}
+
+    for grain_col in preagg.grain_columns:
+        col_name = grain_col.split(".")[-1]
+        if col_name not in added_col_names:
+            # Determine type: use lookup, or int for date-like columns, else string
+            col_type = col_type_map.get(col_name)
+            if not col_type:
+                col_type = "int" if col_name.lower() in DATE_INT_COLUMNS else "string"
+            columns.append(
+                ColumnMetadata(
+                    name=col_name,
+                    type=col_type,
+                    semantic_entity=grain_col,
+                    semantic_type="dimension",
+                )
+            )
+            added_col_names.add(col_name)
+
+    # Add temporal partition columns (if not already in grain)
+    for tp in temporal_partitions:
+        if tp.column_name not in added_col_names:
+            # Temporal partition columns are typically int (dateint format)
+            col_type = col_type_map.get(tp.column_name)
+            if not col_type:
+                col_type = "int" if tp.column_name.lower() in DATE_INT_COLUMNS else "string"
+            columns.append(
+                ColumnMetadata(
+                    name=tp.column_name,
+                    type=col_type,
+                    semantic_type="dimension",
+                )
+            )
+            added_col_names.add(tp.column_name)
+
+    for measure in preagg.measures:
+        # Measures typically result in numeric types from aggregations
+        # Use provided type if available, otherwise default based on aggregation
+        measure_type = measure.get("type", "double")
+        columns.append(
+            ColumnMetadata(
+                name=measure.get("name", ""),
+                type=measure_type,
+                semantic_type="measure",
+            )
+        )
+
+    _logger.info(
+        "Building workflow input: columns=%s, temporal_partitions=%s",
+        [c.name for c in columns],
+        [tp.column_name for tp in temporal_partitions],
+    )
+
+    # Build workflow input
+    workflow_input = WorkflowInput(
+        preagg_id=preagg_id,
+        output_table=output_table,
+        node=NodeNameVersion(
+            name=preagg.node_revision.name,
+            version=preagg.node_revision.version,
+        ),
+        grain=preagg.grain_columns,
+        measures=preagg.measures,
+        query=preagg.sql,
+        columns=columns,
+        temporal_partitions=temporal_partitions,
+        strategy=preagg.strategy,
+        schedule=preagg.schedule,
+        lookback_window=preagg.lookback_window,
+        activate=data.activate,
+    )
+
+    # Call query service
+    _logger.info(
+        "Creating workflow for preagg_id=%s output_table=%s activate=%s",
+        preagg_id,
+        output_table,
+        data.activate,
+    )
+    request_headers = dict(request.headers)
+
+    try:
+        workflow_result = query_service_client.create_preagg_workflow(
+            workflow_input,
+            request_headers=request_headers,
+        )
+    except Exception as e:
+        _logger.exception(
+            "Failed to create workflow for preagg_id=%s: %s",
+            preagg_id,
+            str(e),
+        )
+        raise DJQueryServiceClientException(
+            message=f"Failed to create workflow: {e}",
+        )
+
+    # Update pre-agg with workflow URL
+    preagg.scheduled_workflow_url = workflow_result.get("workflow_url")
+    preagg.workflow_status = "active" if data.activate else "paused"
+    await session.commit()
+
+    _logger.info(
+        "Created workflow for preagg_id=%s workflow_url=%s status=%s",
+        preagg_id,
+        preagg.scheduled_workflow_url,
+        preagg.workflow_status,
+    )
+
+    return WorkflowResponse(
+        workflow_url=preagg.scheduled_workflow_url,
+        status=preagg.workflow_status or "none",
+        message="Workflow created successfully",
+    )
+
+
+@router.delete(
+    "/preaggs/{preagg_id}/workflow",
+    response_model=WorkflowResponse,
+    name="Deactivate Scheduled Workflow",
+)
+async def delete_preagg_workflow(
+    preagg_id: int,
+    *,
+    session: AsyncSession = Depends(get_session),
+    request: Request,
+    query_service_client: QueryServiceClient = Depends(get_query_service_client),
+) -> WorkflowResponse:
+    """
+    Deactivate (pause) the scheduled workflow for this pre-aggregation.
+
+    The workflow definition is kept but will not run on schedule.
+    Call POST /preaggs/{id}/workflow to re-activate.
+    """
+    # Get the pre-agg
+    stmt = (
+        select(PreAggregation)
+        .options(
+            joinedload(PreAggregation.node_revision),
+            joinedload(PreAggregation.availability),
+        )
+        .where(PreAggregation.id == preagg_id)
+    )
+    result = await session.execute(stmt)
+    preagg = result.scalar_one_or_none()
+
+    if not preagg:
+        raise DJDoesNotExistException(f"Pre-aggregation with ID {preagg_id} not found")
+
+    if not preagg.scheduled_workflow_url:
+        return WorkflowResponse(
+            workflow_url=None,
+            status="none",
+            message="No workflow exists for this pre-aggregation",
+        )
+
+    # Call query service to deactivate
+    request_headers = dict(request.headers)
+    try:
+        query_service_client.deactivate_preagg_workflow(
+            preagg_id,
+            request_headers=request_headers,
+        )
+    except Exception as e:
+        _logger.exception(
+            "Failed to deactivate workflow for preagg_id=%s: %s",
+            preagg_id,
+            str(e),
+        )
+        raise DJQueryServiceClientException(
+            message=f"Failed to deactivate workflow: {e}",
+        )
+
+    # Update status
+    preagg.workflow_status = "paused"
+    await session.commit()
+
+    _logger.info(
+        "Deactivated workflow for preagg_id=%s",
+        preagg_id,
+    )
+
+    return WorkflowResponse(
+        workflow_url=preagg.scheduled_workflow_url,
+        status="paused",
+        message="Workflow deactivated successfully",
+    )
+
+
+# =============================================================================
+# Backfill & Run Endpoints
+# =============================================================================
+
+
+@router.post(
+    "/preaggs/{preagg_id}/backfill",
+    response_model=BackfillResponse,
+    name="Run Backfill",
+)
+async def run_preagg_backfill(
+    preagg_id: int,
+    data: BackfillRequest,
+    *,
+    session: AsyncSession = Depends(get_session),
+    request: Request,
+    query_service_client: QueryServiceClient = Depends(get_query_service_client),
+) -> BackfillResponse:
+    """
+    Run a backfill for the specified date range.
+
+    This triggers a one-time job to process historical data from start_date
+    to end_date. The workflow must already exist (created via POST /workflow).
+
+    Use this to:
+    - Initially populate a new pre-aggregation
+    - Re-process data after a bug fix
+    - Catch up on missed partitions
+    """
+    from datetime import date as date_type
+
+    from datajunction_server.models.preaggregation import BackfillInput
+
+    # Get the pre-agg (minimal load - just need ID, node_revision name, and workflow URL)
+    stmt = (
+        select(PreAggregation)
+        .options(joinedload(PreAggregation.node_revision))
+        .where(PreAggregation.id == preagg_id)
+    )
+    result = await session.execute(stmt)
+    preagg = result.scalar_one_or_none()
+
+    if not preagg:
+        raise DJDoesNotExistException(f"Pre-aggregation with ID {preagg_id} not found")
+
+    # Validate: workflow must exist
+    if not preagg.scheduled_workflow_url:
+        raise DJInvalidInputException(
+            "Pre-aggregation must have a workflow created first. "
+            "Use POST /preaggs/{id}/workflow first.",
+        )
+
+    # Default end_date to today
+    end_date = data.end_date or date_type.today()
+
+    # Compute output table (Query Service derives workflow name from this)
+    output_table = _compute_output_table(preagg.node_revision.name, preagg.grain_group_hash)
+
+    # Build simplified backfill input
+    backfill_input = BackfillInput(
+        preagg_id=preagg_id,
+        output_table=output_table,
+        start_date=data.start_date,
+        end_date=end_date,
+    )
+
+    # Call query service
+    _logger.info(
+        "Running backfill for preagg_id=%s from %s to %s output_table=%s",
+        preagg_id,
+        data.start_date,
+        end_date,
+        output_table,
+    )
+    request_headers = dict(request.headers)
+
+    try:
+        backfill_result = query_service_client.run_preagg_backfill(
+            backfill_input,
+            request_headers=request_headers,
+        )
+    except Exception as e:
+        _logger.exception(
+            "Failed to run backfill for preagg_id=%s: %s",
+            preagg_id,
+            str(e),
+        )
+        raise DJQueryServiceClientException(
+            message=f"Failed to run backfill: {e}",
+        )
+
+    job_url = backfill_result.get("job_url", "")
+    _logger.info(
+        "Started backfill for preagg_id=%s job_url=%s",
+        preagg_id,
+        job_url,
+    )
+
+    return BackfillResponse(
+        job_url=job_url,
+        start_date=data.start_date,
+        end_date=end_date,
+        status="running",
+    )
 
 
 @router.post(

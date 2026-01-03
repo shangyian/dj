@@ -78,13 +78,69 @@ function getStatusInfo(preagg) {
     };
   }
 
-  // Check availability for materialization status
-  if (preagg.availability) {
+  // Check if this is a compatible (superset) pre-agg, not exact match
+  if (preagg._isCompatible) {
+    // Show that this grain is covered by an existing pre-agg with more dimensions
+    const preaggGrain = preagg.grain_columns
+      ?.map(g => g.split('.').pop())
+      .join(', ');
+    
+    // Check if that compatible pre-agg has data
+    if (preagg.availability || preagg.status === 'active') {
+      return {
+        icon: '✓',
+        text: `Covered (${preaggGrain})`,
+        className: 'status-compatible-materialized',
+        color: '#059669',
+        isCompatible: true,
+      };
+    }
+    return {
+      icon: '◐',
+      text: `Covered (${preaggGrain})`,
+      className: 'status-compatible',
+      color: '#d97706',
+      isCompatible: true,
+    };
+  }
+
+  // Check for running status (job is in progress)
+  if (preagg.status === 'running') {
+    return {
+      icon: '◉',
+      text: 'Running',
+      className: 'status-running',
+      color: '#2563eb',
+    };
+  }
+
+  // Check availability for materialization status (active = has data)
+  if (preagg.availability || preagg.status === 'active') {
     return {
       icon: '●',
       text: 'Materialized',
       className: 'status-materialized',
       color: '#059669',
+    };
+  }
+
+  // Check if workflow is active
+  if (preagg.workflow_status === 'active') {
+    return {
+      icon: '◐',
+      text: 'Workflow Active',
+      className: 'status-workflow-active',
+      color: '#2563eb',
+    };
+  }
+
+  // Check if workflow is paused
+  if (preagg.workflow_status === 'paused') {
+    return {
+      icon: '◐',
+      text: 'Workflow Paused',
+      className: 'status-workflow-paused',
+      color: '#94a3b8',
     };
   }
 
@@ -111,6 +167,50 @@ function getStatusInfo(preagg) {
  *
  * Shown when no node is selected in the graph
  */
+/**
+ * Get recommended schedule based on granularity
+ */
+function getRecommendedSchedule(granularity) {
+  switch (granularity?.toUpperCase()) {
+    case 'HOUR':
+      return { cron: '0 * * * *', label: 'Hourly' };
+    case 'DAY':
+    default:
+      return { cron: '0 6 * * *', label: 'Daily at 6:00 AM' };
+  }
+}
+
+/**
+ * Check if any grain group has temporal partitions
+ */
+function hasTemporalPartition(grainGroups) {
+  // Check if any grain group has columns that look like temporal partitions
+  // Common patterns: dateint, date_id, ds, hour, etc.
+  const temporalPatterns = ['date', 'dateint', 'ds', 'hour', 'day', 'month', 'year', 'timestamp'];
+  for (const gg of grainGroups || []) {
+    for (const col of gg.grain || []) {
+      const colName = col.split('.').pop().toLowerCase();
+      if (temporalPatterns.some(p => colName.includes(p))) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * Get granularity hint from grain columns
+ */
+function inferGranularity(grainGroups) {
+  for (const gg of grainGroups || []) {
+    for (const col of gg.grain || []) {
+      const colName = col.split('.').pop().toLowerCase();
+      if (colName.includes('hour')) return 'HOUR';
+    }
+  }
+  return 'DAY'; // Default
+}
+
 export function QueryOverviewPanel({
   measuresResult,
   metricsResult,
@@ -118,16 +218,79 @@ export function QueryOverviewPanel({
   selectedDimensions,
   plannedPreaggs = {},
   onPlanMaterialization,
+  onUpdateConfig,
   onTriggerMaterialization,
+  onCreateWorkflow,
+  onRunBackfill,
+  onRunAdhoc,
+  materializationError,
+  onClearError,
 }) {
   const [expandedCards, setExpandedCards] = useState({});
-  const [configuringCard, setConfiguringCard] = useState(null); // grainKey of card being configured
+  const [configuringCard, setConfiguringCard] = useState(null); // '__all__' for section-level
+  const [editingCard, setEditingCard] = useState(null); // grainKey of existing card being edited
+  
+  // Enhanced config form state
   const [configForm, setConfigForm] = useState({
-    strategy: 'full',
+    strategy: 'incremental_time',
+    backfillFrom: '',
+    backfillTo: 'today', // 'today' or specific date
+    backfillToDate: '',
+    continueAfterBackfill: true,
     schedule: '',
-    lookbackWindow: '',
+    scheduleType: 'auto', // 'auto' or 'custom'
+    lookbackWindow: '1 day',
   });
   const [isSaving, setIsSaving] = useState(false);
+  const [loadingAction, setLoadingAction] = useState(null); // Track which action is loading: 'workflow', 'backfill', 'trigger'
+  
+  // Backfill modal state (for existing pre-aggs)
+  const [backfillModal, setBackfillModal] = useState(null);
+  
+  // Toast state for job URLs
+  const [toastMessage, setToastMessage] = useState(null);
+
+  // Initialize config form with smart defaults when opening
+  const openConfigForm = () => {
+    const grainGroups = measuresResult?.grain_groups || [];
+    const hasTemporal = hasTemporalPartition(grainGroups);
+    const granularity = inferGranularity(grainGroups);
+    const recommended = getRecommendedSchedule(granularity);
+    
+    // Default backfill start to 30 days ago
+    const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000)
+      .toISOString().split('T')[0];
+    
+    setConfigForm({
+      strategy: hasTemporal ? 'incremental_time' : 'full',
+      runBackfill: true, // Option to skip backfill
+      backfillFrom: thirtyDaysAgo,
+      backfillTo: 'today',
+      backfillToDate: '',
+      continueAfterBackfill: true,
+      schedule: recommended.cron,
+      scheduleType: 'auto',
+      lookbackWindow: '1 day',
+      _recommendedSchedule: recommended, // Store for display
+      _granularity: granularity,
+    });
+    setConfiguringCard('__all__');
+  };
+
+  // Helper to start editing an existing pre-agg's config
+  const startEditingConfig = (grainKey, existingPreagg) => {
+    setConfigForm({
+      strategy: existingPreagg.strategy || 'incremental_time',
+      backfillFrom: '',
+      backfillTo: 'today',
+      backfillToDate: '',
+      continueAfterBackfill: true,
+      schedule: existingPreagg.schedule || '',
+      scheduleType: existingPreagg.schedule ? 'custom' : 'auto',
+      lookbackWindow: existingPreagg.lookback_window || '',
+    });
+    setEditingCard(grainKey);
+  };
 
   const copyToClipboard = text => {
     navigator.clipboard.writeText(text);
@@ -187,10 +350,331 @@ export function QueryOverviewPanel({
 
       {/* Pre-aggregations Summary */}
       <div className="details-section">
-        <h3 className="section-title">
-          <span className="section-icon">◫</span>
-          Pre-Aggregations ({grainGroups.length})
-        </h3>
+        <div className="section-header-row">
+          <h3 className="section-title">
+            <span className="section-icon">◫</span>
+            Pre-Aggregations ({grainGroups.length})
+          </h3>
+        </div>
+
+        {/* Prominent call-to-action when no pre-aggs are configured */}
+        {onPlanMaterialization && 
+         grainGroups.length > 0 && 
+         !Object.values(plannedPreaggs).some(p => p?.strategy) &&
+         configuringCard !== '__all__' && (
+          <div className="plan-materialization-cta">
+            <div className="cta-content">
+              <div className="cta-icon">⚡</div>
+              <div className="cta-text">
+                <strong>Ready to materialize?</strong>
+                <span>Configure scheduled materialization for faster queries</span>
+              </div>
+            </div>
+            <button
+              className="action-btn action-btn-primary"
+              type="button"
+              onClick={openConfigForm}
+            >
+              Plan Materialization
+            </button>
+          </div>
+        )}
+
+        {/* Section-level Configuration Form - Enhanced */}
+        {configuringCard === '__all__' && (
+          <div className="materialization-config-form section-level-config">
+            <div className="config-form-header">
+              <span>Configure Materialization</span>
+              <button
+                className="config-close-btn"
+                type="button"
+                onClick={() => setConfiguringCard(null)}
+              >
+                ×
+              </button>
+            </div>
+            <div className="config-form-body">
+              {/* Strategy */}
+              <div className="config-form-row">
+                <label className="config-form-label">Strategy</label>
+                <div className="config-form-options">
+                  <label className="radio-option">
+                    <input
+                      type="radio"
+                      name="strategy-all"
+                      value="full"
+                      checked={configForm.strategy === 'full'}
+                      onChange={e =>
+                        setConfigForm(prev => ({
+                          ...prev,
+                          strategy: e.target.value,
+                        }))
+                      }
+                    />
+                    <span>Full</span>
+                  </label>
+                  <label 
+                    className={`radio-option ${!hasTemporalPartition(measuresResult?.grain_groups) ? 'disabled' : ''}`}
+                    title={!hasTemporalPartition(measuresResult?.grain_groups) 
+                      ? 'Incremental requires temporal partition columns on the source node (e.g., dateint, ds)' 
+                      : ''}
+                  >
+                    <input
+                      type="radio"
+                      name="strategy-all"
+                      value="incremental_time"
+                      checked={configForm.strategy === 'incremental_time'}
+                      disabled={!hasTemporalPartition(measuresResult?.grain_groups)}
+                      onChange={e =>
+                        setConfigForm(prev => ({
+                          ...prev,
+                          strategy: e.target.value,
+                        }))
+                      }
+                    />
+                    <span>Incremental</span>
+                    {!hasTemporalPartition(measuresResult?.grain_groups) && (
+                      <span className="option-hint">(requires temporal partition)</span>
+                    )}
+                  </label>
+                </div>
+              </div>
+
+              {/* Run Backfill Option (only for incremental) */}
+              {configForm.strategy === 'incremental_time' && (
+                <div className="config-form-row">
+                  <label className="checkbox-option">
+                    <input
+                      type="checkbox"
+                      checked={configForm.runBackfill}
+                      onChange={e =>
+                        setConfigForm(prev => ({
+                          ...prev,
+                          runBackfill: e.target.checked,
+                        }))
+                      }
+                    />
+                    <span>Run initial backfill</span>
+                  </label>
+                  <span className="config-form-hint">
+                    Populate historical data. Uncheck to only set up ongoing materialization.
+                  </span>
+                </div>
+              )}
+
+              {/* Backfill Date Range (only if runBackfill is checked) */}
+              {configForm.strategy === 'incremental_time' && configForm.runBackfill && (
+                <div className="config-form-section">
+                  <label className="config-form-section-label">Backfill Date Range</label>
+                  <div className="backfill-range">
+                    <div className="backfill-field">
+                      <label>From</label>
+                      <input
+                        type="date"
+                        value={configForm.backfillFrom}
+                        onChange={e =>
+                          setConfigForm(prev => ({
+                            ...prev,
+                            backfillFrom: e.target.value,
+                          }))
+                        }
+                      />
+                    </div>
+                    <div className="backfill-field">
+                      <label>To</label>
+                      <select
+                        value={configForm.backfillTo}
+                        onChange={e =>
+                          setConfigForm(prev => ({
+                            ...prev,
+                            backfillTo: e.target.value,
+                          }))
+                        }
+                      >
+                        <option value="today">Today</option>
+                        <option value="specific">Specific date</option>
+                      </select>
+                      {configForm.backfillTo === 'specific' && (
+                        <input
+                          type="date"
+                          value={configForm.backfillToDate}
+                          onChange={e =>
+                            setConfigForm(prev => ({
+                              ...prev,
+                              backfillToDate: e.target.value,
+                            }))
+                          }
+                          style={{ marginTop: '6px' }}
+                        />
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Schedule - always shown since we always create workflows */}
+              <div className="config-form-row">
+                  <label className="config-form-label">Schedule</label>
+                  <select
+                    className="config-form-select"
+                    value={configForm.scheduleType}
+                    onChange={e => {
+                      const type = e.target.value;
+                      setConfigForm(prev => ({
+                        ...prev,
+                        scheduleType: type,
+                        schedule: type === 'auto' 
+                          ? (prev._recommendedSchedule?.cron || '0 6 * * *')
+                          : prev.schedule,
+                      }));
+                    }}
+                  >
+                    <option value="auto">
+                      {configForm._recommendedSchedule?.label || 'Daily at 6:00 AM'} (recommended)
+                    </option>
+                    <option value="hourly">Hourly</option>
+                    <option value="custom">Custom cron...</option>
+                  </select>
+                  {configForm.scheduleType === 'custom' && (
+                    <input
+                      type="text"
+                      className="config-form-input"
+                      placeholder="0 6 * * *"
+                      value={configForm.schedule}
+                      onChange={e =>
+                        setConfigForm(prev => ({
+                          ...prev,
+                          schedule: e.target.value,
+                        }))
+                      }
+                      style={{ marginTop: '6px' }}
+                    />
+                  )}
+                  {configForm.scheduleType === 'auto' && (
+                    <span className="config-form-hint">
+                      Based on {configForm._granularity?.toLowerCase() || 'daily'} partition granularity
+                    </span>
+                  )}
+                </div>
+
+              {/* Lookback Window (only for incremental) */}
+              {configForm.strategy === 'incremental_time' && (
+                <div className="config-form-row">
+                  <label className="config-form-label">Lookback Window</label>
+                  <input
+                    type="text"
+                    className="config-form-input"
+                    placeholder="1 day"
+                    value={configForm.lookbackWindow}
+                    onChange={e =>
+                      setConfigForm(prev => ({
+                        ...prev,
+                        lookbackWindow: e.target.value,
+                      }))
+                    }
+                  />
+                  <span className="config-form-hint">
+                    For late-arriving data (e.g., "1 day", "3 days")
+                  </span>
+                </div>
+              )}
+            </div>
+            <div className="config-form-actions">
+              <button
+                className="action-btn action-btn-secondary"
+                type="button"
+                onClick={() => setConfiguringCard(null)}
+              >
+                Cancel
+              </button>
+              <button
+                className="action-btn action-btn-primary"
+                type="button"
+                disabled={isSaving}
+                onClick={async () => {
+                  setIsSaving(true);
+                  try {
+                    // Compute the actual schedule value
+                    let finalSchedule = configForm.schedule;
+                    if (configForm.scheduleType === 'auto') {
+                      finalSchedule = configForm._recommendedSchedule?.cron || '0 6 * * *';
+                    } else if (configForm.scheduleType === 'hourly') {
+                      finalSchedule = '0 * * * *';
+                    }
+                    
+                    // Compute backfill end date
+                    let backfillEndDate = null;
+                    if (configForm.strategy === 'incremental_time') {
+                      backfillEndDate = configForm.backfillTo === 'today'
+                        ? new Date().toISOString().split('T')[0]
+                        : configForm.backfillToDate;
+                    }
+                    
+                    // Build the config object for the API
+                    const apiConfig = {
+                      strategy: configForm.strategy,
+                      schedule: finalSchedule,  // Always set - we always create workflows
+                      lookbackWindow: configForm.strategy === 'incremental_time' 
+                        ? configForm.lookbackWindow 
+                        : null,
+                      // Backfill info (only for incremental + runBackfill checked)
+                      runBackfill: configForm.runBackfill,
+                      backfillFrom: (configForm.strategy === 'incremental_time' && configForm.runBackfill) 
+                        ? configForm.backfillFrom 
+                        : null,
+                      backfillTo: (configForm.strategy === 'incremental_time' && configForm.runBackfill)
+                        ? backfillEndDate
+                        : null,
+                    };
+                    
+                    await onPlanMaterialization(null, apiConfig);
+                    setConfiguringCard(null);
+                    // Reset form to defaults
+                    setConfigForm({
+                      strategy: 'incremental_time',
+                      runBackfill: true,
+                      backfillFrom: '',
+                      backfillTo: 'today',
+                      backfillToDate: '',
+                      continueAfterBackfill: true,
+                      schedule: '',
+                      scheduleType: 'auto',
+                      lookbackWindow: '1 day',
+                    });
+                  } catch (err) {
+                    console.error('Failed to plan:', err);
+                  }
+                  setIsSaving(false);
+                }}
+              >
+                {isSaving 
+                  ? <><span className="spinner" /> Creating...</>
+                  : configForm.strategy === 'incremental_time' && configForm.runBackfill
+                    ? 'Create Workflow & Start Backfill'
+                    : 'Create Workflow'
+                }
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Materialization Error Banner */}
+        {materializationError && (
+          <div className="materialization-error">
+            <div className="error-content">
+              <span className="error-icon">⚠</span>
+              <span className="error-message">{materializationError}</span>
+            </div>
+            <button
+              className="error-dismiss"
+              onClick={onClearError}
+              aria-label="Dismiss error"
+            >
+              ×
+            </button>
+          </div>
+        )}
+
         <div className="preagg-summary-list">
           {grainGroups.map((gg, i) => {
             const shortName = gg.parent_name?.split('.').pop() || 'Unknown';
@@ -240,15 +724,17 @@ export function QueryOverviewPanel({
                 </div>
 
                 {/* Materialization Status Header */}
-                {configuringCard === grainKey ? (
-                  /* Configuration Form */
+                {editingCard === grainKey ? (
+                  /* Edit Config Form (only for existing pre-aggs) */
                   <div className="materialization-config-form">
                     <div className="config-form-header">
-                      <span>Configure Materialization</span>
+                      <span>Edit Materialization Config</span>
                       <button
                         className="config-close-btn"
                         type="button"
-                        onClick={() => setConfiguringCard(null)}
+                        onClick={() => {
+                          setEditingCard(null);
+                        }}
                       >
                         ×
                       </button>
@@ -332,7 +818,7 @@ export function QueryOverviewPanel({
                       <button
                         className="action-btn action-btn-secondary"
                         type="button"
-                        onClick={() => setConfiguringCard(null)}
+                        onClick={() => setEditingCard(null)}
                       >
                         Cancel
                       </button>
@@ -341,11 +827,12 @@ export function QueryOverviewPanel({
                         type="button"
                         disabled={isSaving}
                         onClick={async () => {
-                          if (!onPlanMaterialization) return;
                           setIsSaving(true);
                           try {
-                            await onPlanMaterialization(gg, configForm);
-                            setConfiguringCard(null);
+                            if (onUpdateConfig && existingPreagg?.id) {
+                              await onUpdateConfig(existingPreagg.id, configForm);
+                            }
+                            setEditingCard(null);
                             setConfigForm({
                               strategy: 'full',
                               schedule: '',
@@ -357,7 +844,7 @@ export function QueryOverviewPanel({
                           setIsSaving(false);
                         }}
                       >
-                        {isSaving ? 'Saving...' : 'Save'}
+                        {isSaving ? <><span className="spinner" /> Saving...</> : 'Save'}
                       </button>
                     </div>
                   </div>
@@ -397,6 +884,16 @@ export function QueryOverviewPanel({
                     {/* Expandable Materialization Details */}
                     {isExpanded && (
                       <div className="materialization-details">
+                        {/* Note for compatible (superset) pre-aggs */}
+                        {existingPreagg._isCompatible && (
+                          <div className="compatible-preagg-note">
+                            <span className="note-icon">ℹ️</span>
+                            <span>
+                              This query can use an existing pre-agg with finer grain: 
+                              <strong> {existingPreagg.grain_columns?.map(g => g.split('.').pop()).join(', ')}</strong>
+                            </span>
+                          </div>
+                        )}
                         <div className="materialization-config">
                           <div className="config-row">
                             <span className="config-label">Strategy:</span>
@@ -435,18 +932,150 @@ export function QueryOverviewPanel({
                               </span>
                             </div>
                           )}
+                          {/* Workflow URLs (shown when job is running or has been triggered) */}
+                          {existingPreagg.workflow_urls?.length > 0 && (
+                            <div className="config-row">
+                              <span className="config-label">Workflows:</span>
+                              <div className="workflow-links">
+                                {existingPreagg.workflow_urls.map((url, idx) => (
+                                  <a
+                                    key={idx}
+                                    href={url}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="workflow-link"
+                                  >
+                                    {url.includes('scheduled')
+                                      ? '📅 Scheduled'
+                                      : url.includes('adhoc')
+                                      ? '▶ Ad-hoc'
+                                      : `Job ${idx + 1}`}
+                                    <span className="link-icon">↗</span>
+                                  </a>
+                                ))}
+                              </div>
+                            </div>
+                          )}
                         </div>
                         <div className="materialization-actions">
-                          {onTriggerMaterialization && existingPreagg.id && (
+                          {onUpdateConfig && existingPreagg.id && (
                             <button
-                              className="action-btn action-btn-primary"
+                              className="action-btn action-btn-secondary"
                               type="button"
                               onClick={e => {
                                 e.stopPropagation();
-                                onTriggerMaterialization(existingPreagg.id);
+                                startEditingConfig(grainKey, existingPreagg);
                               }}
                             >
-                              Trigger Now
+                              Edit Config
+                            </button>
+                          )}
+                          
+                          {/* Workflow actions */}
+                          {existingPreagg.strategy && existingPreagg.schedule && (
+                            <>
+                              {!existingPreagg.scheduled_workflow_url && onCreateWorkflow && (
+                                <button
+                                  className="action-btn action-btn-secondary"
+                                  type="button"
+                                  disabled={loadingAction === `workflow-${existingPreagg.id}`}
+                                  onClick={async e => {
+                                    e.stopPropagation();
+                                    setLoadingAction(`workflow-${existingPreagg.id}`);
+                                    try {
+                                      const result = await onCreateWorkflow(existingPreagg.id);
+                                      if (result?.workflow_url) {
+                                        setToastMessage(`Workflow created: ${result.workflow_url}`);
+                                        setTimeout(() => setToastMessage(null), 5000);
+                                      }
+                                    } finally {
+                                      setLoadingAction(null);
+                                    }
+                                  }}
+                                >
+                                  {loadingAction === `workflow-${existingPreagg.id}` 
+                                    ? <><span className="spinner" /> Creating...</>
+                                    : 'Create Workflow'}
+                                </button>
+                              )}
+                              {existingPreagg.scheduled_workflow_url && (
+                                <>
+                                  <a
+                                    href={existingPreagg.scheduled_workflow_url}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="action-btn action-btn-secondary"
+                                    onClick={e => e.stopPropagation()}
+                                  >
+                                    View Workflow ↗
+                                  </a>
+                                  <button
+                                    className="action-btn action-btn-secondary"
+                                    type="button"
+                                    title="Refresh workflow (re-push to scheduler)"
+                                    disabled={loadingAction === `refresh-${existingPreagg.id}`}
+                                    onClick={async e => {
+                                      e.stopPropagation();
+                                      setLoadingAction(`refresh-${existingPreagg.id}`);
+                                      try {
+                                        // Re-push the workflow
+                                        await onCreateWorkflow(existingPreagg.id, true);
+                                      } finally {
+                                        setLoadingAction(null);
+                                      }
+                                    }}
+                                  >
+                                    {loadingAction === `refresh-${existingPreagg.id}`
+                                      ? <><span className="spinner" /> Refreshing...</>
+                                      : '↻ Refresh'}
+                                  </button>
+                                </>
+                              )}
+                            </>
+                          )}
+                          
+                          {/* Backfill button */}
+                          {existingPreagg.strategy && onRunBackfill && (
+                            <button
+                              className="action-btn action-btn-secondary"
+                              type="button"
+                              onClick={e => {
+                                e.stopPropagation();
+                                // Open backfill modal
+                                const today = new Date().toISOString().split('T')[0];
+                                const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+                                setBackfillModal({
+                                  preaggId: existingPreagg.id,
+                                  startDate: weekAgo,
+                                  endDate: today,
+                                });
+                              }}
+                            >
+                              Run Backfill
+                            </button>
+                          )}
+                          
+                          {/* Legacy trigger button */}
+                          {onTriggerMaterialization && existingPreagg.id && !existingPreagg.scheduled_workflow_url && (
+                            <button
+                              className="action-btn action-btn-primary"
+                              type="button"
+                              disabled={existingPreagg.status === 'running' || loadingAction === `trigger-${existingPreagg.id}`}
+                              onClick={async e => {
+                                e.stopPropagation();
+                                setLoadingAction(`trigger-${existingPreagg.id}`);
+                                try {
+                                  await onTriggerMaterialization(existingPreagg.id);
+                                } finally {
+                                  setLoadingAction(null);
+                                }
+                              }}
+                            >
+                              {loadingAction === `trigger-${existingPreagg.id}`
+                                ? <><span className="spinner" /> Running...</>
+                                : existingPreagg.status === 'running'
+                                  ? 'Running...'
+                                  : 'Trigger Now'}
                             </button>
                           )}
                         </div>
@@ -454,7 +1083,7 @@ export function QueryOverviewPanel({
                     )}
                   </>
                 ) : (
-                  /* Not Planned - Show Configure Button */
+                  /* Not Planned - Show status only (use section-level button to plan) */
                   <div className="materialization-header">
                     <div className="materialization-status">
                       <span
@@ -465,15 +1094,6 @@ export function QueryOverviewPanel({
                       </span>
                       <span className="status-text">{statusInfo.text}</span>
                     </div>
-                    {onPlanMaterialization && (
-                      <button
-                        className="action-btn action-btn-small"
-                        type="button"
-                        onClick={() => setConfiguringCard(grainKey)}
-                      >
-                        Configure
-                      </button>
-                    )}
                   </div>
                 )}
               </div>
@@ -563,6 +1183,105 @@ export function QueryOverviewPanel({
               {sql}
             </SyntaxHighlighter>
           </div>
+        </div>
+      )}
+
+      {/* Backfill Modal */}
+      {backfillModal && (
+        <div className="backfill-modal-overlay" onClick={() => setBackfillModal(null)}>
+          <div className="backfill-modal" onClick={e => e.stopPropagation()}>
+            <div className="backfill-modal-header">
+              <h3>Run Backfill</h3>
+              <button
+                className="modal-close"
+                onClick={() => setBackfillModal(null)}
+              >
+                ×
+              </button>
+            </div>
+            <div className="backfill-modal-body">
+              <div className="backfill-form-row">
+                <label>Start Date</label>
+                <input
+                  type="date"
+                  value={backfillModal.startDate}
+                  onChange={e =>
+                    setBackfillModal(prev => ({
+                      ...prev,
+                      startDate: e.target.value,
+                    }))
+                  }
+                />
+              </div>
+              <div className="backfill-form-row">
+                <label>End Date</label>
+                <input
+                  type="date"
+                  value={backfillModal.endDate}
+                  onChange={e =>
+                    setBackfillModal(prev => ({
+                      ...prev,
+                      endDate: e.target.value,
+                    }))
+                  }
+                />
+              </div>
+            </div>
+            <div className="backfill-modal-actions">
+              <button
+                className="action-btn action-btn-secondary"
+                onClick={() => setBackfillModal(null)}
+                disabled={loadingAction === 'backfill-modal'}
+              >
+                Cancel
+              </button>
+              <button
+                className="action-btn action-btn-primary"
+                disabled={loadingAction === 'backfill-modal'}
+                onClick={async () => {
+                  setLoadingAction('backfill-modal');
+                  try {
+                    const result = await onRunBackfill(
+                      backfillModal.preaggId,
+                      backfillModal.startDate,
+                      backfillModal.endDate,
+                    );
+                    setBackfillModal(null);
+                    if (result?.job_url) {
+                      setToastMessage(
+                        <span>
+                          Backfill started:{' '}
+                          <a href={result.job_url} target="_blank" rel="noopener noreferrer">
+                            View Job ↗
+                          </a>
+                        </span>
+                      );
+                      setTimeout(() => setToastMessage(null), 10000);
+                    }
+                  } finally {
+                    setLoadingAction(null);
+                  }
+                }}
+              >
+                {loadingAction === 'backfill-modal' 
+                  ? <><span className="spinner" /> Starting...</>
+                  : 'Start Backfill'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Toast Message */}
+      {toastMessage && (
+        <div className="toast-message">
+          {toastMessage}
+          <button
+            className="toast-close"
+            onClick={() => setToastMessage(null)}
+          >
+            ×
+          </button>
         </div>
       )}
     </div>

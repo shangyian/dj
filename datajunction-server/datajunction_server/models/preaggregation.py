@@ -2,7 +2,7 @@
 Models for pre-aggregation API requests and responses.
 """
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
@@ -123,10 +123,17 @@ class PreAggregationInfo(BaseModel):
     schedule: Optional[str] = None
     lookback_window: Optional[str] = None
 
+    # Workflow state (persisted)
+    scheduled_workflow_url: Optional[str] = None  # URL to recurring workflow definition
+    workflow_status: Optional[str] = None  # "active" | "paused" | None
+
     # Availability (derived from AvailabilityState)
-    status: str = "pending"  # "pending" | "active"
+    status: str = "pending"  # "pending" | "running" | "active"
     materialized_table_ref: Optional[str] = None
     max_partition: Optional[List[str]] = None
+
+    # Workflow info (transient - from recent operations)
+    workflow_urls: Optional[List[str]] = None
 
     # Metadata
     created_at: datetime
@@ -264,6 +271,128 @@ class PreAggMaterializationResponse(BaseModel):
         default_factory=list,
         description="Output table names",
     )
+
+
+# =============================================================================
+# Workflow Management Models
+# =============================================================================
+
+
+class CreateWorkflowRequest(BaseModel):
+    """Request model for creating a scheduled workflow."""
+
+    activate: bool = Field(
+        default=True,
+        description="Whether to activate the workflow immediately",
+    )
+
+
+class WorkflowResponse(BaseModel):
+    """Response model for workflow operations."""
+
+    workflow_url: Optional[str] = Field(
+        default=None,
+        description="URL to the scheduled workflow definition",
+    )
+    status: str = Field(
+        description="Workflow status: 'active', 'paused', or 'none'",
+    )
+    message: Optional[str] = Field(
+        default=None,
+        description="Additional information about the operation",
+    )
+
+
+# =============================================================================
+# Backfill Models
+# =============================================================================
+
+
+class BackfillRequest(BaseModel):
+    """Request model for running a backfill."""
+
+    start_date: date = Field(
+        description="Start date for backfill (inclusive)",
+    )
+    end_date: Optional[date] = Field(
+        default=None,
+        description="End date for backfill (inclusive). Defaults to today.",
+    )
+
+
+class BackfillResponse(BaseModel):
+    """Response model for backfill operation."""
+
+    job_url: str = Field(
+        description="URL to the backfill job",
+    )
+    start_date: date = Field(
+        description="Start date of the backfill",
+    )
+    end_date: date = Field(
+        description="End date of the backfill",
+    )
+    status: str = Field(
+        default="running",
+        description="Job status",
+    )
+
+
+# =============================================================================
+# Query Service Input Models (sent to dj-query)
+# =============================================================================
+
+
+class WorkflowInput(BaseModel):
+    """Input for creating a scheduled workflow in query service."""
+
+    preagg_id: int = Field(description="Pre-aggregation ID")
+    output_table: str = Field(description="Target table name")
+    node: NodeNameVersion = Field(description="Source node name and version")
+    grain: List[str] = Field(description="List of grain columns")
+    measures: List[Dict[str, Any]] = Field(
+        description="List of measure definitions (MetricComponent dicts)"
+    )
+    query: str = Field(description="SQL query for materialization")
+    columns: List[ColumnMetadata] = Field(description="Output column metadata")
+    temporal_partitions: List[TemporalPartitionColumn] = Field(
+        default_factory=list,
+        description="Temporal partition columns",
+    )
+    strategy: MaterializationStrategy = Field(description="Materialization strategy")
+    schedule: str = Field(description="Cron schedule")
+    lookback_window: Optional[str] = Field(
+        default=None,
+        description="Lookback window for incremental",
+    )
+    timezone: Optional[str] = Field(
+        default="US/Pacific",
+        description="Timezone for scheduling",
+    )
+    druid_spec: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Druid ingestion spec",
+    )
+    activate: bool = Field(
+        default=True,
+        description="Whether to activate immediately",
+    )
+
+
+class BackfillInput(BaseModel):
+    """
+    Simplified input for running a backfill in query service.
+    
+    The workflow must already exist (created via WorkflowInput).
+    Query Service derives workflow names from output_table.
+    
+    Note: For single-date runs, use same start_date and end_date.
+    """
+
+    preagg_id: int = Field(description="Pre-aggregation ID")
+    output_table: str = Field(description="Output table name (used to derive workflow name)")
+    start_date: date = Field(description="Backfill start date")
+    end_date: date = Field(description="Backfill end date")
 
 
 # Forward reference update

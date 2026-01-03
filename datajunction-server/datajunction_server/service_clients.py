@@ -2,7 +2,7 @@
 
 import logging
 from http import HTTPStatus
-from typing import TYPE_CHECKING, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Dict, List, Optional, Union, Any
 from urllib.parse import urljoin
 
 import requests
@@ -44,7 +44,8 @@ class RequestsSessionWithEndpoint(requests.Session):
 
     def __init__(self, endpoint: str = None, retry_strategy: Retry = None):
         super().__init__()
-        self.endpoint = endpoint
+        self.endpoint = "http://host.docker.internal:8002"
+        print("DEBUG: endpoint", endpoint)
         self.mount("http://", HTTPAdapter(max_retries=retry_strategy))
         self.mount("https://", HTTPAdapter(max_retries=retry_strategy))
 
@@ -360,11 +361,130 @@ class QueryServiceClient:
             return MaterializationInfo(urls=[], output_tables=[])
         result = response.json()
         _logger.info(
-            "[DJQS] Scheduled pre-agg materialization for preagg_id=%s, output_table=%s",
+            "[DJQS] Scheduled pre-agg materialization for preagg_id=%s, output_table=%s, "
+            "urls=%s, output_tables=%s",
             materialization_input.preagg_id,
             materialization_input.output_table,
+            result.get("urls", []),
+            result.get("output_tables", []),
         )
         return MaterializationInfo(**result)
+
+    def create_preagg_workflow(
+        self,
+        workflow_input: "WorkflowInput",
+        request_headers: Optional[Dict[str, str]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Create a scheduled workflow for a pre-aggregation.
+
+        Returns:
+            Dict with 'workflow_url' and 'status'
+        """
+        from datajunction_server.models.preaggregation import WorkflowInput
+
+        response = self.requests_session.post(
+            "/preaggs/workflow",
+            json=workflow_input.model_dump(mode="json"),
+            headers={
+                **self.requests_session.headers,
+                **QueryServiceClient.filtered_headers(request_headers),
+            }
+            if request_headers
+            else self.requests_session.headers,
+            timeout=30,
+        )
+        if response.status_code not in (200, 201):
+            _logger.exception(
+                "[DJQS] Failed to create workflow for preagg_id=%s: %s",
+                workflow_input.preagg_id,
+                response.text,
+                exc_info=True,
+            )
+            raise Exception(f"Query service error: {response.text}")
+        result = response.json()
+        _logger.info(
+            "[DJQS] Created workflow for preagg_id=%s, workflow_url=%s",
+            workflow_input.preagg_id,
+            result.get("workflow_url"),
+        )
+        return result
+
+    def deactivate_preagg_workflow(
+        self,
+        preagg_id: int,
+        request_headers: Optional[Dict[str, str]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Deactivate a pre-aggregation's scheduled workflow.
+
+        Returns:
+            Dict with 'status'
+        """
+        response = self.requests_session.delete(
+            f"/preaggs/{preagg_id}/workflow",
+            headers={
+                **self.requests_session.headers,
+                **QueryServiceClient.filtered_headers(request_headers),
+            }
+            if request_headers
+            else self.requests_session.headers,
+            timeout=20,
+        )
+        if response.status_code not in (200, 201, 204):
+            _logger.exception(
+                "[DJQS] Failed to deactivate workflow for preagg_id=%s: %s",
+                preagg_id,
+                response.text,
+                exc_info=True,
+            )
+            raise Exception(f"Query service error: {response.text}")
+        result = response.json() if response.text else {}
+        _logger.info(
+            "[DJQS] Deactivated workflow for preagg_id=%s",
+            preagg_id,
+        )
+        return result
+
+    def run_preagg_backfill(
+        self,
+        backfill_input: "BackfillInput",
+        request_headers: Optional[Dict[str, str]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Run a backfill for a pre-aggregation.
+
+        Returns:
+            Dict with 'job_url'
+        """
+        from datajunction_server.models.preaggregation import BackfillInput
+
+        response = self.requests_session.post(
+            "/preaggs/backfill",
+            json=backfill_input.model_dump(mode="json"),
+            headers={
+                **self.requests_session.headers,
+                **QueryServiceClient.filtered_headers(request_headers),
+            }
+            if request_headers
+            else self.requests_session.headers,
+            timeout=30,
+        )
+        if response.status_code not in (200, 201):
+            _logger.exception(
+                "[DJQS] Failed to run backfill for preagg_id=%s: %s",
+                backfill_input.preagg_id,
+                response.text,
+                exc_info=True,
+            )
+            raise Exception(f"Query service error: {response.text}")
+        result = response.json()
+        _logger.info(
+            "[DJQS] Started backfill for preagg_id=%s, job_url=%s",
+            backfill_input.preagg_id,
+            result.get("job_url"),
+        )
+        return result
 
     def deactivate_materialization(
         self,

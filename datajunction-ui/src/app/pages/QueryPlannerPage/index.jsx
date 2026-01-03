@@ -51,6 +51,9 @@ export function QueryPlannerPage() {
   // Materialization state - map of grain_key -> pre-agg info
   const [plannedPreaggs, setPlannedPreaggs] = useState({});
 
+  // Materialization error state
+  const [materializationError, setMaterializationError] = useState(null);
+
   // Initialize selection from URL params on mount
   useEffect(() => {
     const params = new URLSearchParams(location.search);
@@ -205,23 +208,64 @@ export function QueryPlannerPage() {
           ),
         );
 
-        // Build lookup map by normalized grain key
-        // Key format: "parent_name|short_grain_col1,short_grain_col2"
-        const newPreaggs = {};
+        // Collect all pre-aggs by node
+        const allPreaggsByNode = {};
         preaggResults.forEach(result => {
-          // API returns paginated response with `items` array
           const preaggs = result.items || result.pre_aggregations || [];
           if (Array.isArray(preaggs)) {
             preaggs.forEach(preagg => {
-              // Normalize grain_columns to short names for matching
-              const grainKey = `${preagg.node_name}|${normalizeGrain(
-                preagg.grain_columns,
-              )}`;
-              // Only keep the first (or latest) pre-agg for each grain key
-              if (!newPreaggs[grainKey]) {
-                newPreaggs[grainKey] = preagg;
+              if (!allPreaggsByNode[preagg.node_name]) {
+                allPreaggsByNode[preagg.node_name] = [];
               }
+              allPreaggsByNode[preagg.node_name].push(preagg);
             });
+          }
+        });
+
+        // For each grain group, find the best matching pre-agg
+        // Priority: exact match > compatible (superset grain + all measures)
+        const newPreaggs = {};
+        
+        measuresResult.grain_groups.forEach(gg => {
+          const grainKey = `${gg.parent_name}|${normalizeGrain(gg.grain)}`;
+          const nodePreaggs = allPreaggsByNode[gg.parent_name] || [];
+          const requestedGrain = new Set(gg.grain.map(g => g.split('.').pop().toLowerCase()));
+          const requestedMeasures = new Set(
+            (gg.components || []).map(c => c.name?.toLowerCase()).filter(Boolean)
+          );
+          
+          // First: try exact grain match
+          let match = nodePreaggs.find(p => {
+            const pGrain = new Set(normalizeGrain(p.grain_columns).split(',').map(s => s.toLowerCase()));
+            return pGrain.size === requestedGrain.size && 
+                   [...requestedGrain].every(g => pGrain.has(g));
+          });
+          
+          // Second: try compatible match (superset grain containing all requested dims + measures)
+          if (!match) {
+            match = nodePreaggs.find(p => {
+              const pGrain = new Set(normalizeGrain(p.grain_columns).split(',').map(s => s.toLowerCase()));
+              const pMeasures = new Set(
+                (p.measures || []).map(m => m.name?.toLowerCase()).filter(Boolean)
+              );
+              
+              // Check if pre-agg grain contains all requested dimensions
+              const grainCovers = [...requestedGrain].every(g => pGrain.has(g));
+              // Check if pre-agg measures contain all requested measures
+              const measuresCovers = requestedMeasures.size === 0 || 
+                [...requestedMeasures].every(m => pMeasures.has(m));
+              
+              return grainCovers && measuresCovers;
+            });
+            
+            // Mark as compatible (not exact match) so UI can indicate this
+            if (match) {
+              match = { ...match, _isCompatible: true };
+            }
+          }
+          
+          if (match) {
+            newPreaggs[grainKey] = match;
           }
         });
 
@@ -253,10 +297,13 @@ export function QueryPlannerPage() {
   }, []);
 
   // Handle planning/saving a new materialization configuration
+  // Note: This creates pre-aggs for ALL grain groups with the same settings
   const handlePlanMaterialization = useCallback(
     async (grainGroup, config) => {
+      setMaterializationError(null); // Clear any previous error
+
       try {
-        // Call the plan endpoint with current metrics/dims and config
+        // Step 1: Create the pre-agg records with config
         const result = await djClient.planPreaggs(
           selectedMetrics,
           selectedDimensions,
@@ -265,44 +312,168 @@ export function QueryPlannerPage() {
           config.lookbackWindow,
         );
 
-        // API returns paginated response with `items` or `pre_aggregations`
-        const preaggs = result.items || result.pre_aggregations || [];
-        if (preaggs.length > 0) {
-          // Update our local state with the planned pre-aggs
-          const newPreaggs = { ...plannedPreaggs };
-          preaggs.forEach(preagg => {
-            // Use normalized grain for consistent key matching
-            const grainKey = `${preagg.node_name}|${normalizeGrain(
-              preagg.grain_columns,
-            )}`;
-            newPreaggs[grainKey] = preagg;
+        // Check for error in response
+        if (result._error || result.message || result.detail) {
+          const errorMsg =
+            result.message || result.detail || 'Failed to plan pre-aggregations';
+          setMaterializationError(errorMsg);
+          throw new Error(errorMsg);
+        }
+
+        // Get the created pre-aggs (API returns `preaggs`, list endpoint returns `items`)
+        const preaggs = result.preaggs || result.items || result.pre_aggregations || [];
+        
+        // Update local state
+        const newPreaggs = { ...plannedPreaggs };
+        preaggs.forEach(preagg => {
+          const grainKey = `${preagg.node_name}|${normalizeGrain(
+            preagg.grain_columns,
+          )}`;
+          newPreaggs[grainKey] = preagg;
+        });
+        setPlannedPreaggs(newPreaggs);
+
+        // Step 2: Create scheduled workflows and optionally run backfills
+        if (preaggs.length > 0 && config.schedule) {
+          const workflowPromises = [];
+          const backfillPromises = [];
+          
+          for (const preagg of preaggs) {
+            // Always create the scheduled workflow when a schedule is provided
+            workflowPromises.push(
+              djClient.createPreaggWorkflow(preagg.id, true).catch(err => {
+                console.error(`Failed to create workflow for preagg ${preagg.id}:`, err);
+                return null;
+              })
+            );
+          }
+        
+          // First: Wait for all workflows to be created
+          const workflowResults = await Promise.all(workflowPromises);
+          
+          // Second: Only after workflows are created, start backfills
+          for (const preagg of preaggs) {
+            if (config.runBackfill && config.backfillFrom && config.backfillTo) {
+              backfillPromises.push(
+                djClient.runPreaggBackfill(
+                  preagg.id, 
+                  config.backfillFrom, 
+                  config.backfillTo
+                ).catch(err => {
+                  console.error(`Failed to run backfill for preagg ${preagg.id}:`, err);
+                  return null;
+                })
+              );
+            }
+          }
+          
+          // Wait for all backfills to complete
+          const backfillResults = await Promise.all(backfillPromises);
+          
+          // Update state with workflow URLs
+          const updatedPreaggs = { ...newPreaggs };
+          preaggs.forEach((preagg, idx) => {
+            const grainKey = `${preagg.node_name}|${normalizeGrain(preagg.grain_columns)}`;
+            const workflowResult = workflowResults[idx];
+            if (workflowResult?.workflow_url) {
+              updatedPreaggs[grainKey] = {
+                ...updatedPreaggs[grainKey],
+                scheduled_workflow_url: workflowResult.workflow_url,
+                workflow_status: workflowResult.status,
+              };
+            }
           });
-          setPlannedPreaggs(newPreaggs);
+          setPlannedPreaggs(updatedPreaggs);
+          
+          // Show toast with backfill info
+          const successfulBackfills = backfillResults.filter(r => r?.job_url);
+          if (successfulBackfills.length > 0) {
+            console.log('Backfills started:', successfulBackfills);
+          }
         }
 
         return result;
       } catch (err) {
         console.error('Failed to plan materialization:', err);
+        const errorMsg = err.message || 'Failed to plan materialization';
+        setMaterializationError(errorMsg);
         throw err;
       }
     },
     [djClient, selectedMetrics, selectedDimensions, plannedPreaggs],
   );
 
+  // Handle updating config for a single existing pre-agg
+  const handleUpdateConfig = useCallback(
+    async (preaggId, config) => {
+      setMaterializationError(null);
+      try {
+        const result = await djClient.updatePreaggConfig(
+          preaggId,
+          config.strategy,
+          config.schedule,
+          config.lookbackWindow,
+        );
+
+        if (result._error || result.message || result.detail) {
+          const errorMsg =
+            result.message || result.detail || 'Failed to update config';
+          setMaterializationError(errorMsg);
+          throw new Error(errorMsg);
+        }
+
+        // Update the specific pre-agg in our state
+        setPlannedPreaggs(prev => {
+          const updated = { ...prev };
+          for (const key in updated) {
+            if (updated[key].id === preaggId) {
+              updated[key] = { ...updated[key], ...result };
+              break;
+            }
+          }
+          return updated;
+        });
+
+        return result;
+      } catch (err) {
+        console.error('Failed to update config:', err);
+        const errorMsg = err.message || 'Failed to update config';
+        setMaterializationError(errorMsg);
+        throw err;
+      }
+    },
+    [djClient],
+  );
+
   // Handle triggering materialization for a specific pre-agg
   const handleTriggerMaterialization = useCallback(
     async preaggId => {
+      setMaterializationError(null); // Clear any previous error
       try {
         const result = await djClient.materializePreagg(preaggId);
 
+        // Check for error in response (API returns _error flag or message/detail)
+        if (result._error || result.message || result.detail) {
+          const errorMsg = result.message || result.detail || 'Failed to trigger materialization';
+          setMaterializationError(errorMsg);
+          return;
+        }
+
+        console.log('[QueryPlanner] materializePreagg result:', result);
+        console.log('[QueryPlanner] workflow_urls:', result.workflow_urls);
+
         if (result.id) {
-          // Update the pre-agg status in our local state
+          // Update the pre-agg in our local state with the response data
+          // which includes status='running' and workflow_urls
           setPlannedPreaggs(prev => {
             const updated = { ...prev };
-            // Find and update the matching pre-agg
+            // Find and update the matching pre-agg by ID
             for (const key in updated) {
               if (updated[key].id === preaggId) {
-                updated[key] = { ...updated[key], status: 'running' };
+                updated[key] = {
+                  ...updated[key],
+                  ...result, // Merge in all returned fields including status and workflow_urls
+                };
                 break;
               }
             }
@@ -311,7 +482,96 @@ export function QueryPlannerPage() {
         }
       } catch (err) {
         console.error('Failed to trigger materialization:', err);
-        // Could add error state/toast here
+        const errorMsg = err.message || 'Failed to trigger materialization';
+        setMaterializationError(errorMsg);
+      }
+    },
+    [djClient],
+  );
+
+  // Handle creating a scheduled workflow for a pre-agg
+  const handleCreateWorkflow = useCallback(
+    async (preaggId, activate = true) => {
+      setMaterializationError(null);
+      try {
+        const result = await djClient.createPreaggWorkflow(preaggId, activate);
+
+        if (result._error || result.message || result.detail) {
+          const errorMsg = result.message || result.detail || 'Failed to create workflow';
+          setMaterializationError(errorMsg);
+          return null;
+        }
+
+        // Update the pre-agg with workflow info
+        setPlannedPreaggs(prev => {
+          const updated = { ...prev };
+          for (const key in updated) {
+            if (updated[key].id === preaggId) {
+              updated[key] = {
+                ...updated[key],
+                scheduled_workflow_url: result.workflow_url,
+                workflow_status: result.status,
+              };
+              break;
+            }
+          }
+          return updated;
+        });
+
+        return result;
+      } catch (err) {
+        console.error('Failed to create workflow:', err);
+        setMaterializationError(err.message || 'Failed to create workflow');
+        return null;
+      }
+    },
+    [djClient],
+  );
+
+  // Handle running a backfill for a pre-agg
+  const handleRunBackfill = useCallback(
+    async (preaggId, startDate, endDate) => {
+      setMaterializationError(null);
+      try {
+        const result = await djClient.runPreaggBackfill(preaggId, startDate, endDate);
+
+        if (result._error || result.message || result.detail) {
+          const errorMsg = result.message || result.detail || 'Failed to run backfill';
+          setMaterializationError(errorMsg);
+          return null;
+        }
+
+        // Return the job URL so the UI can display it
+        return result;
+      } catch (err) {
+        console.error('Failed to run backfill:', err);
+        setMaterializationError(err.message || 'Failed to run backfill');
+        return null;
+      }
+    },
+    [djClient],
+  );
+
+  // Handle running an ad-hoc job for a pre-agg (uses backfill with same start/end date)
+  const handleRunAdhoc = useCallback(
+    async (preaggId, partitionDate) => {
+      setMaterializationError(null);
+      try {
+        // Use backfill endpoint with same start and end date for single-date runs
+        const result = await djClient.runPreaggBackfill(preaggId, partitionDate, partitionDate);
+
+        if (result._error || result.message || result.detail) {
+          const errorMsg = result.message || result.detail || 'Failed to run ad-hoc job';
+          setMaterializationError(errorMsg);
+          return null;
+        }
+
+        // Return the job URL so the UI can display it
+        return result;
+      } catch (err) {
+        console.error('Failed to run ad-hoc job:', err);
+        setMaterializationError(err.message || 'Failed to run ad-hoc job');
+        return null;
       }
     },
     [djClient],
@@ -399,7 +659,13 @@ export function QueryPlannerPage() {
               selectedDimensions={selectedDimensions}
               plannedPreaggs={plannedPreaggs}
               onPlanMaterialization={handlePlanMaterialization}
+              onUpdateConfig={handleUpdateConfig}
               onTriggerMaterialization={handleTriggerMaterialization}
+              onCreateWorkflow={handleCreateWorkflow}
+              onRunBackfill={handleRunBackfill}
+              onRunAdhoc={handleRunAdhoc}
+              materializationError={materializationError}
+              onClearError={() => setMaterializationError(null)}
             />
           )}
         </aside>

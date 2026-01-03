@@ -38,6 +38,8 @@ async def build_measures_sql(
     filters: list[str] | None = None,
     dialect: Dialect = Dialect.SPARK,
     use_materialized: bool = True,
+    include_temporal_filters: bool = False,
+    lookback_window: str | None = None,
 ) -> GeneratedMeasuresSQL:
     """
     Build measures SQL for a set of metrics, dimensions, and filters.
@@ -56,6 +58,11 @@ async def build_measures_sql(
         use_materialized: If True (default), use materialized tables when available.
             Set to False when generating SQL for materialization refresh to avoid
             circular references.
+        include_temporal_filters: If True, adds DJ_LOGICAL_TIMESTAMP() filters on
+            temporal partition columns of source nodes. Used for incremental
+            materialization to ensure partition pruning.
+        lookback_window: Lookback window for temporal filters (e.g., "3 DAY").
+            If not provided, filters to exactly the logical timestamp partition.
 
     Returns:
         GeneratedMeasuresSQL with one GrainGroupSQL per aggregation level,
@@ -68,6 +75,8 @@ async def build_measures_sql(
         filters=filters or [],
         dialect=dialect,
         use_materialized=use_materialized,
+        include_temporal_filters=include_temporal_filters,
+        lookback_window=lookback_window,
     )
 
     # Load all required nodes (single DB round trip)

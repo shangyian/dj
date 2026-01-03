@@ -1689,7 +1689,17 @@ export const DataJunctionAPI = {
       },
       body: JSON.stringify(body),
     });
-    return await response.json();
+    const result = await response.json();
+    // If there's an error, include the status for the caller to check
+    if (!response.ok) {
+      return {
+        ...result,
+        _error: true,
+        _status: response.status,
+        message: result.message || result.detail || 'Failed to plan pre-aggregations',
+      };
+    }
+    return result;
   },
 
   // Get a specific pre-aggregation by ID
@@ -1710,6 +1720,115 @@ export const DataJunctionAPI = {
         'Content-Type': 'application/json',
       },
     });
-    return await response.json();
+    const result = await response.json();
+    // If there's an error, include the status for the caller to check
+    if (!response.ok) {
+      return {
+        ...result,
+        _error: true,
+        _status: response.status,
+        message: result.message || result.detail || 'Materialization failed',
+      };
+    }
+    return result;
+  },
+
+  // Update a single pre-aggregation's config
+  updatePreaggConfig: async function (
+    preaggId,
+    strategy = null,
+    schedule = null,
+    lookbackWindow = null,
+  ) {
+    const body = {};
+    if (strategy) body.strategy = strategy;
+    if (schedule) body.schedule = schedule;
+    if (lookbackWindow) body.lookback_window = lookbackWindow;
+
+    const response = await fetch(`${DJ_URL}/preaggs/${preaggId}/config`, {
+      method: 'PATCH',
+      credentials: 'include',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+    });
+    const result = await response.json();
+    if (!response.ok) {
+      return {
+        ...result,
+        _error: true,
+        _status: response.status,
+        message: result.message || result.detail || 'Failed to update config',
+      };
+    }
+    return result;
+  },
+
+  // Create a scheduled workflow for a pre-aggregation
+  createPreaggWorkflow: async function (preaggId, activate = true) {
+    const response = await fetch(`${DJ_URL}/preaggs/${preaggId}/workflow`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ activate }),
+    });
+    const result = await response.json();
+    if (!response.ok) {
+      return {
+        ...result,
+        _error: true,
+        _status: response.status,
+        message: result.message || result.detail || 'Failed to create workflow',
+      };
+    }
+    return result;
+  },
+
+  // Deactivate (pause) a pre-aggregation's workflow
+  deactivatePreaggWorkflow: async function (preaggId) {
+    const response = await fetch(`${DJ_URL}/preaggs/${preaggId}/workflow`, {
+      method: 'DELETE',
+      credentials: 'include',
+    });
+    const result = await response.json();
+    if (!response.ok) {
+      return {
+        ...result,
+        _error: true,
+        _status: response.status,
+        message: result.message || result.detail || 'Failed to deactivate workflow',
+      };
+    }
+    return result;
+  },
+
+  // Run a backfill for a pre-aggregation
+  runPreaggBackfill: async function (preaggId, startDate, endDate = null) {
+    const body = {
+      start_date: startDate,
+    };
+    if (endDate) body.end_date = endDate;
+
+    const response = await fetch(`${DJ_URL}/preaggs/${preaggId}/backfill`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+    });
+    const result = await response.json();
+    if (!response.ok) {
+      return {
+        ...result,
+        _error: true,
+        _status: response.status,
+        message: result.message || result.detail || 'Failed to run backfill',
+      };
+    }
+    return result;
   },
 };

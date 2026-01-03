@@ -383,9 +383,48 @@ def build_select_ast(
 
     from_clause = ast.From(relations=[relation])
 
+    # Inject temporal partition filters for incremental materialization
+    # This ensures partition pruning at the source level
+    all_filters = list(filters or [])
+    temporal_filter_ast: Optional[ast.Expression] = None
+
+    if ctx.include_temporal_filters and parent_node.current:
+        temporal_cols = parent_node.current.temporal_partition_columns()
+        if temporal_cols:
+            # Use the first temporal partition column
+            temporal_col = temporal_cols[0]
+            if temporal_col.partition:
+                # Generate the temporal expression using partition metadata
+                # For exact partition: dateint = CAST(DATE_FORMAT(...), 'yyyyMMdd') AS INT)
+                # For lookback: dateint BETWEEN start_expr AND end_expr
+                col_ref = make_column_ref(temporal_col.name, main_alias)
+
+                # Get the end expression (current logical timestamp)
+                end_expr = temporal_col.partition.temporal_expression(interval=None)
+
+                if ctx.lookback_window and end_expr:
+                    # For lookback, generate BETWEEN filter
+                    # Start = DJ_LOGICAL_TIMESTAMP() - interval
+                    start_expr = temporal_col.partition.temporal_expression(
+                        interval=ctx.lookback_window,
+                    )
+                    if start_expr:
+                        temporal_filter_ast = ast.Between(
+                            expr=col_ref,
+                            low=start_expr,
+                            high=end_expr,
+                        )
+                elif end_expr:
+                    # No lookback - exact partition match
+                    temporal_filter_ast = ast.BinaryOp(
+                        left=col_ref,
+                        right=end_expr,
+                        op=ast.BinaryOpKind.Eq,
+                    )
+
     # Build WHERE clause from filters
     where_clause: Optional[ast.Expression] = None
-    if filters:
+    if all_filters:
         # Build column alias mapping for filter resolution
         # Maps dimension refs to their table-qualified column names
         filter_column_aliases: dict[str, str] = {}
@@ -418,7 +457,7 @@ def build_select_ast(
         # Note: We don't pass a cte_alias because the column references are already
         # qualified with their table aliases during dimension resolution
         where_clause = parse_and_resolve_filters(
-            filters,
+            all_filters,
             filter_column_aliases,
             cte_alias=None,  # Don't add table prefix - we'll handle it per column
         )
@@ -431,6 +470,13 @@ def build_select_ast(
                 main_alias,
                 dim_aliases,
             )
+
+    # Combine user filters with temporal filter
+    if temporal_filter_ast:
+        if where_clause:
+            where_clause = ast.BinaryOp.And(where_clause, temporal_filter_ast)
+        else:
+            where_clause = temporal_filter_ast
 
     # Build SELECT
     select = ast.Select(

@@ -39,6 +39,11 @@ class BuildContext:
     # Set to False when building SQL for materialization to avoid circular references
     use_materialized: bool = True
 
+    # Temporal filter settings for incremental materialization
+    # When True, adds DJ_LOGICAL_TIMESTAMP() filters on temporal partition columns
+    include_temporal_filters: bool = False
+    lookback_window: str | None = None
+
     # Loaded data (populated by load_nodes)
     nodes: dict[str, Node] = field(default_factory=dict)
 
