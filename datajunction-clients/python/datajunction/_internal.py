@@ -168,18 +168,13 @@ class DJClient:
         else:  # pragma: no cover
             self._session = requests_session
         self._timeout = timeout
-        self._compat_checked = False
+        self.check_server_compatibility()
 
-    def _check_server_compatibility(self) -> Optional[str]:
+    def check_server_compatibility(self) -> None:
         """
-        Check that this client meets the server's minimum version requirement.
-        Returns a warning string if outdated, None if compatible or if the check
-        cannot be performed (old server without /info/).
-        Called lazily on the first real request.
+        Warn if this client is older than the server's minimum required version.
+        Silently ignored if the server doesn't expose /info/ (old server).
         """
-        if self._compat_checked:
-            return None
-        self._compat_checked = True
         try:
             from datajunction import __version__
 
@@ -189,13 +184,16 @@ class DJClient:
             if min_required and tuple(int(x) for x in __version__.split(".")) < tuple(
                 int(x) for x in min_required.split(".")
             ):
-                return (
+                import warnings
+
+                warnings.warn(
                     f"Client v{__version__} is too old for this server "
-                    f"(requires >= {min_required}). Run: pip install -U datajunction"
+                    f"(requires >= {min_required}). Run: pip install -U datajunction",
+                    UserWarning,
+                    stacklevel=3,
                 )
         except Exception:
             pass
-        return None
 
     #
     # Authentication

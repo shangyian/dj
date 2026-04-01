@@ -258,9 +258,6 @@ class DeploymentService:
         Push a local project to a namespace.
         """
         console = console or self.console
-        compat_warning = self.client._check_server_compatibility()
-        if compat_warning:
-            console.print(f"[yellow]⚠  {compat_warning}[/yellow]")
         console.print(f"[bold]Pushing project from:[/bold] {source_path}")
 
         deployment_spec = self._reconstruct_deployment_spec(source_path)
@@ -345,11 +342,7 @@ class DeploymentService:
         """
         deployment_spec = self._reconstruct_deployment_spec(source_path)
         deployment_spec["namespace"] = namespace or deployment_spec.get("namespace")
-        result = self.client.get_deployment_impact(deployment_spec)
-        compat_warning = self.client._check_server_compatibility()
-        if compat_warning:
-            result["_compat_warning"] = compat_warning
-        return result
+        return self.client.get_deployment_impact(deployment_spec)
 
     @staticmethod
     def read_yaml_file(path: str | Path) -> dict[str, Any]:
