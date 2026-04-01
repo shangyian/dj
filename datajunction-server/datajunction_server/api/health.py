@@ -9,10 +9,9 @@ from pydantic.main import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from datajunction_server import __version__
 from datajunction_server.enum import StrEnum
-from datajunction_server.utils import get_session, get_settings
-
-settings = get_settings()
+from datajunction_server.utils import get_session
 
 router = APIRouter(tags=["health"])
 
@@ -47,6 +46,22 @@ async def database_health(session: AsyncSession) -> HealthcheckStatus:
         return health_status
     except Exception:  # pragma: no cover
         return HealthcheckStatus.FAILED  # pragma: no cover
+
+
+class ServerInfo(BaseModel):
+    """Server version and compatibility information."""
+
+    server_version: str
+    min_client_version: str
+
+
+@router.get("/info/", response_model=ServerInfo)
+async def server_info() -> ServerInfo:
+    """Return server version and minimum compatible client version."""
+    return ServerInfo(
+        server_version=__version__,
+        min_client_version=__version__,
+    )
 
 
 @router.get("/health/", response_model=List[HealthCheck])
