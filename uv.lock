@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 2
 requires-python = ">=3.10, <3.12"
 resolution-markers = [
     "python_full_version < '3.11'",
@@ -591,6 +591,7 @@ source = { editable = "datajunction-clients/python" }
 dependencies = [
     { name = "alive-progress" },
     { name = "httpx" },
+    { name = "packaging" },
     { name = "pytest-xdist" },
     { name = "pyyaml" },
     { name = "requests" },
@@ -636,6 +637,7 @@ requires-dist = [
     { name = "alive-progress", specifier = ">=3.1.2" },
     { name = "httpx", specifier = ">=0.27.0" },
     { name = "mcp", marker = "extra == 'mcp'", specifier = ">=1.0.0" },
+    { name = "packaging", specifier = ">=21.0" },
     { name = "pandas", marker = "extra == 'pandas'", specifier = ">=2.0.2" },
     { name = "plotext", marker = "extra == 'mcp'", specifier = ">=5.2.8" },
     { name = "pydantic", marker = "extra == 'mcp'", specifier = ">=2.0" },

@@ -282,10 +282,13 @@ class DJCLI:
 
         try:
             impact = self.deployment_service.get_impact(directory, namespace=namespace)
+            compat_warning = impact.pop("_compat_warning", None)
 
             if format == "json":
                 print(json.dumps(impact, indent=2))
             else:
+                if compat_warning:
+                    console.print(f"[yellow]⚠  {compat_warning}[/yellow]\n")
                 console.print(f"[bold]Analyzing deployment from:[/bold] {directory}")
                 console.print()
                 display_impact_analysis(impact, console=console)

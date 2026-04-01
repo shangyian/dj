@@ -1002,3 +1002,118 @@ def test_djdeploymentfailure_str_with_no_errors():
     exc = DJDeploymentFailure(project_name="my.namespace", errors=[])
     assert str(exc) == exc.message
     assert "my.namespace" in str(exc)
+
+
+class TestServerCompatibility:
+    """Tests for _check_server_compatibility in DJClient."""
+
+    def test_compatible_client_returns_none(self, monkeypatch):
+        """When client version meets min_client_version, returns None."""
+        from datajunction._internal import DJClient
+
+        client = DJClient.__new__(DJClient)
+        client._compat_checked = False
+        session = MagicMock()
+        session.get.return_value.json.return_value = {
+            "server_version": "0.0.111",
+            "min_client_version": "0.0.0",
+        }
+        client._session = session
+        monkeypatch.setattr("datajunction.__version__", "0.0.111")
+
+        assert client._check_server_compatibility() is None
+
+    def test_outdated_client_returns_warning(self, monkeypatch):
+        """When client version is below min_client_version, returns a warning string."""
+        from datajunction._internal import DJClient
+
+        client = DJClient.__new__(DJClient)
+        client._compat_checked = False
+        session = MagicMock()
+        session.get.return_value.json.return_value = {
+            "server_version": "0.0.200",
+            "min_client_version": "0.0.150",
+        }
+        client._session = session
+        monkeypatch.setattr("datajunction.__version__", "0.0.100")
+
+        warning = client._check_server_compatibility()
+        assert warning is not None
+        assert "0.0.100" in warning
+        assert "0.0.150" in warning
+        assert "pip install" in warning
+
+    def test_check_only_runs_once(self, monkeypatch):
+        """Second call is a no-op (already checked)."""
+        from datajunction._internal import DJClient
+
+        client = DJClient.__new__(DJClient)
+        client._compat_checked = False
+        session = MagicMock()
+        session.get.return_value.json.return_value = {
+            "server_version": "0.0.111",
+            "min_client_version": "0.0.0",
+        }
+        client._session = session
+        monkeypatch.setattr("datajunction.__version__", "0.0.111")
+
+        client._check_server_compatibility()
+        client._check_server_compatibility()
+        session.get.assert_called_once()
+
+    def test_server_without_info_endpoint_is_silently_ignored(self):
+        """If the /info/ request raises (old server), returns None gracefully."""
+        from datajunction._internal import DJClient
+
+        client = DJClient.__new__(DJClient)
+        client._compat_checked = False
+        session = MagicMock()
+        session.get.side_effect = Exception("connection error")
+        client._session = session
+
+        assert client._check_server_compatibility() is None
+
+    def test_push_shows_compat_warning(self, monkeypatch, tmp_path):
+        """push() prints the compat warning when the client is outdated."""
+        (tmp_path / "dj.yaml").write_text(yaml.safe_dump({"namespace": "foo"}))
+        (tmp_path / "foo.yaml").write_text(yaml.safe_dump({"name": "foo.bar"}))
+
+        client = MagicMock()
+        client._check_server_compatibility.return_value = (
+            "Client v0.0.1 is too old (requires >= 0.0.50)"
+        )
+        client.deploy.return_value = {
+            "uuid": "abc",
+            "status": "success",
+            "results": [],
+            "namespace": "foo",
+        }
+
+        out = io.StringIO()
+        svc = DeploymentService(client, console=Console(file=out))
+        monkeypatch.setattr(time, "sleep", lambda _: None)
+        svc.push(tmp_path)
+
+        assert "too old" in out.getvalue()
+
+    def test_push_no_warning_when_compatible(self, monkeypatch, tmp_path):
+        """push() does not print a warning when client is compatible."""
+        (tmp_path / "dj.yaml").write_text(yaml.safe_dump({"namespace": "foo"}))
+        (tmp_path / "foo.yaml").write_text(yaml.safe_dump({"name": "foo.bar"}))
+
+        client = MagicMock()
+        client._check_server_compatibility.return_value = None
+        client.deploy.return_value = {
+            "uuid": "abc",
+            "status": "success",
+            "results": [],
+            "namespace": "foo",
+        }
+
+        out = io.StringIO()
+        svc = DeploymentService(client, console=Console(file=out))
+        monkeypatch.setattr(time, "sleep", lambda _: None)
+        svc.push(tmp_path)
+
+        assert "too old" not in out.getvalue()
+        assert "⚠" not in out.getvalue()
