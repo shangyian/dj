@@ -261,11 +261,6 @@ class DeploymentOrchestrator:
         (what downstream nodes would be affected).
         """
         start_total = time.perf_counter()
-        logger.info(
-            "Starting deployment of %d nodes in namespace %s",
-            len(self.deployment_spec.nodes),
-            self.deployment_spec.namespace,
-        )
         await self._setup_deployment_resources()
         await self._validate_deployment_resources()
 
@@ -312,14 +307,6 @@ class DeploymentOrchestrator:
         self.registry.add_owners(await self._setup_owners())
         self.registry.add_catalogs(await self._setup_catalogs())
         self.registry.add_attributes(await self._setup_attributes())
-        logger.info(
-            "Set up deployment resources: %d namespaces, %d tags, %d owners, %d catalogs, %d attributes",
-            len(self.registry.namespaces),
-            len(self.registry.tags),
-            len(self.registry.owners),
-            len(self.registry.catalogs),
-            len(self.registry.attributes),
-        )
 
     async def _validate_deployment_resources(self):
         """Validate deployment configuration and fail fast if invalid"""
@@ -365,7 +352,6 @@ class DeploymentOrchestrator:
             return []
 
         if not missing_nodes:
-            logger.info("No missing nodes to auto-register")
             return []
 
         settings = get_settings()
@@ -393,7 +379,6 @@ class DeploymentOrchestrator:
                 original_node_names[tuple(stripped_parts)] = original_name
 
         if not missing_nodes_to_check:
-            logger.info("No missing nodes match catalog.schema.table pattern")
             return []
 
         # Check if query service client is available
@@ -982,10 +967,6 @@ class DeploymentOrchestrator:
 
         # Order nodes topologically based on dependencies
         levels = topological_levels(plan.node_graph, ascending=False)
-        logger.info(
-            "Deploying nodes in topological order with %d levels",
-            len(levels),
-        )
 
         # Deploy them level by level (excluding cubes which are handled separately)
         name_to_node_specs = {
@@ -1009,7 +990,6 @@ class DeploymentOrchestrator:
                 deployed_nodes.update(nodes)
                 self.registry.add_nodes(nodes)
 
-        logger.info("Finished deploying %d non-cube nodes", len(deployed_nodes))
         return deployed_results, deployed_nodes
 
     async def _deploy_links(self, plan: DeploymentPlan) -> list[DeploymentResult]:
@@ -1059,7 +1039,6 @@ class DeploymentOrchestrator:
                 )
                 deployed_links.append(link_result)
         await self.session.flush()
-        logger.info("Finished deploying %d dimension links", len(deployed_links))
         return deployed_links
 
     async def _bulk_delete_links(self, to_delete, node_spec) -> list[DeploymentResult]:
@@ -1296,7 +1275,6 @@ class DeploymentOrchestrator:
         if not cubes_to_deploy:
             return []
 
-        logger.info("Starting bulk deployment of %d cubes", len(cubes_to_deploy))
         start = time.perf_counter()
 
         # Bulk validate cubes
@@ -1651,7 +1629,6 @@ class DeploymentOrchestrator:
                     )
                 changelog, changed_fields = await self._generate_changelog(result)
                 if existing:
-                    logger.info("Updating cube node %s", cube_spec.rendered_name)
                     new_node = existing
                     new_node.current_version = str(
                         Version.parse(new_node.current_version).next_major_version(),
@@ -1677,7 +1654,6 @@ class DeploymentOrchestrator:
                             )
                         )
                 else:
-                    logger.info("Creating cube node %s", cube_spec.rendered_name)
                     namespace = get_namespace_from_name(cube_spec.rendered_name)
 
                     # Use no_autoflush to prevent premature flushing of columns without node_revision_id
@@ -1931,8 +1907,6 @@ class DeploymentOrchestrator:
         return references
 
     async def _delete_nodes(self, to_delete: list[NodeSpec]) -> list[DeploymentResult]:
-        logger.info("Starting deletion of %d nodes", len(to_delete))
-
         # Check which nodes have references that would prevent deletion
         references = await self._validate_node_deletion(to_delete)
 
@@ -2020,14 +1994,6 @@ class DeploymentOrchestrator:
             if name not in desired_node_names
         ]
 
-        logger.info("Creating %d new nodes", len(to_create))
-        logger.info("Updating %d existing nodes", len(to_update))
-        logger.info("Skipping %d nodes as they are unchanged", len(to_skip))
-        logger.info("Deleting %d nodes: %s", len(to_delete), to_delete)
-        logger.info(
-            "Filtered nodes to deploy in %.3fs",
-            time.perf_counter() - filter_nodes_start,
-        )
         return to_create + to_update, to_skip, to_delete
 
     def _log_spec_diff(self, new_spec: "NodeSpec", existing_spec: "NodeSpec") -> None:
@@ -2172,23 +2138,6 @@ class DeploymentOrchestrator:
                 ]
                 reasons.append(f"columns changed: old={old_cols} new={new_cols}")
 
-        if reasons:
-            logger.info("Node %s marked for update: %s", name, "; ".join(reasons))
-        else:
-            # Fall back to full model dump diff
-            new_dump = new_spec.rendered_spec().model_dump(mode="json")
-            old_dump = existing_spec.model_dump(mode="json")
-            differing_keys = [
-                k
-                for k in set(new_dump) | set(old_dump)
-                if new_dump.get(k) != old_dump.get(k)
-            ]
-            logger.info(
-                "Node %s marked for update (reason unclear). Differing keys in model_dump: %s",
-                name,
-                differing_keys,
-            )
-
     async def check_external_deps(
         self,
         node_graph: dict[str, list[str]],
@@ -2214,11 +2163,6 @@ class DeploymentOrchestrator:
             if isinstance(node, LinkableNodeSpec) and node.dimension_links
             for link in node.dimension_links
         }
-        logger.info(
-            "check_external_deps: %d dim link targets across all spec nodes: %s",
-            len(dim_link_dep_set),
-            sorted(dim_link_dep_set),
-        )
 
         # Helper to check if a dependency is in the deployment, accounting for the
         # configured source namespace prefix (e.g. "source.catalog.schema.table").
@@ -2239,10 +2183,6 @@ class DeploymentOrchestrator:
         dim_link_deps_not_in_deployment = {
             dep for dep in dim_link_dep_set if not is_in_deployment(dep)
         }
-        logger.info(
-            "check_external_deps: dim link deps not in deployment: %s",
-            sorted(dim_link_deps_not_in_deployment),
-        )
         deps_not_in_deployment = (
             sql_deps_not_in_deployment | dim_link_deps_not_in_deployment
         )
@@ -2266,12 +2206,6 @@ class DeploymentOrchestrator:
                 names_to_search,
             )
             found_dep_names = {node.name for node in external_node_deps}
-            logger.info(
-                "check_external_deps: DB lookup for %d names → found %d: %s",
-                len(names_to_search),
-                len(found_dep_names),
-                sorted(found_dep_names),
-            )
             missing_nodes = []
             deployment_node_names = set(node_graph.keys())
             for dep in deps_not_in_deployment:
@@ -2283,7 +2217,6 @@ class DeploymentOrchestrator:
 
                 # Check against both original and normalized names
                 if dep in found_dep_names or normalized_dep in found_dep_names:
-                    logger.info("check_external_deps: dep %r found in DB → OK", dep)
                     continue
 
                 # For SQL deps only: allow a `node.column` reference to pass if the
@@ -2292,11 +2225,6 @@ class DeploymentOrchestrator:
                 if not is_dim_link:
                     parent = normalized_dep.rsplit(SEPARATOR, 1)[0]
                     if SEPARATOR in parent and parent in found_dep_names:
-                        logger.info(
-                            "check_external_deps: SQL dep %r cleared via parent %r",
-                            dep,
-                            parent,
-                        )
                         continue
 
                 # Check if this is a namespace prefix (some found node starts with dep.)
@@ -2342,10 +2270,6 @@ class DeploymentOrchestrator:
                 )
                 return deps_not_in_deployment, [], missing_nodes
 
-            logger.info(
-                "All %d external dependencies pre-exist in the system",
-                len(external_node_deps),
-            )
         return deps_not_in_deployment, [], []
 
     def _mark_missing_dep_nodes_invalid(
@@ -2366,11 +2290,6 @@ class DeploymentOrchestrator:
         deployment result (CREATE/UPDATE + INVALID) doesn't appear twice.
         """
         missing_set = set(missing_nodes)
-        logger.info(
-            "_mark_missing_dep_nodes_invalid: missing_set=%s, checking %d spec nodes",
-            sorted(missing_set),
-            len(self.deployment_spec.nodes),
-        )
         affected_names: set[str] = set()
 
         for node_spec in self.deployment_spec.nodes:
@@ -2381,13 +2300,6 @@ class DeploymentOrchestrator:
                 for link in getattr(node_spec, "dimension_links", None) or []
             }
             blocking = (sql_deps | link_deps) & missing_set
-            if link_deps:
-                logger.info(
-                    "_mark_missing_dep_nodes_invalid: node %r link_deps=%s blocking=%s",
-                    name,
-                    sorted(link_deps),
-                    sorted(blocking),
-                )
             if blocking:
                 affected_names.add(name)
 
@@ -2407,7 +2319,6 @@ class DeploymentOrchestrator:
         start_validation = time.perf_counter()
         validation_data = []
         validation_tasks: list[Coroutine] = []
-        logger.info("Validating %d dimension links", len(validation_tasks))
 
         for node_spec in plan.to_deploy:
             if hasattr(node_spec, "dimension_links") and node_spec.dimension_links:
@@ -2451,8 +2362,6 @@ class DeploymentOrchestrator:
         2. They are either new or have changes compared to existing nodes
         """
         start = time.perf_counter()
-        logger.info("Starting bulk deployment of %d nodes", len(node_specs))
-
         dependency_nodes = await self.get_dependencies(node_graph)
 
         # Validate all node queries to determine columns, types, and dependencies
@@ -2487,9 +2396,6 @@ class DeploymentOrchestrator:
             [node.rendered_name for node in node_specs],
         )
 
-        logger.info(
-            f"Deployed {len(nodes)} nodes in bulk in {time.perf_counter() - start:.2f}s",
-        )
         return deployment_results, all_nodes
 
     async def get_dependencies(
@@ -2795,16 +2701,6 @@ class DeploymentOrchestrator:
         if changed_fields:
             changelog.append("└─ Updated " + ", ".join(changed_fields))
             rendered_spec = result.spec.rendered_spec()
-            for field in [f for f in changed_fields if f != "query"]:
-                old_val = getattr(existing_node_spec, field, None)
-                new_val = getattr(rendered_spec, field, None)
-                logger.info(
-                    "Node %s field %r changed: %r -> %r",
-                    result.spec.rendered_name,
-                    field,
-                    old_val,
-                    new_val,
-                )
 
         # If the node has dimension links and is being updated (even if link specs
         # didn't change), the links will be re-deployed — note this in the message.
