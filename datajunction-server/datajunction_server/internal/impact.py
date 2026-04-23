@@ -66,6 +66,7 @@ async def propagate_impact(
     changed_node_names: set[str],
     deleted_node_names: frozenset[str] = frozenset(),
     changed_link_node_names: set[str] | None = None,
+    include_inactive_downstream: bool = False,
 ) -> list[DownstreamImpact]:
     """BFS downstream impact analysis with revalidation.
 
@@ -81,6 +82,13 @@ async def propagate_impact(
         deleted_node_names: Names of nodes about to be deleted (still in DB at
             call time — caller must invoke this before hard_delete_node).
         changed_link_node_names: Names of nodes whose dimension links changed.
+        include_inactive_downstream: Include downstream nodes with
+            ``deactivated_at`` set during Phase 3 revalidation. Used by the
+            single-node activate path: when a namespace is cascade-restored
+            one node at a time, downstreams of an earlier-activated node are
+            still deactivated but should have their status re-derived from
+            newly-valid parents so the subsequent activate_node call sees
+            the correct status. Defaults to False for deployment.
 
     Returns:
         List of DownstreamImpact describing each affected downstream node.
@@ -99,7 +107,11 @@ async def propagate_impact(
     )
 
     # Phase 1: discover affected nodes via SQL parent graph
-    parent_graph_impacts = await _propagate_via_parent_graph(session, ctx)
+    parent_graph_impacts = await _propagate_via_parent_graph(
+        session,
+        ctx,
+        include_inactive=include_inactive_downstream,
+    )
 
     # Phase 2: discover affected nodes via dimension link graph
     link_impacts = await _propagate_via_dimension_links(
@@ -112,7 +124,12 @@ async def propagate_impact(
     all_impacts = _merge_impacts(parent_graph_impacts, link_impacts)
 
     # Phase 3: revalidate all downstream nodes and apply status changes
-    results = await _revalidate_and_apply(session, ctx, all_impacts)
+    results = await _revalidate_and_apply(
+        session,
+        ctx,
+        all_impacts,
+        include_inactive=include_inactive_downstream,
+    )
 
     _emit_metrics(start, results)
     return results
@@ -195,6 +212,7 @@ async def _build_propagation_context(
 async def _propagate_via_parent_graph(
     session: AsyncSession,
     ctx: PropagationContext,
+    include_inactive: bool = False,
 ) -> list[DownstreamImpact]:
     """BFS through NodeRelationship to find all downstream nodes.
 
@@ -226,19 +244,12 @@ async def _propagate_via_parent_graph(
         if not unvisited:
             break
 
-        child_nodes = (
-            (
-                await session.execute(
-                    select(Node)
-                    .where(Node.id.in_(unvisited))
-                    .where(is_(Node.deactivated_at, None))
-                    .options(joinedload(Node.current)),
-                )
-            )
-            .unique()
-            .scalars()
-            .all()
+        stmt = (
+            select(Node).where(Node.id.in_(unvisited)).options(joinedload(Node.current))
         )
+        if not include_inactive:
+            stmt = stmt.where(is_(Node.deactivated_at, None))
+        child_nodes = (await session.execute(stmt)).unique().scalars().all()
 
         next_frontier: set[int] = set()
         for node in child_nodes:
@@ -354,6 +365,7 @@ async def _revalidate_and_apply(
     session: AsyncSession,
     ctx: PropagationContext,
     impacts: list[DownstreamImpact],
+    include_inactive: bool = False,
 ) -> list[DownstreamImpact]:
     """Revalidate all downstream nodes and apply status changes.
 
@@ -408,7 +420,7 @@ async def _revalidate_and_apply(
 
     # Run DB load and ANTLR parsing concurrently
     loaded_nodes, pre_parsed = await asyncio.gather(
-        _batch_load_nodes_for_revalidation(session, all_names),
+        _batch_load_nodes_for_revalidation(session, all_names, include_inactive),
         _parse_all_queries(),
     )
 
@@ -595,6 +607,7 @@ def _build_name_index(ctx: PropagationContext) -> dict[str, Node]:
 async def _batch_load_nodes_for_revalidation(
     session: AsyncSession,
     node_names: list[str],
+    include_inactive: bool = False,
 ) -> dict[str, Node]:
     """Load nodes with their parents and columns for revalidation."""
     if not node_names:  # pragma: no cover
@@ -613,6 +626,7 @@ async def _batch_load_nodes_for_revalidation(
                 ),
             ),
         ],
+        include_inactive=include_inactive,
     )
     return {n.name: n for n in nodes}
 

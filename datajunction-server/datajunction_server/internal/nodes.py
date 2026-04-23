@@ -3009,6 +3009,12 @@ async def propagate_node_valid(
         session=session,
         namespace=node.namespace,
         changed_node_names={node.name},
+        # Namespace cascade-restore activates nodes one at a time: downstream
+        # of an earlier-activated node may still be deactivated yet their
+        # status needs to be re-derived from newly-valid parents (so the
+        # subsequent activate_node call sees them correctly). Legacy path
+        # used get_downstream_nodes(include_deactivated=True) for this reason.
+        include_inactive_downstream=True,
     )
 
     cube_names = [
@@ -3027,6 +3033,7 @@ async def propagate_node_valid(
             session,
             names,
             options=[joinedload(Node.current)],
+            include_inactive=True,
         )
         nodes_by_name = {n.name: n for n in changed_nodes}
         for impact in transitions:
