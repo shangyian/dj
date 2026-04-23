@@ -42,7 +42,7 @@ def _reparse_column_types(dependency_nodes: Dict[str, Node]) -> None:
     Re-parse column types for dependency nodes to ensure map/list/struct types are
     fully parsed before type inference. Mutates column types in place.
 
-    Mirrors the logic in validate_node_data (internal/validation.py lines 114-130).
+    Mirrors _reparse_parent_column_types in internal/validation.py.
     """
     for node in dependency_nodes.values():
         if node.current:
@@ -754,9 +754,9 @@ class NodeSpecBulkValidator:
         For cross-fact derived metrics (>1 metric parent), verify the base
         metrics share at least one dimension.  Returns a DJError if not.
 
-        Mirrors the check in validate_node_data (internal/validation.py lines
-        169-207) but uses the pre-fetched self._metric_dimensions rather than
-        calling get_dimensions per node.
+        Mirrors the cross-fact check in validate_node_data but uses the
+        pre-fetched self._metric_dimensions rather than calling get_dimensions
+        per node.
         """
         if spec.node_type != NodeType.METRIC:
             return None

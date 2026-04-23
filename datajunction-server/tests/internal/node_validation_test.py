@@ -410,12 +410,16 @@ async def test_metric_with_nonexistent_table_alias_is_invalid(
     assert validator.status == NodeStatus.INVALID, (
         f"Expected INVALID but got {validator.status}. Errors: {validator.errors}"
     )
+    # v2 surfaces unresolved-namespace refs through validate_node_query as
+    # TYPE_INFERENCE (the shared deployment primitive classifies every
+    # resolution failure as type inference — same error surface as bulk
+    # deployment). The key invariant is that the `ghost` alias is flagged.
     from datajunction_server.errors import ErrorCode
 
-    error_codes = [e.code for e in validator.errors]
-    assert ErrorCode.INVALID_COLUMN in error_codes, (
-        f"Expected INVALID_COLUMN error, got: {validator.errors}"
-    )
+    assert any(
+        e.code == ErrorCode.TYPE_INFERENCE and "ghost" in e.message
+        for e in validator.errors
+    ), f"Expected TYPE_INFERENCE error mentioning `ghost`, got: {validator.errors}"
 
 
 @pytest.mark.asyncio
@@ -751,13 +755,13 @@ class TestReparseParentColumnTypes:
 
 
 # ---------------------------------------------------------------------------
-# validate_node_data_v2 smoke tests
+# validate_node_data behavioral tests (shared primitives with deployment)
 # ---------------------------------------------------------------------------
 
 
 @pytest_asyncio.fixture
 async def v2_parent_source(session: AsyncSession, user: User) -> Node:
-    """Source node with typed columns for use as a parent in v2 tests."""
+    """Source node with typed columns for use as a parent in validate_node_data tests."""
     node = Node(
         name="test.v2_parent",
         type=NodeType.SOURCE,
@@ -785,13 +789,13 @@ async def v2_parent_source(session: AsyncSession, user: User) -> Node:
 
 
 @pytest.mark.asyncio
-async def test_validate_node_data_v2_returns_valid_for_simple_transform(
+async def test_validate_node_data_returns_valid_for_simple_transform(
     session: AsyncSession,
     user: User,
     v2_parent_source: Node,
 ):
     """Happy path: simple transform selecting a typed column resolves cleanly."""
-    from datajunction_server.internal.validation import validate_node_data_v2
+    from datajunction_server.internal.validation import validate_node_data
 
     data = NodeRevisionBase(
         name="test.v2_child_valid",
@@ -800,7 +804,7 @@ async def test_validate_node_data_v2_returns_valid_for_simple_transform(
         query="SELECT id FROM test.v2_parent",
         mode="published",
     )
-    validator = await validate_node_data_v2(data, session)
+    validator = await validate_node_data(data, session)
 
     assert validator.status == NodeStatus.VALID, validator.errors
     assert [c.name for c in validator.columns] == ["id"]
@@ -808,14 +812,14 @@ async def test_validate_node_data_v2_returns_valid_for_simple_transform(
 
 
 @pytest.mark.asyncio
-async def test_validate_node_data_v2_flags_missing_parent(
+async def test_validate_node_data_flags_missing_parent(
     session: AsyncSession,
     user: User,
 ):
     """A query referencing a non-existent parent surfaces the missing parent
     via both `missing_parents_map` and an error on the validator."""
     from datajunction_server.errors import ErrorCode
-    from datajunction_server.internal.validation import validate_node_data_v2
+    from datajunction_server.internal.validation import validate_node_data
 
     data = NodeRevisionBase(
         name="test.v2_missing_parent_child",
@@ -824,7 +828,7 @@ async def test_validate_node_data_v2_flags_missing_parent(
         query="SELECT id FROM test.does_not_exist",
         mode="published",
     )
-    validator = await validate_node_data_v2(data, session)
+    validator = await validate_node_data(data, session)
 
     assert validator.status == NodeStatus.INVALID
     assert "test.does_not_exist" in validator.missing_parents_map
@@ -834,16 +838,16 @@ async def test_validate_node_data_v2_flags_missing_parent(
 
 
 @pytest.mark.asyncio
-async def test_validate_node_data_v2_flags_sum_boolean(
+async def test_validate_node_data_flags_sum_boolean(
     session: AsyncSession,
     user: User,
     v2_parent_source: Node,
 ):
-    """SUM(boolean) is not a valid Spark aggregation — v2 should surface a
-    TYPE_INFERENCE error. Locks in the un-suppression of
+    """SUM(boolean) is not a valid Spark aggregation — validate_node_data should
+    surface a TYPE_INFERENCE error. Locks in the un-suppression of
     'Unable to infer type' error strings at the single-node boundary."""
     from datajunction_server.errors import ErrorCode
-    from datajunction_server.internal.validation import validate_node_data_v2
+    from datajunction_server.internal.validation import validate_node_data
 
     data = NodeRevisionBase(
         name="test.v2_sum_boolean",
@@ -852,7 +856,7 @@ async def test_validate_node_data_v2_flags_sum_boolean(
         query="SELECT SUM(is_winning_bid) FROM test.v2_parent",
         mode="published",
     )
-    validator = await validate_node_data_v2(data, session)
+    validator = await validate_node_data(data, session)
 
     assert validator.status == NodeStatus.INVALID
     assert any(
@@ -862,13 +866,13 @@ async def test_validate_node_data_v2_flags_sum_boolean(
 
 
 @pytest.mark.asyncio
-async def test_validate_node_data_v2_surfaces_parse_errors(
+async def test_validate_node_data_surfaces_parse_errors(
     session: AsyncSession,
     user: User,
 ):
     """Malformed SQL returns INVALID_SQL_QUERY and doesn't crash validation."""
     from datajunction_server.errors import ErrorCode
-    from datajunction_server.internal.validation import validate_node_data_v2
+    from datajunction_server.internal.validation import validate_node_data
 
     data = NodeRevisionBase(
         name="test.v2_bad_sql",
@@ -877,7 +881,7 @@ async def test_validate_node_data_v2_surfaces_parse_errors(
         query="SELECT ))",  # guaranteed parser failure
         mode="published",
     )
-    validator = await validate_node_data_v2(data, session)
+    validator = await validate_node_data(data, session)
     assert validator.status == NodeStatus.INVALID
     assert any(err.code == ErrorCode.INVALID_SQL_QUERY for err in validator.errors), [
         (e.code, e.message) for e in validator.errors
@@ -885,13 +889,13 @@ async def test_validate_node_data_v2_surfaces_parse_errors(
 
 
 @pytest.mark.asyncio
-async def test_validate_node_data_v2_no_candidates_skips_db_load(
+async def test_validate_node_data_no_candidates_skips_db_load(
     session: AsyncSession,
     user: User,
 ):
     """A derived metric that references no namespaced candidates (pure literal
     arithmetic) should skip the bulk Node.get_by_names load entirely."""
-    from datajunction_server.internal.validation import validate_node_data_v2
+    from datajunction_server.internal.validation import validate_node_data
 
     data = NodeRevisionBase(
         name="test.v2_literal_metric",
@@ -900,20 +904,20 @@ async def test_validate_node_data_v2_no_candidates_skips_db_load(
         query="SELECT 1 + 1",
         mode="published",
     )
-    validator = await validate_node_data_v2(data, session)
+    validator = await validate_node_data(data, session)
     # Status may be valid or invalid depending on metric-query constraints;
     # the important coverage is that validation completed without a DB load.
     assert validator.missing_parents_map == {}
 
 
 @pytest.mark.asyncio
-async def test_validate_node_data_v2_skips_parents_without_columns(
+async def test_validate_node_data_skips_parents_without_columns(
     session: AsyncSession,
     user: User,
 ):
     """Parent nodes whose current revision has no columns are skipped when
     building the parent_columns_map rather than creating empty entries."""
-    from datajunction_server.internal.validation import validate_node_data_v2
+    from datajunction_server.internal.validation import validate_node_data
 
     parent = Node(
         name="test.v2_empty_parent",
@@ -943,20 +947,20 @@ async def test_validate_node_data_v2_skips_parents_without_columns(
         query="SELECT * FROM test.v2_empty_parent",
         mode="published",
     )
-    validator = await validate_node_data_v2(data, session)
+    validator = await validate_node_data(data, session)
     # Validation should not crash; the empty-columns parent is just skipped.
     assert validator.status in (NodeStatus.VALID, NodeStatus.INVALID)
 
 
 @pytest.mark.asyncio
-async def test_validate_node_data_v2_flags_invalid_required_dimensions(
+async def test_validate_node_data_flags_invalid_required_dimensions(
     session: AsyncSession,
     user: User,
 ):
     """required_dimensions pointing at a column that doesn't exist on the
     referenced dim node surfaces an INVALID_COLUMN error."""
     from datajunction_server.errors import ErrorCode
-    from datajunction_server.internal.validation import validate_node_data_v2
+    from datajunction_server.internal.validation import validate_node_data
 
     source = Node(
         name="test.v2_req_dim_parent",
@@ -997,7 +1001,7 @@ async def test_validate_node_data_v2_flags_invalid_required_dimensions(
 
     # Construct a transient NodeRevision carrying the string-form required
     # dimension (NodeRevisionBase doesn't have the field — it's on
-    # MetricNodeFields via CreateNode). v2 resolves these strings against
+    # MetricNodeFields via CreateNode). validate_node_data resolves these strings against
     # the DB and flags any that don't match a real column.
     child = NodeRevision(
         name="test.v2_req_dim_child",
@@ -1007,7 +1011,7 @@ async def test_validate_node_data_v2_flags_invalid_required_dimensions(
         status=NodeStatus.VALID,
         required_dimensions=["test.v2_dim_tiny.ghost_col"],  # type: ignore[list-item]
     )
-    validator = await validate_node_data_v2(child, session)
+    validator = await validate_node_data(child, session)
     assert validator.status == NodeStatus.INVALID
     assert any(
         err.code == ErrorCode.INVALID_COLUMN and "required dimensions" in err.message
@@ -1020,15 +1024,15 @@ async def test_validate_node_data_v2_flags_invalid_required_dimensions(
 
 
 @pytest.mark.asyncio
-async def test_validate_node_data_v2_cross_fact_metrics_no_shared_dims(
+async def test_validate_node_data_cross_fact_metrics_no_shared_dims(
     session: AsyncSession,
     user: User,
 ):
     """A derived metric summing two base metrics whose underlying sources
     share no dimensions surfaces an INVALID_PARENT error. Covers the
-    cross-fact safety check in validate_node_data_v2."""
+    cross-fact safety check in validate_node_data."""
     from datajunction_server.errors import ErrorCode
-    from datajunction_server.internal.validation import validate_node_data_v2
+    from datajunction_server.internal.validation import validate_node_data
 
     # Two independent source nodes — no shared dim.
     src_a = Node(
@@ -1124,7 +1128,7 @@ async def test_validate_node_data_v2_cross_fact_metrics_no_shared_dims(
         query="SELECT test.v2_metric_a + test.v2_metric_b",
         mode="published",
     )
-    validator = await validate_node_data_v2(data, session)
+    validator = await validate_node_data(data, session)
     assert validator.status == NodeStatus.INVALID
     assert any(
         err.code == ErrorCode.INVALID_PARENT and "no shared" in err.message.lower()

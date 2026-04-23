@@ -16,8 +16,7 @@ from datajunction_server.internal import sql
 from datajunction_server.database.node import Node, NodeRevision
 from datajunction_server.database.user import OAuthProvider, User
 from datajunction_server.errors import DJDoesNotExistException, DJException
-from datajunction_server.internal.nodes import propagate_valid_status
-from datajunction_server.models.node import NodeStatus
+from datajunction_server.internal.nodes import propagate_node_valid
 
 
 @pytest.mark.asyncio
@@ -44,14 +43,13 @@ async def test_raise_get_node_when_node_does_not_exist(module__session: AsyncSes
 
 
 @pytest.mark.asyncio
-async def test_propagate_valid_status(module__session: AsyncSession):
+async def test_propagate_node_valid_rejects_node_without_current(
+    module__session: AsyncSession,
+):
     """
-    Test raising when trying to propagate a valid status using an invalid node
+    propagate_node_valid requires a node with a current revision.
     """
-    invalid_node = NodeRevision(
-        name="foo",
-        status=NodeStatus.INVALID,
-    )
+    node_without_current = Node(name="foo")
     example_user = User(
         id=1,
         username="userfoo",
@@ -61,17 +59,14 @@ async def test_propagate_valid_status(module__session: AsyncSession):
         oauth_provider=OAuthProvider.BASIC,
     )
     with pytest.raises(DJException) as exc_info:
-        await propagate_valid_status(
+        await propagate_node_valid(
             session=module__session,
-            valid_nodes=[invalid_node],
-            catalog_id=1,
+            node=node_without_current,
             current_user=example_user,
             save_history=MagicMock(),
         )
 
-    assert "Cannot propagate valid status: Node `foo` is not valid" in str(
-        exc_info.value,
-    )
+    assert "Cannot propagate node `foo`: no current revision" in str(exc_info.value)
 
 
 @pytest.mark.asyncio

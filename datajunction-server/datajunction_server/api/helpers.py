@@ -35,12 +35,9 @@ from datajunction_server.database.engine import Engine
 from datajunction_server.database.history import History
 from datajunction_server.database.namespace import NodeNamespace
 from datajunction_server.database.node import (
-    MissingParent,
     Node,
-    NodeMissingParents,
     NodeRevision,
 )
-from datajunction_server.database.user import User
 from datajunction_server.errors import (
     DJAlreadyExistsException,
     DJDoesNotExistException,
@@ -53,9 +50,7 @@ from datajunction_server.internal.engines import get_engine
 from datajunction_server.internal.history import EntityType
 from datajunction_server.models import access
 from datajunction_server.models.attribute import RESERVED_ATTRIBUTE_NAMESPACE
-from datajunction_server.models.history import status_change_history
 from datajunction_server.models.metric import TranslatedSQL
-from datajunction_server.models.node import NodeStatus
 from datajunction_server.models.node_type import NodeType
 from datajunction_server.models.materialization import (
     MaterializationConfigInfoUnified,
@@ -330,101 +325,6 @@ async def find_required_dimensions(
         dim_nodes = {node.name: node for node in result.scalars().all()}
 
     return _resolve_required_dimensions(required_dimensions, parent_columns, dim_nodes)
-
-
-async def resolve_downstream_references(
-    session: AsyncSession,
-    node_revision: NodeRevision,
-    current_user: User,
-    save_history: Callable,
-) -> List[NodeRevision]:
-    """
-    Find all node revisions with missing parent references to `node` and resolve them
-    """
-    from datajunction_server.internal.validation import validate_node_data
-
-    missing_parents = (
-        (
-            await session.execute(
-                select(MissingParent).where(MissingParent.name == node_revision.name),
-            )
-        )
-        .scalars()
-        .all()
-    )
-    newly_valid_nodes = []
-    for missing_parent in missing_parents:
-        missing_parent_links = (
-            (
-                await session.execute(
-                    select(NodeMissingParents).where(
-                        NodeMissingParents.missing_parent_id == missing_parent.id,
-                    ),
-                )
-            )
-            .scalars()
-            .all()
-        )
-        for (
-            link
-        ) in missing_parent_links:  # Remove from missing parents and add to parents
-            downstream_node_id = link.referencing_node_id
-            downstream_node_revision = (
-                (
-                    await session.execute(
-                        select(NodeRevision)
-                        .where(NodeRevision.id == downstream_node_id)
-                        .options(
-                            joinedload(NodeRevision.missing_parents),
-                            joinedload(NodeRevision.parents),
-                        ),
-                    )
-                )
-                .unique()
-                .scalar_one()
-            )
-            await session.refresh(node_revision, ["node"])
-            await session.refresh(
-                downstream_node_revision,
-                ["parents", "missing_parents"],
-            )
-            # Compare by id, not Python identity: session.refresh returns a
-            # different ORM instance than `node_revision.node` even when they
-            # represent the same row, so an identity-based `in` check would
-            # wrongly append and stage a duplicate NodeRelationship INSERT.
-            if node_revision.node.id not in {  # pragma: no branch
-                p.id for p in downstream_node_revision.parents
-            }:
-                downstream_node_revision.parents.append(node_revision.node)
-            downstream_node_revision.missing_parents.remove(missing_parent)
-            node_validator = await validate_node_data(
-                data=downstream_node_revision,
-                session=session,
-            )
-            event = None
-            if downstream_node_revision.status != node_validator.status:
-                event = status_change_history(
-                    downstream_node_revision,
-                    downstream_node_revision.status,
-                    node_validator.status,
-                    parent_node=node_revision.name,
-                    current_user=current_user,
-                )
-
-            downstream_node_revision.status = node_validator.status
-
-            await session.refresh(downstream_node_revision, ["columns"])
-            downstream_node_revision.columns = node_validator.columns
-            if node_validator.status == NodeStatus.VALID:
-                newly_valid_nodes.append(downstream_node_revision)
-            session.add(downstream_node_revision)
-            if event:
-                await save_history(event=event, session=session)
-            await session.commit()
-            await session.refresh(downstream_node_revision)
-
-        await session.delete(missing_parent)  # Remove missing parent reference to node
-    return newly_valid_nodes
 
 
 def map_dimensions_to_roles(dimensions: List[str]) -> Dict[str, str]:

@@ -3,7 +3,6 @@
 from dataclasses import dataclass, field
 from typing import Dict, List, Set, Union
 
-from sqlalchemy.exc import MissingGreenlet
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from datajunction_server.api.helpers import find_required_dimensions
@@ -11,7 +10,6 @@ from datajunction_server.database import Node, NodeRevision
 from datajunction_server.database.column import Column, ColumnAttribute
 from datajunction_server.errors import (
     DJError,
-    DJException,
     DJInvalidMetricQueryException,
     ErrorCode,
 )
@@ -102,330 +100,6 @@ class NodeValidator:
         return updated_columns
 
 
-@timed(
-    "dj.node_validation.ms",
-    lambda data, session: {"node_type": str(data.type)},
-)
-async def validate_node_data(
-    data: Union[NodeRevisionBase, NodeRevision],
-    session: AsyncSession,
-) -> NodeValidator:
-    """
-    Validate a node. This function should never raise any errors.
-    It will build the lists of issues (including errors) and return them all
-    for the caller to decide what to do.
-    """
-    node_validator = NodeValidator()
-
-    # Create context without bulk loading for new nodes
-    ctx = ast.CompileContext(session=session, exception=DJException())
-
-    if isinstance(data, NodeRevision):
-        validated_node = data
-    else:
-        node = Node(name=data.name, type=data.type)
-        validated_node = NodeRevision(**data.model_dump())
-        validated_node.node = node
-
-    # Try to parse the node's query, extract dependencies and missing parents
-    try:
-        formatted_query = (
-            NodeRevision.format_metric_alias(
-                validated_node.query,  # type: ignore
-                validated_node.name,
-            )
-            if validated_node.type == NodeType.METRIC
-            else validated_node.query
-        )
-        query_ast = parse(formatted_query)  # type: ignore
-
-        # Collect table/subquery aliases and CTE names before bake_ctes() destroys them.
-        # Both Table nodes (regular tables) and Query nodes (inline subqueries) can
-        # carry aliases that appear as column namespaces in the query body.
-        local_aliases: Set[str] = set()
-        for tbl in (*query_ast.find_all(ast.Table), *query_ast.find_all(ast.Query)):
-            if tbl.alias is not None:
-                local_aliases.add(tbl.alias.identifier(False))
-        for cte in query_ast.ctes:
-            local_aliases.add(cte.alias_or_name.identifier(False))
-
-        # Lambda parameters (e.g. `c` in `c -> c.name = ...`) are also valid namespaces
-        # inside their lambda body and must be excluded from INVALID_COLUMN checks.
-        for lambda_expr in query_ast.find_all(ast.Lambda):
-            for ident in lambda_expr.identifiers:
-                local_aliases.add(ident.name)
-        (
-            dependencies_map,
-            missing_parents_map,
-        ) = await query_ast.bake_ctes().extract_dependencies(ctx)
-        node_validator.dependencies_map = dependencies_map
-        node_validator.missing_parents_map = missing_parents_map
-
-        # compile() runs inside extract_dependencies. Surface any INVALID_COLUMN
-        # errors it produced, filtering out references whose namespace is a local
-        # SQL alias or CTE — those are valid and resolved at full compile time.
-        # Dimension attribute references where the node exists but the column isn't
-        # formally registered are already handled in compile() itself (clean return,
-        # no error appended), so no extra DB lookup is needed here.
-        invalid_col_errors = [
-            e for e in ctx.exception.errors if e.code == ErrorCode.INVALID_COLUMN
-        ]
-        unresolved = [
-            e
-            for e in invalid_col_errors
-            if (ns := (e.debug or {}).get("namespace", "")) and ns not in local_aliases
-        ]
-        if unresolved:
-            node_validator.status = NodeStatus.INVALID
-            node_validator.errors.extend(unresolved)
-
-    except (DJParseException, ValueError, SqlSyntaxError) as raised_exceptions:
-        node_validator.status = NodeStatus.INVALID
-        node_validator.errors.append(
-            DJError(code=ErrorCode.INVALID_SQL_QUERY, message=str(raised_exceptions)),
-        )
-        return node_validator
-
-    # Parse parent column types before type inference
-    _reparse_parent_column_types(dependencies_map)
-
-    # Update AST Column nodes with the newly parsed types.
-    update_ast_column_types(query_ast)
-
-    # Add aliases for any unnamed columns and confirm that all column types can be inferred
-    query_ast.select.add_aliases_to_unnamed_columns()
-
-    if validated_node.type == NodeType.METRIC and node_validator.dependencies_map:
-        # Check if this is a derived metric (references other metrics)
-        metric_parents = [
-            parent
-            for parent in node_validator.dependencies_map.keys()
-            if parent.type == NodeType.METRIC
-        ]
-        non_metric_parents = [
-            parent
-            for parent in node_validator.dependencies_map.keys()
-            if parent.type != NodeType.METRIC
-        ]
-
-        if metric_parents:
-            # This is a derived metric - nested derived metrics are supported
-            # via inline expansion during decomposition
-            if len(metric_parents) > 1:
-                # For cross-fact derived metrics, validate that there are shared dimensions
-                # between all referenced base metrics
-                from datajunction_server.sql.dag import get_dimensions
-
-                # Get dimensions for each base metric
-                all_dimension_sets: List[Set[str]] = []
-                for base_metric in metric_parents:
-                    dims = await get_dimensions(
-                        session,
-                        base_metric.node,
-                        with_attributes=True,
-                    )
-                    dim_names = {d.name for d in dims}
-                    all_dimension_sets.append(dim_names)
-
-                # Compute intersection of all dimension sets
-                if all_dimension_sets:  # pragma: no branch
-                    shared_dimensions = all_dimension_sets[0]
-                    for dim_set in all_dimension_sets[1:]:
-                        shared_dimensions = shared_dimensions & dim_set
-
-                    if not shared_dimensions:
-                        metric_names = [m.name for m in metric_parents]
-                        node_validator.status = NodeStatus.INVALID
-                        node_validator.errors.append(
-                            DJError(
-                                code=ErrorCode.INVALID_PARENT,
-                                message=(
-                                    f"Cannot create derived metric from base metrics with no shared "
-                                    f"dimensions. The following metrics have no dimensions in common: "
-                                    f"{', '.join(metric_names)}. Cross-fact derived metrics require "
-                                    f"at least one shared dimension for joining."
-                                ),
-                            ),
-                        )
-        else:
-            # Standard metric - validate columns exist on parent nodes
-            all_available_columns = {
-                col.name
-                for upstream_node in non_metric_parents
-                for col in upstream_node.columns
-            }
-
-            metric_expression = query_ast.select.projection[0]
-            referenced_columns = metric_expression.find_all(ast.Column)
-
-            missing_columns = []
-            for col in referenced_columns:
-                column_name = col.alias_or_name.name
-                # Skip columns with namespaces, those are from dimension links and will
-                # be validated when the metric node is compiled
-                if not col.namespace and column_name not in all_available_columns:
-                    missing_columns.append(column_name)
-
-            if missing_columns:
-                node_validator.status = NodeStatus.INVALID
-                node_validator.errors.append(
-                    DJError(
-                        code=ErrorCode.MISSING_COLUMNS,
-                        message=f"Metric definition references missing columns: {', '.join(missing_columns)}",
-                    ),
-                )
-
-    # Invalid parents will invalidate this node
-    # Note: we include source nodes here because they sometimes appear to be invalid, but
-    # this is a bug that needs to be fixed
-    invalid_parents = {
-        parent.name
-        for parent in node_validator.dependencies_map
-        if parent.type != NodeType.SOURCE and parent.status == NodeStatus.INVALID
-    }
-    if invalid_parents:
-        node_validator.errors.append(
-            DJError(
-                code=ErrorCode.INVALID_PARENT,
-                message=f"References invalid parent node(s) {','.join(invalid_parents)}",
-            ),
-        )
-        node_validator.status = NodeStatus.INVALID
-
-    try:
-        column_mapping = {col.name: col for col in validated_node.columns}
-    except MissingGreenlet:  # pragma: no cover
-        column_mapping = {}  # pragma: no cover
-    node_validator.columns = []
-    type_inference_failures = {}
-    for idx, col in enumerate(query_ast.select.projection):  # type: ignore
-        column = None
-        column_name = col.alias_or_name.name  # type: ignore
-        existing_column = column_mapping.get(column_name)
-        try:
-            # Use the parsed ColumnType object directly instead of converting to string
-            # This ensures proper type information (MapType, ListType, etc.) is preserved
-            column_type = col.type  # type: ignore
-            column = Column(
-                name=column_name.lower()
-                if validated_node.type != NodeType.METRIC
-                else column_name,
-                display_name=existing_column.display_name
-                if existing_column and existing_column.display_name
-                else labelize(column_name),
-                type=column_type,
-                attributes=[
-                    ColumnAttribute(
-                        attribute_type_id=attr.attribute_type_id,
-                        attribute_type=attr.attribute_type,
-                    )
-                    for attr in existing_column.attributes
-                ]
-                if existing_column
-                else [],
-                dimension=existing_column.dimension if existing_column else None,
-                order=idx,
-            )
-        except DJParseException as parse_exc:
-            type_inference_failures[column_name] = parse_exc.message
-            node_validator.status = NodeStatus.INVALID
-        except TypeError:  # pragma: no cover
-            type_inference_failures[column_name] = (
-                f"Unknown TypeError on column {column_name}."
-            )
-            node_validator.status = NodeStatus.INVALID
-        if column:
-            node_validator.columns.append(column)
-
-    # Find required dimension columns from full dimension paths
-    # e.g., "dimensions.date.dateint" -> find column "dateint" on node "dimensions.date"
-    try:
-        # Get parent columns for short name lookups (already parsed above)
-        parent_columns = [
-            col for parent in dependencies_map.keys() for col in parent.columns
-        ]
-        # Get required dimensions as strings (may be Column objects if already resolved)
-        required_dim_strings = [
-            col.full_name() if isinstance(col, Column) else col
-            for col in validated_node.required_dimensions
-        ]
-        (
-            invalid_required_dimensions,
-            matched_bound_columns,
-        ) = await find_required_dimensions(
-            session,
-            required_dim_strings,
-            parent_columns,
-        )
-        node_validator.required_dimensions = matched_bound_columns
-    except MissingGreenlet:
-        invalid_required_dimensions = set()
-        node_validator.required_dimensions = []
-
-    if missing_parents_map or type_inference_failures or invalid_required_dimensions:
-        # update status
-        node_validator.status = NodeStatus.INVALID
-        # build errors
-        missing_parents_error = (
-            [
-                DJError(
-                    code=ErrorCode.MISSING_PARENT,
-                    message=f"Node definition contains references to nodes that do not "
-                    f"exist: {','.join(missing_parents_map.keys())}",
-                    debug={"missing_parents": list(missing_parents_map.keys())},
-                ),
-            ]
-            if missing_parents_map
-            else []
-        )
-        type_inference_error = (
-            [
-                DJError(
-                    code=ErrorCode.TYPE_INFERENCE,
-                    message=message,
-                    debug={
-                        "columns": [column],
-                        "errors": ctx.exception.errors,
-                    },
-                )
-                for column, message in type_inference_failures.items()
-            ]
-            if type_inference_failures
-            else []
-        )
-        invalid_required_dimensions_error = (
-            [
-                DJError(
-                    code=ErrorCode.INVALID_COLUMN,
-                    message=(
-                        "Node definition contains references to columns as "
-                        "required dimensions that are not on parent nodes."
-                    ),
-                    debug={
-                        "invalid_required_dimensions": list(
-                            invalid_required_dimensions,
-                        ),
-                    },
-                ),
-            ]
-            if invalid_required_dimensions
-            else []
-        )
-        errors = (
-            missing_parents_error
-            + type_inference_error
-            + invalid_required_dimensions_error
-        )
-        node_validator.errors.extend(errors)
-
-    return node_validator
-
-
-# ---------------------------------------------------------------------------
-# New validate_node_data — shares primitives with the deployment path.
-# ---------------------------------------------------------------------------
-
-
 def _format_query_for_validation(validated_node: NodeRevision) -> str:
     """Apply metric-aliasing when needed so the parsed AST matches the shape
     validate_node_query expects (mirrors the legacy path)."""
@@ -493,21 +167,22 @@ def _build_columns_from_output(
 
 
 @timed(
-    "dj.node_validation.v2.ms",
+    "dj.node_validation.ms",
     lambda data, session: {"node_type": str(data.type)},
 )
-async def validate_node_data_v2(
+async def validate_node_data(
     data: Union[NodeRevisionBase, NodeRevision],
     session: AsyncSession,
 ) -> NodeValidator:
     """
-    New node validator — shares primitives (extract_upstream_candidates,
-    classify_parents, validate_node_query) with the deployment path so behavior
-    matches bulk deployment.
+    Validate a node's query, resolve dependencies, infer column types, and run
+    metric-specific and required-dimension checks. Never raises — errors are
+    returned on the NodeValidator for the caller to decide what to do.
 
-    Not wired to any caller yet. Exposed alongside legacy validate_node_data
-    for shadow-mode diff scripts to compare results. Once divergences are
-    triaged and fixed, swap names and delete the legacy impl.
+    Shares primitives (extract_upstream_candidates, classify_parents,
+    validate_node_query) with the deployment path (bulk_validate_node_data),
+    so single-node create/update flows and bulk deployment see the same
+    validation behavior.
     """
     node_validator = NodeValidator()
 

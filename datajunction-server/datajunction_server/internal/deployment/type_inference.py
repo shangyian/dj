@@ -864,9 +864,15 @@ def _resolve_column_type(
             # than raising so legitimate dim-link refs don't get falsely
             # rejected — deployment enforces strictly via its own call.
             return UnknownType()
-        raise TypeResolutionError(
-            f"Column `{col}` not found in derived metric scope.",
-        )
+        # Bare column refs in a derived metric that don't match any parent
+        # metric are treated permissively for the same reason: the parser
+        # splits role-suffix syntax like `v3.date.week[order]` into two
+        # Column nodes (`v3.date.week` + bare `order`), and we don't want to
+        # reject the latter. Legacy single-node validation did not enforce
+        # derived-metric scope for bare refs, so matching that behavior here
+        # keeps the cutover behavior-neutral. Deployment enforces strictly
+        # via its own dim-attribute validation pass.
+        return UnknownType()
 
     # Table-qualified column: namespace.column_name
     if col.namespace:

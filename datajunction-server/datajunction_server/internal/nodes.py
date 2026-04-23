@@ -27,7 +27,6 @@ from datajunction_server.api.helpers import (
     get_node_namespace,
     map_dimensions_to_roles,
     raise_if_node_exists,
-    resolve_downstream_references,
     validate_cube,
 )
 from datajunction_server.construction.build_v2 import compile_node_ast
@@ -62,10 +61,10 @@ from datajunction_server.internal.materializations import (
     schedule_materialization_jobs_bg,
 )
 from datajunction_server.internal.history import ActivityType, EntityType
+from datajunction_server.internal.impact import propagate_impact
 from datajunction_server.internal.validation import (
     NodeValidator,
     validate_node_data,
-    validate_node_data_v2,
 )
 from datajunction_server.models.attribute import (
     AttributeTypeIdentifier,
@@ -901,16 +900,9 @@ async def save_node(
     )
     await session.commit()
     await session.refresh(node, ["current"])
-    newly_valid_nodes = await resolve_downstream_references(
+    await propagate_node_valid(
         session=session,
-        node_revision=node_revision,
-        current_user=current_user,
-        save_history=save_history,
-    )
-    await propagate_valid_status(
-        session=session,
-        valid_nodes=newly_valid_nodes,
-        catalog_id=node.current.catalog_id,
+        node=node,
         current_user=current_user,
         save_history=save_history,
     )
@@ -1029,17 +1021,9 @@ async def copy_to_new_node(
     )
     await session.refresh(new_node, ["current"])  # type: ignore
 
-    # If the new node makes any downstream nodes valid, propagate
-    newly_valid_nodes = await resolve_downstream_references(
+    await propagate_node_valid(
         session=session,
-        node_revision=new_revision,
-        current_user=current_user,
-        save_history=save_history,
-    )
-    await propagate_valid_status(
-        session=session,
-        valid_nodes=newly_valid_nodes,
-        catalog_id=new_node.current.catalog_id,  # type: ignore
+        node=new_node,  # type: ignore
         current_user=current_user,
         save_history=save_history,
     )
@@ -2872,54 +2856,226 @@ async def create_new_revision_for_dimension_link_update(
     return new_revision
 
 
-async def propagate_valid_status(
+async def _attach_missing_parent_refs(
     session: AsyncSession,
-    valid_nodes: List[NodeRevision],
-    catalog_id: int,
+    node: Node,
+) -> None:
+    """Convert any MissingParent rows that name this node into real parent edges.
+
+    When a downstream node is created in draft mode referencing a node that
+    does not yet exist, a MissingParent row records the ghost edge. Once the
+    referenced node is created (or restored), this helper attaches the real
+    Node as a parent on each referencing revision and deletes the ghost rows.
+    """
+    from datajunction_server.database.node import NodeMissingParents
+
+    missing_parents = (
+        (
+            await session.execute(
+                select(MissingParent).where(MissingParent.name == node.name),
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if not missing_parents:
+        return
+
+    mp_ids = [mp.id for mp in missing_parents]
+    links = (
+        (
+            await session.execute(
+                select(NodeMissingParents).where(
+                    NodeMissingParents.missing_parent_id.in_(mp_ids),
+                ),
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    rev_ids = {link.referencing_node_id for link in links}
+    if rev_ids:
+        revisions = (
+            (
+                await session.execute(
+                    select(NodeRevision)
+                    .where(NodeRevision.id.in_(rev_ids))
+                    .options(
+                        joinedload(NodeRevision.missing_parents),
+                        joinedload(NodeRevision.parents),
+                    ),
+                )
+            )
+            .unique()
+            .scalars()
+            .all()
+        )
+        mp_id_set = set(mp_ids)
+        for rev in revisions:
+            # Compare by id, not identity: session.refresh or different load
+            # paths can produce a distinct ORM instance for the same row.
+            if node.id not in {p.id for p in rev.parents}:
+                rev.parents.append(node)
+            for mp in list(rev.missing_parents):
+                if mp.id in mp_id_set:
+                    rev.missing_parents.remove(mp)
+
+    for mp in missing_parents:
+        await session.delete(mp)
+
+
+async def _finalize_cube_statuses_from_elements(
+    session: AsyncSession,
+    cube_names: List[str],
+) -> dict[str, tuple[NodeStatus, NodeStatus]]:
+    """Recompute cube statuses from their element statuses.
+
+    Cubes have no query, so `propagate_impact`'s query-based revalidation
+    can't decide their status — it has to come from whether all cube
+    elements are VALID. Returns a map of cube_name → (old_status, new_status)
+    for the callers that need to emit history.
+    """
+    if not cube_names:
+        return {}
+    cube_nodes = await Node.get_by_names(
+        session,
+        cube_names,
+        options=[
+            joinedload(Node.current).options(
+                selectinload(NodeRevision.cube_elements).selectinload(
+                    Column.node_revision,
+                ),
+            ),
+        ],
+    )
+    transitions: dict[str, tuple[NodeStatus, NodeStatus]] = {}
+    for cube in cube_nodes:
+        if not cube.current:  # pragma: no cover
+            continue
+        old_status = cube.current.status
+        new_status = NodeStatus.VALID
+        for element in cube.current.cube_elements:
+            if (
+                element.node_revision
+                and element.node_revision.status == NodeStatus.INVALID
+            ):  # pragma: no cover
+                new_status = NodeStatus.INVALID
+                break
+        if new_status != old_status:
+            cube.current.status = new_status
+            session.add(cube.current)
+        transitions[cube.name] = (old_status, new_status)
+    return transitions
+
+
+async def propagate_node_valid(
+    session: AsyncSession,
+    node: Node,
     current_user: User,
     save_history: Callable,
 ) -> None:
+    """Integrate a newly-created or newly-restored node into the DAG.
+
+    Concentrates three concerns that used to live in separate loops:
+
+      1. MissingParent lifecycle: convert ghost edges (MissingParent rows
+         naming this node) into real parent edges on the referencing
+         revisions.
+      2. Downstream impact propagation: delegate the BFS graph walk and
+         revalidation to `propagate_impact` — the same engine bulk deployment
+         uses — so the single-node path sees the same propagation behavior.
+      3. Post-propagation bookkeeping: emit `status_change_history` events
+         for every transition, write `catalog_id` on nodes that transitioned
+         to VALID, and recompute cube statuses from their element statuses
+         (cubes have no query, so propagate_impact can't decide them).
+
+    Safe to call for a node of any status: an INVALID draft node still
+    resolves ghost edges on downstream revisions; downstream revalidation
+    treats the invalid parent correctly via propagate_impact's failed-parent
+    handling.
     """
-    Propagate a valid status by revalidating all downstream nodes
-    """
-    while valid_nodes:
-        resolved_nodes = []
-        for node_revision in valid_nodes:
-            if node_revision.status != NodeStatus.VALID:
-                raise DJException(
-                    f"Cannot propagate valid status: Node `{node_revision.name}` is not valid",
-                )
-            downstream_nodes = await get_downstream_nodes(
+    if not node.current:
+        raise DJException(
+            f"Cannot propagate node `{node.name}`: no current revision",
+        )
+
+    await _attach_missing_parent_refs(session, node)
+    # propagate_impact's Phase 1 issues a raw-SQL BFS over NodeRelationship;
+    # the freshly-attached edges must be flushed so that BFS can see them.
+    await session.flush()
+
+    impacts = await propagate_impact(
+        session=session,
+        namespace=node.namespace,
+        changed_node_names={node.name},
+    )
+
+    cube_names = [
+        impact.name for impact in impacts if impact.node_type == NodeType.CUBE
+    ]
+    cube_transitions = await _finalize_cube_statuses_from_elements(session, cube_names)
+
+    transitions = [i for i in impacts if i.current_status != i.predicted_status]
+    if transitions or cube_transitions:
+        names = [i.name for i in transitions] + [
+            name
+            for name, (old, new) in cube_transitions.items()
+            if old != new and name not in {i.name for i in transitions}
+        ]
+        changed_nodes = await Node.get_by_names(
+            session,
+            names,
+            options=[joinedload(Node.current)],
+        )
+        nodes_by_name = {n.name: n for n in changed_nodes}
+        for impact in transitions:
+            downstream = nodes_by_name.get(impact.name)
+            if not downstream or not downstream.current:  # pragma: no cover
+                continue
+            old_status = impact.current_status
+            new_status = impact.predicted_status
+            # For cubes, the cube-element-derived status overrides propagate_impact
+            if impact.node_type == NodeType.CUBE and impact.name in cube_transitions:
+                old_status, new_status = cube_transitions[impact.name]
+                if old_status == new_status:
+                    continue
+            if new_status == NodeStatus.VALID:
+                downstream.current.catalog_id = node.current.catalog_id
+            await save_history(
+                event=status_change_history(
+                    downstream.current,
+                    old_status,
+                    new_status,
+                    parent_node=node.name,
+                    current_user=current_user,
+                ),
                 session=session,
-                node_name=node_revision.name,
             )
-            downstream_nodes = topological_sort(downstream_nodes)
-            newly_valid_nodes = []
-            for node in downstream_nodes:
-                node_validator = await validate_node_data(
-                    data=node.current,
-                    session=session,
-                )
-                node.current.status = node_validator.status
-                if node_validator.status == NodeStatus.VALID:
-                    node.current.columns = node_validator.columns or []
-                    node.current.status = NodeStatus.VALID
-                    node.current.catalog_id = catalog_id
-                    await save_history(
-                        event=status_change_history(
-                            node.current,
-                            NodeStatus.INVALID,
-                            NodeStatus.VALID,
-                            current_user=current_user,
-                        ),
-                        session=session,
-                    )
-                    newly_valid_nodes.append(node.current)
-                session.add(node.current)
-                await session.commit()
-                await session.refresh(node.current)
-            resolved_nodes.extend(newly_valid_nodes)
-        valid_nodes = resolved_nodes
+        # Emit history for cubes whose propagate_impact result was UNCHANGED but
+        # whose element-derived status differs from the stored status.
+        for cube_name, (old_status, new_status) in cube_transitions.items():
+            if old_status == new_status:
+                continue
+            already_emitted = any(i.name == cube_name for i in transitions)
+            if already_emitted:
+                continue
+            downstream = nodes_by_name.get(cube_name)
+            if not downstream or not downstream.current:  # pragma: no cover
+                continue
+            if new_status == NodeStatus.VALID:
+                downstream.current.catalog_id = node.current.catalog_id
+            await save_history(
+                event=status_change_history(
+                    downstream.current,
+                    old_status,
+                    new_status,
+                    parent_node=node.name,
+                    current_user=current_user,
+                ),
+                session=session,
+            )
+    await session.commit()
 
 
 async def delete_orphaned_missing_parents(session: AsyncSession) -> None:
@@ -3114,103 +3270,6 @@ async def activate_node(
             message=f"Cannot restore `{name}`, node already active.",
         )
     node.deactivated_at = None  # type: ignore
-
-    # Get the MissingParent entry for this node (if it exists)
-    missing_parent_result = await session.execute(
-        select(MissingParent).where(MissingParent.name == name),
-    )
-    missing_parent = missing_parent_result.scalar_one_or_none()
-    _logger.info(
-        f"Activating node {name}, missing_parent found: {missing_parent is not None}",
-    )
-
-    # Find downstream nodes that need revalidation
-    # Since we keep parent relationships during deactivation (only remove on hard delete),
-    # we can use the normal get_downstream_nodes which uses NodeRelationship
-    downstreams = await get_downstream_nodes(
-        session,
-        node.name,
-        options=[
-            selectinload(Node.current).options(
-                selectinload(NodeRevision.columns).options(
-                    selectinload(Column.attributes).joinedload(
-                        ColumnAttribute.attribute_type,
-                    ),
-                    selectinload(Column.dimension),
-                ),
-                selectinload(NodeRevision.parents),
-                selectinload(NodeRevision.missing_parents),
-                selectinload(NodeRevision.cube_elements).selectinload(
-                    Column.node_revision,
-                ),
-            ),
-        ],
-    )
-    _logger.info(
-        f"Found {len(downstreams)} downstream nodes to revalidate",
-    )
-    for downstream in downstreams:
-        _logger.info(f"Processing downstream: {downstream.name}")
-
-        # Remove from missing_parents and add back to parents
-        if (  # pragma: no branch
-            missing_parent and missing_parent in downstream.current.missing_parents
-        ):
-            downstream.current.missing_parents.remove(missing_parent)
-        # Query NodeRelationship directly rather than trusting the in-memory
-        # `downstream.current.parents` collection. On Python 3.11 we've seen
-        # the selectinload'd collection miss the row that already exists in
-        # the DB (autoflush ordering across the prior deactivate + this
-        # activate), which caused duplicate-key violations at flush time.
-        existing = await session.execute(
-            select(NodeRelationship.parent_id)
-            .where(
-                NodeRelationship.parent_id == node.id,
-                NodeRelationship.child_id == downstream.current.id,
-            )
-            .limit(1),
-        )
-        if existing.first() is None:
-            downstream.current.parents.append(node)
-
-        _logger.info(
-            f"Revalidating downstream: {downstream.name} (type={downstream.type}, old_status={downstream.current.status})",
-        )
-        old_status = downstream.current.status
-        if downstream.type == NodeType.CUBE:
-            downstream.current.status = NodeStatus.VALID
-            # Refresh cube elements to get latest status after revalidation
-            for element in downstream.current.cube_elements:
-                if element.node_revision:  # pragma: no cover
-                    await session.refresh(element.node_revision, ["status"])
-                    if element.node_revision.status == NodeStatus.INVALID:
-                        downstream.current.status = (  # pragma: no cover
-                            NodeStatus.INVALID
-                        )
-        else:
-            # We should not fail node restoration just because of some nodes
-            # that have been invalid already and stay that way.
-            node_validator = await validate_node_data(downstream.current, session)
-            downstream.current.status = node_validator.status
-            if node_validator.errors:
-                _logger.info(
-                    f"  Validation errors: {[str(e) for e in node_validator.errors]}",
-                )
-                downstream.current.status = NodeStatus.INVALID
-        session.add(downstream)
-        await session.flush()  # Flush so other nodes can see the updated status
-        if old_status != downstream.current.status:
-            await save_history(
-                event=status_change_history(
-                    downstream.current,
-                    old_status,
-                    downstream.current.status,
-                    parent_node=node.name,
-                    current_user=current_user,
-                ),
-                session=session,
-            )
-
     session.add(node)
     await save_history(
         event=History(
@@ -3224,9 +3283,18 @@ async def activate_node(
         session=session,
     )
 
-    # Clean up orphaned MissingParents (the restored node's MissingParent may now be orphaned)
-    await delete_orphaned_missing_parents(session)
+    # Resolve MissingParent rows, BFS downstream, revalidate, emit history.
+    # Same concentrated entry point used by create_a_node_revision.
+    await propagate_node_valid(
+        session=session,
+        node=node,
+        current_user=current_user,
+        save_history=save_history,
+    )
 
+    # Clean up orphaned MissingParents (the restored node's MissingParent may
+    # now be orphaned after _attach_missing_parent_refs).
+    await delete_orphaned_missing_parents(session)
     await session.commit()
 
 
@@ -3306,10 +3374,7 @@ async def revalidate_node(
         )
 
     # Revalidate all other node types.
-    # NOTE: uses validate_node_data_v2 so POST /nodes/{name}/validate/ exercises
-    # the new validator. Every other call site (create flows, propagation,
-    # downstream reference resolution) stays on legacy until cutover.
-    node_validator = await validate_node_data_v2(current_node_revision, session)
+    node_validator = await validate_node_data(current_node_revision, session)
 
     # Compile and save query AST
     if update_query_ast and background_tasks:

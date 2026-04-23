@@ -19,7 +19,9 @@ from sqlalchemy.sql.operators import is_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload, selectinload
 
+from datajunction_server.database.column import Column
 from datajunction_server.database.node import Node, NodeRevision, NodeRelationship
+from datajunction_server.models.base import labelize
 from datajunction_server.instrumentation.provider import get_metrics_provider
 from datajunction_server.internal.deployment.dimension_reachability import (
     DimensionReachability,
@@ -782,11 +784,35 @@ def _update_node_columns(
     node: Node,
     new_columns: list[tuple[str, ColumnType]],
 ):
-    """Update a node's column types from validate_node_query results."""
-    col_type_map = {name: col_type for name, col_type in new_columns}
-    for col in node.current.columns or []:
-        if col.name in col_type_map:  # pragma: no branch
-            col.type = col_type_map[col.name]
+    """Replace a node's columns to match the new output signature.
+
+    Preserves display_name, attributes, and dimension from the existing
+    columns where the name matches; adds net-new columns and drops
+    columns that no longer appear in the output signature. Required so
+    that nodes created with no columns (e.g. draft-mode nodes whose
+    parents were invalid at creation time) get their columns populated
+    when they transition to valid during downstream propagation.
+    """
+    existing_by_name = {col.name: col for col in node.current.columns or []}
+    is_metric = node.type == NodeType.METRIC
+    updated: list[Column] = []
+    for idx, (name, col_type) in enumerate(new_columns):
+        existing = existing_by_name.get(name)
+        if existing:
+            existing.type = col_type
+            existing.order = idx
+            updated.append(existing)
+        else:
+            updated.append(
+                Column(
+                    name=name if is_metric else name.lower(),
+                    display_name=labelize(name),
+                    type=col_type,
+                    attributes=[],
+                    order=idx,
+                ),
+            )
+    node.current.columns = updated
 
 
 # ---------------------------------------------------------------------------
