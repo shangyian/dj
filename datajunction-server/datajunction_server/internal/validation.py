@@ -255,20 +255,14 @@ async def validate_node_data(
         pre_parsed=query_ast,
     )
 
-    # --- Step 7: surface validate_node_query errors as TYPE_INFERENCE, with
-    # one exception: "Unable to infer type for column" from UnknownType output
-    # columns is common at the single-node layer for metrics that reference
-    # dim-attribute paths (e.g. `default.some_dim.col` inside SUM), which DJ
-    # resolves via dimension links at query-build time rather than at
-    # validation time. Legacy validate_node_data did not surface these, so
-    # filtering them out preserves cutover parity. Deployment's
-    # bulk_validate_node_data still enforces strictly via its own invocation
-    # of validate_node_query.
-    filtered_errors = [
-        msg for msg in validation.errors if not msg.startswith("Unable to infer type")
-    ]
-    if filtered_errors:
-        for msg in filtered_errors:
+    # --- Step 7: surface validate_node_query errors as TYPE_INFERENCE. Same
+    # code and no filtering as bulk_validate_node_data does for deployment —
+    # this is the parity point. Deferred dim-attribute unknowns are handled
+    # inside validate_node_query itself (via TypeScope.had_deferred_unknown)
+    # so legitimate "Unable to infer type" errors (e.g. SUM(boolean)) still
+    # surface here.
+    if validation.errors:
+        for msg in validation.errors:
             node_validator.errors.append(
                 DJError(code=ErrorCode.TYPE_INFERENCE, message=msg),
             )

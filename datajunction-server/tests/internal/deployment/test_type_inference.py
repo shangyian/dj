@@ -379,8 +379,14 @@ class TestConditionals:
             "SELECT CASE WHEN TRUE THEN default.dim.x END AS val FROM default.orders",
             _col_map(ORDERS_COLS),
         )
+        # Multi-part namespaced refs that don't match a FROM table or known
+        # DJ node are treated as deferred dim-attribute references resolved
+        # at query-build time, so the output UnknownType is expected and
+        # "Unable to infer type" is not surfaced here.
         assert result.output_columns[0] == ("val", UnknownType())
-        assert any("Unable to infer type for column `val`" in e for e in result.errors)
+        assert not any(
+            "Unable to infer type for column `val`" in e for e in result.errors
+        )
 
     def test_coalesce(self):
         result = validate_node_query(
@@ -1909,22 +1915,28 @@ class TestUnresolvableReferences:
         assert isinstance(result.output_columns[0][1], DoubleType)
 
     def test_function_with_unresolvable_dim_arg(self):
+        # Deferred dim-attribute resolution: the unknown on the output is
+        # expected and no "Unable to infer type" error surfaces.
         result = validate_node_query(
             "SELECT SUM(default.missing_dim.x) AS total FROM default.orders",
             _col_map(ORDERS_COLS),
         )
         assert result.output_columns[0] == ("total", UnknownType())
-        assert any(
+        assert not any(
             "Unable to infer type for column `total`" in e for e in result.errors
         )
 
     def test_binary_op_both_unresolvable(self):
+        # Same as above: multi-part namespaced refs that don't match any
+        # FROM table are deferred dim-attribute resolutions.
         result = validate_node_query(
             "SELECT default.dim_a.x + default.dim_b.y AS z FROM default.orders",
             _col_map(ORDERS_COLS),
         )
         assert result.output_columns[0] == ("z", UnknownType())
-        assert any("Unable to infer type for column `z`" in e for e in result.errors)
+        assert not any(
+            "Unable to infer type for column `z`" in e for e in result.errors
+        )
 
     def test_unresolved_refs_are_named_in_error_message(self):
         """A generic 'unable to infer type' message forces the user to re-scan

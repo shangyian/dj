@@ -61,6 +61,14 @@ class TypeScope:
     # Collected errors during resolution (instead of raising immediately)
     errors: list[str] = field(default_factory=list)
 
+    # Set when a column reference returns UnknownType as a *deferred* resolution
+    # — e.g. a multi-part namespaced ref that looks like a dim-attribute path
+    # which DJ resolves via dimension links at query-build time. Output
+    # columns whose type is UnknownType *because of* such a deferred resolution
+    # are not surfaced as "Unable to infer type" errors, matching legacy
+    # single-node validation's tolerance.
+    had_deferred_unknown: bool = False
+
 
 @dataclass
 class QueryValidationResult:
@@ -197,21 +205,26 @@ def _resolve_query(
         except Exception as exc:
             scope.errors.append(str(exc))
 
-    # Flag any output columns with unresolved types. When possible, point at
-    # the specific column references inside the expression whose types could
-    # not be resolved — that's the root cause the user has to fix.
-    for projection_expr, resolved in expr_to_output:
-        for col_name, col_type in resolved:
-            if isinstance(col_type, UnknownType):
-                unresolved = _unresolved_refs_in(projection_expr)
-                detail = (
-                    f" Unresolved column reference(s): {', '.join(unresolved)}."
-                    if unresolved
-                    else " This may indicate an unsupported function or expression."
-                )
-                scope.errors.append(
-                    f"Unable to infer type for column `{col_name}`.{detail}",
-                )
+    # Flag any output columns with unresolved types. Skip this check when
+    # the scope saw a deferred-unknown (multi-part namespaced ref that falls
+    # through to UnknownType as a dim-attribute to be resolved at query-build
+    # time) — the UnknownType on the output is expected in that case, and
+    # surfacing it as a type-inference error would wrongly reject metrics
+    # like `SUM(default.some_dim.col) FROM ...` at create time. Deployment's
+    # own strict validation still catches unresolved dim-attributes later.
+    if not scope.had_deferred_unknown:
+        for projection_expr, resolved in expr_to_output:
+            for col_name, col_type in resolved:
+                if isinstance(col_type, UnknownType):
+                    unresolved = _unresolved_refs_in(projection_expr)
+                    detail = (
+                        f" Unresolved column reference(s): {', '.join(unresolved)}."
+                        if unresolved
+                        else " This may indicate an unsupported function or expression."
+                    )
+                    scope.errors.append(
+                        f"Unable to infer type for column `{col_name}`.{detail}",
+                    )
 
     # Validate column references in non-projection clauses
     _validate_non_projection_clauses(select, scope)
@@ -863,6 +876,7 @@ def _resolve_column_type(
             # function OVER (ORDER BY ...)). Fall back to UnknownType rather
             # than raising so legitimate dim-link refs don't get falsely
             # rejected — deployment enforces strictly via its own call.
+            scope.had_deferred_unknown = True
             return UnknownType()
         # Bare column refs in a derived metric that don't match any parent
         # metric are treated permissively for the same reason: the parser
@@ -872,6 +886,7 @@ def _resolve_column_type(
         # derived-metric scope for bare refs, so matching that behavior here
         # keeps the cutover behavior-neutral. Deployment enforces strictly
         # via its own dim-attribute validation pass.
+        scope.had_deferred_unknown = True
         return UnknownType()
 
     # Table-qualified column: namespace.column_name
@@ -943,6 +958,12 @@ def _resolve_column_type(
                     f"which is not a table alias in this scope, a struct "
                     f"column, or a known DJ node.",
                 )
+        else:
+            # Multi-segment namespace fell through to UnknownType as a
+            # deferred dim-attribute resolution; mark so output-level
+            # "Unable to infer type" errors don't surface for expressions
+            # that contain only this kind of permissive unknown.
+            scope.had_deferred_unknown = True
         return UnknownType()
 
     # Unqualified column - search all tables
