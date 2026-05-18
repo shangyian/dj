@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from datajunction_server.database.column import Column
 from datajunction_server.database.node import Node, NodeRevision, NodeType
 from datajunction_server.database.user import OAuthProvider, User
+from datajunction_server.errors import ErrorCode
 from datajunction_server.internal.validation import (
     _reparse_parent_column_types,
     validate_node_data,
@@ -1128,5 +1129,63 @@ async def test_validate_node_data_v2_cross_fact_metrics_no_shared_dims(
     assert validator.status == NodeStatus.INVALID
     assert any(
         err.code == ErrorCode.INVALID_PARENT and "no shared" in err.message.lower()
+        for err in validator.errors
+    ), [(e.code, e.message) for e in validator.errors]
+
+
+@pytest.mark.asyncio
+async def test_validate_node_flags_self_reference(
+    session: AsyncSession,
+    user: User,
+    parent_with_malformed_column: Node,
+):
+    """
+    A node whose query references the node itself by name should be flagged as
+    INVALID with an INVALID_PARENT error. Without this guard, the resulting
+    cycle can surface downstream as confusing errors like SQLAlchemy's
+    MissingGreenlet.
+    """
+    data = NodeRevisionBase(
+        name="test.self_ref",
+        display_name="Self-referencing node",
+        type=NodeType.TRANSFORM,
+        query="SELECT * FROM test.self_ref",
+        mode="published",
+    )
+
+    validator = await validate_node_data(data, session)
+
+    assert validator.status == NodeStatus.INVALID
+    assert any(
+        err.code == ErrorCode.INVALID_PARENT
+        and "references itself" in err.message.lower()
+        for err in validator.errors
+    ), [(e.code, e.message) for e in validator.errors]
+
+
+@pytest.mark.asyncio
+async def test_validate_node_no_false_positive_for_similar_names(
+    session: AsyncSession,
+    user: User,
+    parent_with_malformed_column: Node,
+):
+    """
+    A node referencing a different node whose name happens to be a prefix or
+    contain the new node's name shouldn't be flagged as a self-reference.
+    """
+    data = NodeRevisionBase(
+        name="test.parent",
+        display_name="Not self-referencing",
+        type=NodeType.TRANSFORM,
+        query="SELECT * FROM test.parent_malformed",
+        mode="published",
+    )
+
+    validator = await validate_node_data(data, session)
+
+    # Should NOT have a self-reference error
+    assert not any(
+        err.code == ErrorCode.INVALID_PARENT
+        and "references itself" in err.message.lower()
         for err in validator.errors
     ), [(e.code, e.message) for e in validator.errors]

@@ -161,6 +161,25 @@ async def validate_node_data(
         node_validator.dependencies_map = dependencies_map
         node_validator.missing_parents_map = missing_parents_map
 
+        # Self-reference: the node's query lists itself as a parent. This creates
+        # a cycle in the DAG and can trigger downstream errors (e.g. MissingGreenlet
+        # when SQLAlchemy tries to lazy-load relationships during cycle resolution).
+        self_ref = (
+            any(parent.name == validated_node.name for parent in dependencies_map)
+            or validated_node.name in missing_parents_map
+        )
+        if self_ref:
+            node_validator.status = NodeStatus.INVALID
+            node_validator.errors.append(
+                DJError(
+                    code=ErrorCode.INVALID_PARENT,
+                    message=(
+                        f"Node `{validated_node.name}` references itself. "
+                        "Self-references are not allowed."
+                    ),
+                ),
+            )
+
         # compile() runs inside extract_dependencies. Surface any INVALID_COLUMN
         # errors it produced, filtering out references whose namespace is a local
         # SQL alias or CTE — those are valid and resolved at full compile time.
@@ -558,6 +577,21 @@ async def validate_node_data_v2(
         parent.current: [] for parent in parents if parent.current
     }
     node_validator.missing_parents_map = {name: [] for name in missing}
+
+    # Self-reference: the node's query lists itself as a parent.
+    if any(p.name == validated_node.name for p in parents) or (
+        validated_node.name in missing
+    ):
+        node_validator.status = NodeStatus.INVALID
+        node_validator.errors.append(
+            DJError(
+                code=ErrorCode.INVALID_PARENT,
+                message=(
+                    f"Node `{validated_node.name}` references itself. "
+                    "Self-references are not allowed."
+                ),
+            ),
+        )
 
     # --- Step 5: re-parse exotic column types before type inference ---
     _reparse_parent_column_types(node_validator.dependencies_map)
