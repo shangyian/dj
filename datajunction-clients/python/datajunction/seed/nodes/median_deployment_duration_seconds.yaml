@@ -17,7 +17,9 @@ custom_metadata:
   - system.dj.deployment.status
 required_dimensions: []
 direction: lower_is_better
-unit: null
+unit:
+  kind: time
+  code: s
 significant_digits: 2
 min_decimal_exponent: null
 max_decimal_exponent: null

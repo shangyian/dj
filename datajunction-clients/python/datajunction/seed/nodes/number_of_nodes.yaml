@@ -17,7 +17,9 @@ custom_metadata:
   - system.dj.node_type.type
 required_dimensions: []
 direction: null
-unit: null
+unit:
+  kind: count
+  code: nodes
 significant_digits: null
 min_decimal_exponent: null
 max_decimal_exponent: null

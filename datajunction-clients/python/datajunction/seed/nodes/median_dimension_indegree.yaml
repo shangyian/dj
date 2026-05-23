@@ -17,7 +17,9 @@ custom_metadata:
   - system.dj.namespace.top_level
 required_dimensions: []
 direction: higher_is_better
-unit: null
+unit:
+  kind: count
+  code: nodes
 significant_digits: 2
 min_decimal_exponent: null
 max_decimal_exponent: null

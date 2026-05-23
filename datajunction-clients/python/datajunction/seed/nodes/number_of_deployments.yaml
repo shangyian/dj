@@ -13,7 +13,9 @@ custom_metadata:
   - system.dj.deployment.status
 required_dimensions: []
 direction: null
-unit: null
+unit:
+  kind: count
+  code: deployments
 significant_digits: null
 min_decimal_exponent: null
 max_decimal_exponent: null

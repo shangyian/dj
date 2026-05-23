@@ -14,7 +14,9 @@ custom_metadata:
   subgroup: Authors & Edits
 required_dimensions: []
 direction: null
-unit: null
+unit:
+  kind: count
+  code: users
 significant_digits: null
 min_decimal_exponent: null
 max_decimal_exponent: null

@@ -17,7 +17,9 @@ custom_metadata:
   - system.dj.materialization.strategy
 required_dimensions: []
 direction: null
-unit: null
+unit:
+  kind: count
+  code: materializations
 significant_digits: null
 min_decimal_exponent: null
 max_decimal_exponent: null

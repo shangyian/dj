@@ -18,7 +18,9 @@ custom_metadata:
   - system.dj.repo.repository
 required_dimensions: []
 direction: null
-unit: null
+unit:
+  kind: count
+  code: branches
 significant_digits: null
 min_decimal_exponent: null
 max_decimal_exponent: null
