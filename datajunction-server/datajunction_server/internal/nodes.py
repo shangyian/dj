@@ -3344,6 +3344,10 @@ async def revalidate_node(
     # NOTE: uses validate_node_data_v2 so POST /nodes/{name}/validate/ exercises
     # the new validator. Every other call site (create flows, propagation,
     # downstream reference resolution) stays on legacy until cutover.
+    # required_dimensions can be left unloaded on identity-mapped NodeRevisions
+    # when a prior dag.py traversal cached node.current without it; refresh
+    # explicitly so validate_node_data_v2's access doesn't trip MissingGreenlet.
+    await session.refresh(current_node_revision, ["required_dimensions"])
     node_validator = await validate_node_data_v2(current_node_revision, session)
 
     # Compile and save query AST
