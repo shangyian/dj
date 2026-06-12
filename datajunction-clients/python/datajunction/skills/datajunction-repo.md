@@ -382,28 +382,57 @@ mode: published
 
 ### Cube YAML
 
+A cube is a curated bundle of **metrics** sliced by a fixed set of **dimensions** (optionally pre-filtered). Unlike other node types, a cube has no `query:` — you don't write SQL. You list existing metrics and dimensions and DJ assembles the cube from them. This makes cubes the easiest node to author *and* the easiest to get rejected, because every metric/dimension/filter you name must already exist and line up.
+
 ```yaml
 # cubes/revenue_cube.yaml
 name: finance.revenue_cube
+node_type: cube
+display_name: Revenue Cube
 description: Pre-computed revenue metrics by date and region
-metrics:
+owners:
+  - your_username
+
+metrics:                                  # fully-qualified metric node names
   - finance.total_revenue
   - finance.avg_transaction_value
 
-dimensions:
-  - common.dimensions.date.dateint
-  - common.dimensions.date.month
+dimensions:                               # dimension-attribute references: <node>.<column>
+  - common.dimensions.date.dateint[purchase]   # role-qualified: the date joined via the "purchase" link
+  - common.dimensions.date.dateint[ship]       # same dimension node, different role → distinct columns
   - common.dimensions.users.country_code
+
+filters:                                  # optional; SQL predicates over reachable dimensions
+  - common.dimensions.date.dateint >= 20240101
 
 mode: published
 ```
+
+**Field reference:**
+
+| Field | Required | Notes |
+|-------|----------|-------|
+| `node_type: cube` | yes | Identifies the spec as a cube. |
+| `metrics` | yes | Fully-qualified **metric** node names. Must already exist. |
+| `dimensions` | yes | Dimension-attribute references, `<dimension_node>.<column>` (e.g. `common.dimensions.users.country_code`) or a fact/transform column exposed as a dimension (e.g. `finance.orders.product_id`). When the same dimension is reachable by more than one link, **disambiguate with a role suffix**: `<node>.<column>[role]` (e.g. `common.dimensions.date.dateint[purchase]`). Multi-hop roles chain with `->`: `<node>.<column>[hop->role]`. The role must match a `role` on the dimension link (see "Dimension Links with Roles" in the `datajunction` skill). |
+| `filters` | no | List of SQL predicate strings over dimensions reachable from the cube (e.g. `"common.dimensions.geo.country_code = 'US'"`). |
+| `owners`, `display_name`, `description`, `tags`, `mode` | no | Standard node metadata (see [Column-Level Configuration](#column-level-configuration) / source examples). |
+| `columns` | no | **Only** needed to declare a temporal partition for materialization — see [Temporal Partitions on Cubes](#temporal-partitions-on-cubes). Cube element columns (types, attributes, order) are auto-derived; don't hand-write them otherwise. |
 
 **When to use cubes:**
 - Frequently queried metric combinations
 - Pre-compute for performance (materialization)
 - Dashboard metric sets
 
-**Critical**: All metrics in a cube MUST share ALL dimensions in the cube. Use `get_common_dimensions` MCP tool (see `datajunction-query`) to check first.
+**The one rule that trips everyone up:** every metric in the cube must share **all** of the cube's dimensions — a metric can only join to a dimension its upstream node links to. Before authoring, confirm the set is compatible with the `get_common_dimensions` MCP tool (see `datajunction-query`); list only dimensions that show up as common to *all* chosen metrics.
+
+**Why a cube comes back `invalid`** (it still deploys — the cube is just marked invalid with a message, rather than failing the whole deployment):
+- A metric or dimension name doesn't exist, or isn't fully qualified.
+- A chosen dimension isn't shared by every metric (not a common dimension).
+- A `filters` predicate references a column that doesn't exist (`"... does not exist"`) or a dimension **not reachable** from the cube's metrics.
+- Zero metrics (a malformed/empty cube parses but is flagged invalid).
+
+**Materialization is NOT part of the cube YAML.** The YAML defines *what* the cube is (metrics, dimensions, filters, temporal partition). Turning it into a physical Druid datasource is a separate action — see [Materializing a Cube](#materializing-a-cube-druid) below. The temporal partition (next section) is a prerequisite for that.
 
 ---
 
@@ -554,6 +583,72 @@ columns:
 ```
 
 **Result**: Queries with `include_temporal_filters=True` push `WHERE order_date >= X AND order_date <= Y` to the `orders` transform.
+
+---
+
+## Materializing a Cube (Druid)
+
+Materialization makes a cube queryable from a physical Druid datasource instead of computing it ad-hoc. This is the part of cube work that's easy to get wrong, so read the prerequisites first.
+
+**Materialization is not declared in YAML.** The cube YAML defines the cube; you materialize it with a separate API/client call *after* the cube exists.
+
+### Prerequisites
+
+1. **The cube MUST have a temporal partition column.** Without one, the materialization request is rejected:
+   > *"The cube materialization cannot be configured if there is no temporal partition specified on the cube."*
+
+   Set it in the cube's `columns:` block as shown in [Temporal Partitions on Cubes](#temporal-partitions-on-cubes) above. This is the single most common reason a cube won't materialize.
+
+2. **Upstream nodes link to the partitioned dimension**, so the per-run window pushes down (same pushdown rules as the temporal-partition section).
+
+### There is only one job type: `druid_cube`
+
+For cubes you configure exactly one materialization with `job: druid_cube`. It subsumes all earlier cube materialization types — there is nothing else to pick.
+
+**You do NOT create or invoke pre-aggregations yourself.** The `druid_cube` job derives, builds, and waits on the intermediate pre-agg tables internally, then combines them and ingests to Druid. From the author's side it's a single `druid_cube` materialization; the pre-agg pipeline is plumbing DJ manages for you.
+
+### Strategy
+
+| Strategy | Behavior |
+|----------|----------|
+| `incremental_time` (default) | Materializes recent partitions each run, bounded by `lookback_window` (default `1 DAY`). Requires the temporal partition. |
+| `full` | Recomputes the whole datasource each run. |
+
+### Configure it
+
+Via the Python client:
+
+```python
+from datajunction.models import (
+    Materialization, MaterializationJobType, MaterializationStrategy,
+)
+
+cube = client.cube("finance.orders_cube")
+cube.add_materialization(
+    Materialization(
+        job=MaterializationJobType.DRUID_CUBE,
+        strategy=MaterializationStrategy.INCREMENTAL_TIME,
+        schedule="0 3 * * *",   # cron
+        config={},
+    )
+)
+```
+
+Or via REST (the request body also accepts `lookback_window`, which the client dataclass does not expose):
+
+```bash
+curl -b ~/.dj/cookies.txt -X POST \
+  $DJ_URL/nodes/finance.orders_cube/materialization/ \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "job": "druid_cube",
+    "strategy": "incremental_time",
+    "schedule": "0 3 * * *",
+    "lookback_window": "1 DAY"
+  }'
+```
+
+DJ derives the materialization name (e.g. `druid_cube__incremental_time__<partition>`). Remove it with `cube.deactivate_materialization("<name>")`.
 
 ---
 
