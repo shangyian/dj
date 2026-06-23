@@ -147,6 +147,16 @@ class DruidCubeMaterializationJob(DruidMaterializationJob, MaterializationJob):
             "Scheduling DruidCubeMaterializationJob for node=%s",
             cube_config.cube,
         )
+        # Own the materialization workflow by the node's first owner (the
+        # responsible team) rather than the caller, which may be a service
+        # principal. Best-effort: None if the owners relationship is not eagerly
+        # loaded in this context (the query service then falls back to
+        # group-based access).
+        try:
+            node = materialization.node_revision.node
+            owner = node.owners[0].username if node and node.owners else None
+        except Exception:  # pragma: no cover - relationships not loaded
+            owner = None
         return query_service_client.materialize_cube(
             materialization_input=DruidCubeMaterializationInput(
                 name=materialization.name,
@@ -157,6 +167,7 @@ class DruidCubeMaterializationJob(DruidMaterializationJob, MaterializationJob):
                 schedule=materialization.schedule,
                 job=materialization.job,
                 lookback_window=cube_config.lookback_window,
+                owner=owner,
                 measures_materializations=cube_config.measures_materializations,
                 combiners=cube_config.combiners,
             ),

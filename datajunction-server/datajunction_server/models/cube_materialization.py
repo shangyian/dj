@@ -435,6 +435,11 @@ class DruidCubeMaterializationInput(BaseModel):
     schedule: str
     job: str
     lookback_window: Optional[str] = "1 DAY"
+    # Owner of the cube node (first entry of the node's owners list). Lets the
+    # query service own the materialization workflow by the responsible team
+    # rather than the (possibly service-principal) caller. None when the node has
+    # no owners or the owners relationship is unavailable.
+    owner: Optional[str] = None
 
     # List of measures materializations
     measures_materializations: List[MeasuresMaterialization]

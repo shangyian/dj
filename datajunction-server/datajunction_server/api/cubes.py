@@ -279,6 +279,13 @@ async def cube_materialization_info(
         node.current,  # type: ignore
         upsert,
     )
+    # Own the materialization workflow by the node's first owner (the responsible
+    # team) so service-principal-triggered materializations aren't owned by the
+    # caller. Best-effort: None if owners aren't loaded.
+    try:
+        owner = node.owners[0].username if node.owners else None
+    except Exception:  # pragma: no cover - owners relationship not loaded
+        owner = None
     return DruidCubeMaterializationInput(
         name="",
         cube=cube_config.cube,
@@ -287,6 +294,7 @@ async def cube_materialization_info(
         strategy=upsert.strategy,
         schedule=upsert.schedule,
         job=upsert.job.name,  # type: ignore
+        owner=owner,
         measures_materializations=cube_config.measures_materializations,
         combiners=cube_config.combiners,
     )

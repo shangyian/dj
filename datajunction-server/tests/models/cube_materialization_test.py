@@ -58,6 +58,58 @@ def test_druid_cube_materialization_job_passes_lookback_window():
     assert materialization_input.lookback_window == "7 DAY"
 
 
+def _druid_cube_materialization(owners=None):
+    cube_config = DruidCubeConfig(
+        cube=NodeNameVersion(name="default.repairs_cube", version="v1.0"),
+        dimensions=[],
+        metrics=[],
+        measures_materializations=[],
+        combiners=[],
+    )
+    materialization = SimpleNamespace(
+        name="druid_cube__incremental_time__default.repairs_cube",
+        config=cube_config.model_dump(),
+        strategy=MaterializationStrategy.INCREMENTAL_TIME,
+        schedule="@daily",
+        job="DruidCubeMaterializationJob",
+    )
+    if owners is not None:
+        materialization.node_revision = SimpleNamespace(
+            node=SimpleNamespace(owners=owners),
+        )
+    return materialization
+
+
+def test_druid_cube_materialization_job_owns_workflow_by_node_owner():
+    """schedule() should own the workflow with the node's first owner."""
+    owners = [
+        SimpleNamespace(username="cube-team@netflix.com"),
+        SimpleNamespace(username="second-owner@netflix.com"),
+    ]
+    query_service_client = Mock()
+    DruidCubeMaterializationJob().schedule(
+        _druid_cube_materialization(owners=owners),
+        query_service_client,
+    )
+    materialization_input = query_service_client.materialize_cube.call_args.kwargs[
+        "materialization_input"
+    ]
+    assert materialization_input.owner == "cube-team@netflix.com"
+
+
+def test_druid_cube_materialization_job_owner_none_without_owners():
+    """No node_revision/owners available → owner=None (no crash, group access)."""
+    query_service_client = Mock()
+    DruidCubeMaterializationJob().schedule(
+        _druid_cube_materialization(owners=None),
+        query_service_client,
+    )
+    materialization_input = query_service_client.materialize_cube.call_args.kwargs[
+        "materialization_input"
+    ]
+    assert materialization_input.owner is None
+
+
 class TestDruidCubeV3ConfigDruidCubeConfigCompatibility:
     """Test DruidCubeConfig compatibility computed properties."""
 
