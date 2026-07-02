@@ -2558,6 +2558,25 @@ class TestNonDecomposableMetrics:
     async def test_avg_window_live(self, client_with_build_v3):
         """AVG is a valid window aggregation — engines support it natively and
         it composes correctly with 0-fill densification."""
+        # Create the metric locally for this test
+        create = await client_with_build_v3.post(
+            "/nodes/metric/",
+            json={
+                "name": "v3.avg_revenue_trailing_7d",
+                "description": "Trailing 7-day average revenue",
+                "query": """
+                    SELECT
+                        AVG(v3.total_revenue) OVER (
+                            ORDER BY v3.date.date_id[order]
+                            ROWS BETWEEN 6 PRECEDING AND CURRENT ROW
+                        )
+                """,
+                "mode": "published",
+                "required_dimensions": ["v3.date.date_id[order]"],
+            },
+        )
+        assert create.status_code in (200, 201), create.json()
+
         response = await client_with_build_v3.get(
             "/sql/metrics/v3/",
             params={
@@ -2621,6 +2640,25 @@ SELECT  *
     async def test_avg_window_live_no_filter(self, client_with_build_v3):
         """AVG window with no filter on the order column — no scan expansion,
         plain window function passed through."""
+        # Create the metric locally for this test
+        create = await client_with_build_v3.post(
+            "/nodes/metric/",
+            json={
+                "name": "v3.avg_revenue_trailing_7d",
+                "description": "Trailing 7-day average revenue",
+                "query": """
+                    SELECT
+                        AVG(v3.total_revenue) OVER (
+                            ORDER BY v3.date.date_id[order]
+                            ROWS BETWEEN 6 PRECEDING AND CURRENT ROW
+                        )
+                """,
+                "mode": "published",
+                "required_dimensions": ["v3.date.date_id[order]"],
+            },
+        )
+        assert create.status_code in (200, 201), create.json()
+
         response = await client_with_build_v3.get(
             "/sql/metrics/v3/",
             params={
