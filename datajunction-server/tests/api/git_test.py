@@ -797,6 +797,198 @@ class TestBranchManagement:
         ]
 
     @pytest.mark.asyncio
+    async def test_list_branches_from_branch_returns_siblings(
+        self,
+        client_with_service_setup: AsyncClient,
+    ):
+        """
+        Listing branches from a *branch* namespace returns its siblings (branches
+        sharing the same DB parent_namespace), excluding the branch itself.
+        """
+        await client_with_service_setup.post("/namespaces/sib_parent")
+        await client_with_service_setup.patch(
+            "/namespaces/sib_parent/git",
+            json={
+                "github_repo_path": "myorg/myrepo",
+                "default_branch": "main",
+                "git_path": "nodes/",
+            },
+        )
+        await client_with_service_setup.post("/namespaces/sib_parent.main")
+        await client_with_service_setup.patch(
+            "/namespaces/sib_parent.main/git",
+            json={"parent_namespace": "sib_parent", "git_branch": "main"},
+        )
+        for suffix in ("feat1", "feat2"):
+            with patch(
+                "datajunction_server.api.branches.GitHubService",
+            ) as mock_github_class:
+                mock_github = MagicMock()
+                mock_github.create_branch = AsyncMock(
+                    return_value={
+                        "ref": f"refs/heads/{suffix}",
+                        "object": {"sha": "abc"},
+                    },
+                )
+                mock_github_class.return_value = mock_github
+                await client_with_service_setup.post(
+                    "/namespaces/sib_parent/branches",
+                    json={"branch_name": suffix},
+                )
+
+        # Listing from the branch itself, not the root.
+        response = await client_with_service_setup.get(
+            "/namespaces/sib_parent.main/branches",
+        )
+        assert response.status_code == HTTPStatus.OK
+        assert [branch["namespace"] for branch in response.json()] == [
+            "sib_parent.feat1",
+            "sib_parent.feat2",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_list_branches_counts_invalid_nodes(
+        self,
+        client_with_service_setup: AsyncClient,
+    ):
+        """invalid_node_count reflects nodes whose current revision is invalid."""
+        await client_with_service_setup.post("/namespaces/inv_parent")
+        await client_with_service_setup.patch(
+            "/namespaces/inv_parent/git",
+            json={
+                "github_repo_path": "myorg/myrepo",
+                "default_branch": "main",
+                "git_path": "nodes/",
+            },
+        )
+        await client_with_service_setup.post("/namespaces/inv_parent.main")
+        await client_with_service_setup.patch(
+            "/namespaces/inv_parent.main/git",
+            json={"parent_namespace": "inv_parent", "git_branch": "main"},
+        )
+        # One valid source ...
+        response = await client_with_service_setup.post(
+            "/nodes/source/",
+            json={
+                "name": "inv_parent.main.src",
+                "description": "Source table",
+                "catalog": "default",
+                "schema_": "public",
+                "table": "src",
+                "columns": [{"name": "id", "type": "int"}],
+            },
+        )
+        assert response.status_code in (HTTPStatus.CREATED, HTTPStatus.OK)
+        # ... and one invalid transform (references a nonexistent table, draft mode).
+        response = await client_with_service_setup.post(
+            "/nodes/transform/",
+            json={
+                "name": "inv_parent.main.bad",
+                "description": "Invalid transform",
+                "query": "SELECT x FROM inv_parent.main.does_not_exist",
+                "mode": "draft",
+            },
+        )
+        assert response.status_code in (HTTPStatus.CREATED, HTTPStatus.OK)
+
+        response = await client_with_service_setup.get(
+            "/namespaces/inv_parent/branches",
+        )
+        assert response.status_code == HTTPStatus.OK
+        branches = {branch["namespace"]: branch for branch in response.json()}
+        assert branches["inv_parent.main"]["num_nodes"] == 2
+        assert branches["inv_parent.main"]["invalid_node_count"] == 1
+
+    @pytest.mark.asyncio
+    async def test_list_branches_excludes_deactivated(
+        self,
+        client_with_service_setup: AsyncClient,
+    ):
+        """Deactivated branch namespaces are not listed."""
+        await client_with_service_setup.post("/namespaces/deact_parent")
+        await client_with_service_setup.patch(
+            "/namespaces/deact_parent/git",
+            json={
+                "github_repo_path": "myorg/myrepo",
+                "default_branch": "main",
+                "git_path": "nodes/",
+            },
+        )
+        for suffix in ("main", "old"):
+            await client_with_service_setup.post(f"/namespaces/deact_parent.{suffix}")
+            await client_with_service_setup.patch(
+                f"/namespaces/deact_parent.{suffix}/git",
+                json={"parent_namespace": "deact_parent", "git_branch": suffix},
+            )
+
+        # Deactivate the 'old' branch (no nodes, so cascade is unnecessary).
+        response = await client_with_service_setup.delete(
+            "/namespaces/deact_parent.old/?cascade=false",
+        )
+        assert response.status_code == HTTPStatus.OK
+
+        response = await client_with_service_setup.get(
+            "/namespaces/deact_parent/branches",
+        )
+        assert response.status_code == HTTPStatus.OK
+        assert [branch["namespace"] for branch in response.json()] == [
+            "deact_parent.main",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_list_branches_prefix_boundary(
+        self,
+        client_with_service_setup: AsyncClient,
+    ):
+        """
+        A branch's node count must not absorb a sibling whose name shares a leading
+        substring (e.g. 'main' must not swallow 'main2').
+        """
+        await client_with_service_setup.post("/namespaces/pfx_parent")
+        await client_with_service_setup.patch(
+            "/namespaces/pfx_parent/git",
+            json={
+                "github_repo_path": "myorg/myrepo",
+                "default_branch": "main",
+                "git_path": "nodes/",
+            },
+        )
+        for suffix in ("main", "main2"):
+            await client_with_service_setup.post(f"/namespaces/pfx_parent.{suffix}")
+            await client_with_service_setup.patch(
+                f"/namespaces/pfx_parent.{suffix}/git",
+                json={"parent_namespace": "pfx_parent", "git_branch": suffix},
+            )
+
+        # One node under main, three under main2.
+        for name in (
+            "pfx_parent.main.a",
+            "pfx_parent.main2.a",
+            "pfx_parent.main2.b",
+            "pfx_parent.main2.c",
+        ):
+            response = await client_with_service_setup.post(
+                "/nodes/source/",
+                json={
+                    "name": name,
+                    "description": "Source table",
+                    "catalog": "default",
+                    "schema_": "public",
+                    "table": name.replace(".", "_"),
+                    "columns": [{"name": "id", "type": "int"}],
+                },
+            )
+            assert response.status_code in (HTTPStatus.CREATED, HTTPStatus.OK)
+
+        response = await client_with_service_setup.get(
+            "/namespaces/pfx_parent/branches",
+        )
+        assert response.status_code == HTTPStatus.OK
+        assert {
+            branch["namespace"]: branch["num_nodes"] for branch in response.json()
+        } == {"pfx_parent.main": 1, "pfx_parent.main2": 3}
+
+    @pytest.mark.asyncio
     async def test_delete_branch(
         self,
         client_with_service_setup: AsyncClient,

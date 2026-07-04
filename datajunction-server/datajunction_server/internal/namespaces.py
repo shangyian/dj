@@ -1937,10 +1937,13 @@ async def resolve_git_config(
 
 def _rollup_branch_counts(
     branch_ns: str,
-    counts_by_ns: dict[str, tuple[int, int, Optional[datetime]]],
+    counts_by_ns: dict[str, tuple[int, int, datetime]],
 ) -> tuple[int, int, Optional[datetime]]:
     """
     Sum node counts for a branch namespace and all of its sub-namespaces.
+
+    ``last_updated_at`` is None only when the branch contains no nodes; per-node
+    timestamps are always populated (see ``node_counts_by_namespace``).
 
     Returns (num_nodes, invalid_node_count, last_updated_at).
     """
@@ -1951,12 +1954,11 @@ def _rollup_branch_counts(
         if node_ns == branch_ns or node_ns.startswith(prefix):
             num_nodes += num
             invalid_node_count += invalid
-            if updated_at is not None:
-                last_updated_at = (
-                    updated_at
-                    if last_updated_at is None
-                    else max(last_updated_at, updated_at)
-                )
+            last_updated_at = (
+                updated_at
+                if last_updated_at is None
+                else max(last_updated_at, updated_at)
+            )
     return num_nodes, invalid_node_count, last_updated_at
 
 

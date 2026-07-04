@@ -131,7 +131,7 @@ class NodeNamespace(Base):
         cls,
         session: AsyncSession,
         root_namespace: str,
-    ) -> dict[str, tuple[int, int, Optional[datetime]]]:
+    ) -> dict[str, tuple[int, int, datetime]]:
         """
         Aggregate node counts grouped by namespace for ``root_namespace`` and all of
         its descendants, in a single indexed pass.
@@ -139,7 +139,8 @@ class NodeNamespace(Base):
         ``root_namespace`` is a literal, so ``LIKE root.%`` uses the
         varchar_pattern_ops index on node.namespace rather than a full table scan.
         ``updated_at`` is set only at revision insert time, so the current revision's
-        timestamp is the latest per node — no need to scan historical revisions.
+        timestamp is the latest per node — no need to scan historical revisions. It's
+        never NULL here (non-nullable column, and every emitted group has a row).
 
         Returns dict[namespace -> (num_nodes, invalid_node_count, last_updated_at)].
         """
