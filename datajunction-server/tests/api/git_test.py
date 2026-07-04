@@ -707,6 +707,96 @@ class TestBranchManagement:
         ]
 
     @pytest.mark.asyncio
+    async def test_list_branches_rolls_up_node_counts(
+        self,
+        client_with_service_setup: AsyncClient,
+    ):
+        """
+        Node counts for a branch include nodes in the branch namespace itself and
+        all of its sub-namespaces.
+        """
+        await client_with_service_setup.post("/namespaces/count_parent")
+        await client_with_service_setup.patch(
+            "/namespaces/count_parent/git",
+            json={
+                "github_repo_path": "myorg/myrepo",
+                "default_branch": "main",
+                "git_path": "nodes/",
+            },
+        )
+        await client_with_service_setup.post("/namespaces/count_parent.main")
+        await client_with_service_setup.patch(
+            "/namespaces/count_parent.main/git",
+            json={"parent_namespace": "count_parent", "git_branch": "main"},
+        )
+        # A sub-namespace under the main branch; its nodes roll up into main.
+        await client_with_service_setup.post("/namespaces/count_parent.main.sub")
+
+        with patch(
+            "datajunction_server.api.branches.GitHubService",
+        ) as mock_github_class:
+            mock_github = MagicMock()
+            mock_github.create_branch = AsyncMock(
+                return_value={"ref": "refs/heads/feat1", "object": {"sha": "abc"}},
+            )
+            mock_github_class.return_value = mock_github
+            await client_with_service_setup.post(
+                "/namespaces/count_parent/branches",
+                json={"branch_name": "feat1"},
+            )
+
+        # Two nodes under main (one directly, one in a sub-namespace) and one under feat1.
+        for name in (
+            "count_parent.main.src_a",
+            "count_parent.main.sub.src_b",
+            "count_parent.feat1.src_c",
+        ):
+            response = await client_with_service_setup.post(
+                "/nodes/source/",
+                json={
+                    "name": name,
+                    "description": "Source table",
+                    "catalog": "default",
+                    "schema_": "public",
+                    "table": name.replace(".", "_"),
+                    "columns": [{"name": "id", "type": "int"}],
+                },
+            )
+            assert response.status_code in (HTTPStatus.CREATED, HTTPStatus.OK)
+
+        response = await client_with_service_setup.get(
+            "/namespaces/count_parent/branches",
+        )
+        assert response.status_code == HTTPStatus.OK
+        branches = response.json()
+
+        # last_updated_at is a non-deterministic timestamp; assert it's populated,
+        # then assert full equality on the deterministic fields.
+        for branch in branches:
+            assert branch.pop("last_updated_at") is not None
+
+        assert branches == [
+            {
+                "namespace": "count_parent.main",
+                "git_branch": "main",
+                "parent_namespace": "count_parent",
+                "github_repo_path": "myorg/myrepo",
+                "num_nodes": 2,
+                "invalid_node_count": 0,
+                "git_only": False,
+            },
+            {
+                "namespace": "count_parent.feat1",
+                "git_branch": "feat1",
+                "parent_namespace": "count_parent",
+                "github_repo_path": "myorg/myrepo",
+                "num_nodes": 1,
+                "invalid_node_count": 0,
+                "git_only": False,
+            },
+        ]
+
+    @pytest.mark.asyncio
     async def test_delete_branch(
         self,
         client_with_service_setup: AsyncClient,
