@@ -11,17 +11,30 @@ export default function ClientCodePopover({ nodeName, buttonStyle }) {
   const modalRef = useRef(null);
   const [code, setCode] = useState(null);
 
+  // Drop any cached code when the node changes.
   useEffect(() => {
+    setCode(null);
+  }, [nodeName]);
+
+  // The generated client code is only shown inside the modal, and generating it
+  // is expensive (~1s server round trip). Fetch it lazily the first time the
+  // popover is opened rather than on every node-page load.
+  useEffect(() => {
+    if (!showModal || code !== null) return;
+    let cancelled = false;
     async function fetchCode() {
       try {
-        const code = await djClient.clientCode(nodeName);
-        setCode(code);
+        const result = await djClient.clientCode(nodeName);
+        if (!cancelled) setCode(result);
       } catch (err) {
         console.log(err);
       }
     }
     fetchCode();
-  }, [nodeName, djClient]);
+    return () => {
+      cancelled = true;
+    };
+  }, [showModal, nodeName, djClient, code]);
 
   useEffect(() => {
     const handleClickOutside = event => {
