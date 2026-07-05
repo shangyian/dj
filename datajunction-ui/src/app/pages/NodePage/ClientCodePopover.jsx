@@ -1,7 +1,7 @@
 import DJClientContext from '../../providers/djclient';
 import { Light as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { useEffect, useRef, useState, useContext } from 'react';
-import { nightOwl } from 'react-syntax-highlighter/dist/esm/styles/hljs';
+import nightOwl from 'react-syntax-highlighter/dist/esm/styles/hljs/night-owl';
 import PythonIcon from '../../icons/PythonIcon';
 import LoadingIcon from 'app/icons/LoadingIcon';
 
