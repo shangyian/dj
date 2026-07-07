@@ -2096,3 +2096,46 @@ class TestFilterPushdownRoleQualifiedSharedDim:
             """,
             normalize_aliases=True,
         )
+
+    @pytest.mark.asyncio
+    async def test_role_qualified_shared_dim_filter_binds_to_role_link(
+        self,
+        client_with_build_v3,
+        setup_show_activity_chain,
+    ):
+        """The role-qualified counterpart still works: filtering
+        ``v3.date.date_id[planned_launch]`` binds to the ``v3.show`` role link
+        (``planned_launch_date``) and does NOT touch the fact's own date.
+        """
+        response = await client_with_build_v3.get(
+            "/sql/measures/v3/",
+            params={
+                "metrics": ["v3.show_view_secs"],
+                "dimensions": ["v3.show.show_title"],
+                "filters": [
+                    "v3.date.date_id[planned_launch] BETWEEN 20240101 AND 20240201",
+                ],
+            },
+        )
+        assert response.status_code == 200, response.json()
+        assert_sql_equal(
+            get_first_grain_group(response.json())["sql"],
+            """
+            WITH
+            v3_show AS (
+              SELECT show_id, show_title, planned_launch_date
+              FROM default.v3.shows
+            ),
+            v3_show_activity AS (
+              SELECT show_id, view_secs
+              FROM default.v3.show_events
+            )
+            SELECT t2.show_title,
+              SUM(t1.view_secs) view_secs_sum_HASH
+            FROM v3_show_activity t1
+            LEFT OUTER JOIN v3_show t2 ON t1.show_id = t2.show_id
+            WHERE t2.planned_launch_date BETWEEN 20240101 AND 20240201
+            GROUP BY t2.show_title
+            """,
+            normalize_aliases=True,
+        )
