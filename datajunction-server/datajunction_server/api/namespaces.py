@@ -29,6 +29,10 @@ from datajunction_server.models.deployment import (
 )
 
 from datajunction_server.internal.access.authentication.http import SecureAPIRouter
+from datajunction_server.internal.git.github_service import (
+    GitHubService,
+    GitHubServiceError,
+)
 from datajunction_server.internal.git.yaml_export import (
     fetch_existing_yaml_map,
     generate_namespace_yaml_files,
@@ -886,6 +890,75 @@ async def update_namespace_git_config(
                 f"path '{new_path or '(root)'}'. Each namespace must have a unique "
                 "git location to avoid overwriting files.",
             )
+
+    # --- Git-config invariants (guard against the class of misconfiguration that
+    # silently strands namespaces on branches that don't exist) ---
+    if config.git_branch is not None:
+        new_branch_val = config.git_branch or None
+        branch_changing = new_branch_val != node_namespace.git_branch
+
+        # Resolve the effective git config for THIS namespace before the update so
+        # both guards can reason about the default branch and the repo to check.
+        current_info = await get_git_info_for_namespace(session, namespace)
+        default_branch = (current_info or {}).get("default_branch")
+
+        # Guard 1: protect the canonical default-branch namespace. If this namespace
+        # is currently pinned to its repo's default branch, its git_branch must not
+        # be repointed to some other branch here — that is what corrupts the "main"
+        # view for everyone. Branch work belongs in Create Branch, which spins up a
+        # separate branch namespace instead of mutating the default one.
+        if (
+            branch_changing
+            and node_namespace.git_branch
+            and default_branch
+            and node_namespace.git_branch == default_branch
+            and new_branch_val != default_branch
+        ):
+            raise DJInvalidInputException(
+                message=(
+                    f"'{namespace}' is pinned to the default branch "
+                    f"'{default_branch}' and its git branch cannot be repointed here. "
+                    f"Use Create Branch to make a new branch namespace instead of "
+                    f"changing the default branch."
+                ),
+            )
+
+        # Guard 2: the target branch must actually exist on the remote. A branch that
+        # was deleted (or never created) leaves the namespace pointing at a ghost ref,
+        # so every sync silently fails. Only enforced when GitHub is configured; if the
+        # API is unreachable we fail open rather than blocking namespace administration.
+        if (
+            branch_changing
+            and new_branch_val
+            and (settings.github_service_token or settings.github_app_id)
+        ):
+            check_repo = new_repo
+            if not check_repo and new_parent:
+                check_repo, _, _ = await resolve_git_config(session, new_parent)
+            if check_repo:
+                try:
+                    branch_exists = bool(
+                        await GitHubService().get_branch(
+                            check_repo,
+                            new_branch_val,
+                        ),
+                    )
+                except GitHubServiceError as exc:  # pragma: no cover
+                    _logger.warning(
+                        "Could not verify branch '%s' in '%s' (%s); allowing update.",
+                        new_branch_val,
+                        check_repo,
+                        exc,
+                    )
+                    branch_exists = True
+                if not branch_exists:
+                    raise DJInvalidInputException(
+                        message=(
+                            f"Branch '{new_branch_val}' does not exist in "
+                            f"'{check_repo}'. Create the branch on the remote (or use "
+                            f"Create Branch) before pointing this namespace at it."
+                        ),
+                    )
 
     # Update only provided fields (None means no change)
     if config.github_repo_path is not None:
