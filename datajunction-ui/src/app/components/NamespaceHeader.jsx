@@ -1125,10 +1125,8 @@ export default function NamespaceHeader({
                   read-only (git_only) branches, since it forks the root. */}
               {canCreateBranch && (
                 <button
-                  style={buttonStyle}
+                  style={primaryButtonStyle}
                   onClick={() => setShowCreateBranch(true)}
-                  onMouseOver={onSecondaryHover}
-                  onMouseOut={onSecondaryOut}
                 >
                   <svg
                     xmlns="http://www.w3.org/2000/svg"
