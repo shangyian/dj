@@ -841,10 +841,16 @@ describe('<NamespaceHeader />', () => {
     const mockDjClient = {
       namespaceSources: vi.fn().mockResolvedValue({
         total_deployments: 1,
-        primary_source: { type: 'git', repository: 'test/repo', branch: 'feature' },
+        primary_source: {
+          type: 'git',
+          repository: 'test/repo',
+          branch: 'feature',
+        },
       }),
       listDeployments: vi.fn().mockResolvedValue([]),
-      getNamespaceGitConfig: vi.fn(ns => Promise.resolve(gitConfigByNamespace[ns])),
+      getNamespaceGitConfig: vi.fn(ns =>
+        Promise.resolve(gitConfigByNamespace[ns]),
+      ),
       getNamespaceBranches: vi
         .fn()
         .mockResolvedValue([
@@ -888,7 +894,10 @@ describe('<NamespaceHeader />', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Create Branch' }));
 
     await waitFor(() => {
-      expect(mockDjClient.createBranch).toHaveBeenCalledWith('test', 'feature-xyz');
+      expect(mockDjClient.createBranch).toHaveBeenCalledWith(
+        'test',
+        'feature-xyz',
+      );
     });
   });
 
