@@ -869,13 +869,16 @@ describe('<NamespaceHeader />', () => {
       </MemoryRouter>,
     );
 
-    // Open the branch switcher, then the "New branch" action in its footer.
+    // Both entry points are present on a branch page: the toolbar button and
+    // the branch switcher dropdown footer.
     await waitFor(() => {
-      expect(mockDjClient.getNamespaceBranches).toHaveBeenCalledWith('test');
+      expect(screen.getByText('New Branch')).toBeInTheDocument();
     });
     fireEvent.click(screen.getByText('feature'));
-    fireEvent.click(await screen.findByText('New branch'));
+    expect(await screen.findByText('New branch')).toBeInTheDocument();
 
+    // Drive creation via the toolbar button.
+    fireEvent.click(screen.getByText('New Branch'));
     await waitFor(() => {
       expect(screen.getByLabelText('Branch Name')).toBeInTheDocument();
     });
