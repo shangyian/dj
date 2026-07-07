@@ -1,5 +1,5 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { MemoryRouter, Route, Routes } from 'react-router-dom';
+import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import DJClientContext from '../../../providers/djclient';
 import UserContext from '../../../providers/UserProvider';
 import { NamespacePage } from '../index';
@@ -573,6 +573,57 @@ describe('NamespacePage', () => {
         },
         { timeout: 3000 },
       );
+    });
+
+    it('redirects to the default branch and keeps New Branch reachable there', async () => {
+      // Regression guard for the orphaned-entry-point bug: a git root redirects
+      // to its default branch, and branch creation must still be reachable on
+      // that (branch) page — via redirect change OR gating change.
+      const branchConfig = {
+        github_repo_path: 'org/repo',
+        git_branch: 'main',
+        git_path: 'nodes/',
+        git_only: false,
+        parent_namespace: 'default',
+        branch_namespace: 'default.main',
+        git_root_namespace: 'default',
+      };
+      mockDjClient.getNamespaceGitConfig.mockImplementation(ns =>
+        Promise.resolve(ns === 'default' ? gitRootConfig : branchConfig),
+      );
+
+      const LocationDisplay = () => (
+        <div data-testid="location">{useLocation().pathname}</div>
+      );
+      render(
+        <UserContext.Provider
+          value={{ currentUser: mockCurrentUser, loading: false }}
+        >
+          <DJClientContext.Provider value={{ DataJunctionAPI: mockDjClient }}>
+            <MemoryRouter initialEntries={['/namespaces/default']}>
+              <LocationDisplay />
+              <Routes>
+                <Route
+                  path="namespaces/:namespace"
+                  element={<NamespacePage />}
+                />
+              </Routes>
+            </MemoryRouter>
+          </DJClientContext.Provider>
+        </UserContext.Provider>,
+      );
+
+      // The git root redirects to its default branch...
+      await waitFor(
+        () => {
+          expect(screen.getByTestId('location').textContent).toBe(
+            '/namespaces/default.main',
+          );
+        },
+        { timeout: 3000 },
+      );
+      // ...where the branch-creation entry point is still present.
+      expect(await screen.findByText('New Branch')).toBeInTheDocument();
     });
   });
 
