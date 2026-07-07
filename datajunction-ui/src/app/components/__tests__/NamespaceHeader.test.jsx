@@ -816,6 +816,79 @@ describe('<NamespaceHeader />', () => {
     });
   });
 
+  it('should create a branch from the git root when on a branch page', async () => {
+    // Regression: git roots redirect to their default branch, so the only place
+    // to start a new branch is the branch switcher on the branch page. Creating
+    // one must still target the git root (`test`), not the current branch.
+    const gitConfigByNamespace = {
+      'test.feature': {
+        github_repo_path: 'test/repo',
+        git_branch: 'feature',
+        git_path: 'nodes/',
+        git_only: false,
+        parent_namespace: 'test',
+        branch_namespace: 'test.feature',
+        git_root_namespace: 'test',
+      },
+      test: {
+        github_repo_path: 'test/repo',
+        git_branch: 'main',
+        default_branch: 'main',
+        git_path: 'nodes/',
+        git_root_namespace: 'test',
+      },
+    };
+    const mockDjClient = {
+      namespaceSources: vi.fn().mockResolvedValue({
+        total_deployments: 1,
+        primary_source: { type: 'git', repository: 'test/repo', branch: 'feature' },
+      }),
+      listDeployments: vi.fn().mockResolvedValue([]),
+      getNamespaceGitConfig: vi.fn(ns => Promise.resolve(gitConfigByNamespace[ns])),
+      getNamespaceBranches: vi
+        .fn()
+        .mockResolvedValue([
+          { namespace: 'test.feature', git_branch: 'feature', num_nodes: 0 },
+        ]),
+      getPullRequest: vi.fn().mockResolvedValue(null),
+      createBranch: vi.fn().mockResolvedValue({
+        branch: {
+          namespace: 'test.feature_xyz',
+          git_branch: 'feature-xyz',
+          parent_namespace: 'test',
+        },
+        deployment_results: [],
+      }),
+    };
+
+    render(
+      <MemoryRouter>
+        <DJClientContext.Provider value={{ DataJunctionAPI: mockDjClient }}>
+          <NamespaceHeader namespace="test.feature" />
+        </DJClientContext.Provider>
+      </MemoryRouter>,
+    );
+
+    // Open the branch switcher, then the "New branch" action in its footer.
+    await waitFor(() => {
+      expect(mockDjClient.getNamespaceBranches).toHaveBeenCalledWith('test');
+    });
+    fireEvent.click(screen.getByText('feature'));
+    fireEvent.click(await screen.findByText('New branch'));
+
+    await waitFor(() => {
+      expect(screen.getByLabelText('Branch Name')).toBeInTheDocument();
+    });
+    fireEvent.change(screen.getByLabelText('Branch Name'), {
+      target: { value: 'feature-xyz' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Create Branch' }));
+
+    await waitFor(() => {
+      expect(mockDjClient.createBranch).toHaveBeenCalledWith('test', 'feature-xyz');
+    });
+  });
+
   it('should call syncNamespaceToGit when syncing', async () => {
     // Sync to Git only shows for branch namespaces
     const mockDjClient = {

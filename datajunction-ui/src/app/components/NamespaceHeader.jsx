@@ -203,7 +203,6 @@ export default function NamespaceHeader({
   // git_root_namespace to know if this namespace IS the git root.
   const isGitRoot =
     gitConfig?.github_repo_path && gitConfig?.git_root_namespace === namespace;
-  const canCreateBranches = isGitRoot && gitConfig?.default_branch;
 
   // Handlers for git operations
   const handleSaveGitConfig = async config => {
@@ -220,8 +219,17 @@ export default function NamespaceHeader({
     }
   };
 
+  // Branches are always created under the git root, forking from its default
+  // branch — whether we're viewing the root itself or one of its branches (on a
+  // branch page the root is carried by git_root_namespace / parentGitConfig).
+  const gitRootNamespace = gitConfig?.git_root_namespace || namespace;
+  const rootDefaultBranch = isGitRoot
+    ? gitConfig?.default_branch
+    : parentGitConfig?.default_branch;
+  const canCreateBranch = !!(gitRootNamespace && rootDefaultBranch);
+
   const handleCreateBranch = async branchName => {
-    return await djClient.createBranch(namespace, branchName);
+    return await djClient.createBranch(gitRootNamespace, branchName);
   };
 
   // Sync/PR operations always target the whole branch namespace, even
@@ -491,6 +499,45 @@ export default function NamespaceHeader({
                                 </a>
                               );
                             })
+                          )}
+                          {canCreateBranch && (
+                            <button
+                              onClick={() => {
+                                setBranchDropdownOpen(false);
+                                setShowCreateBranch(true);
+                              }}
+                              style={{
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: '6px',
+                                width: '100%',
+                                padding: '10px 12px',
+                                fontSize: '13px',
+                                fontWeight: 500,
+                                color: '#2563eb',
+                                background: 'none',
+                                border: 'none',
+                                borderTop: '1px solid #f1f5f9',
+                                cursor: 'pointer',
+                                textAlign: 'left',
+                              }}
+                            >
+                              <svg
+                                xmlns="http://www.w3.org/2000/svg"
+                                width="12"
+                                height="12"
+                                viewBox="0 0 24 24"
+                                fill="none"
+                                stroke="currentColor"
+                                strokeWidth="2"
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                              >
+                                <line x1="12" y1="5" x2="12" y2="19" />
+                                <line x1="5" y1="12" x2="19" y2="12" />
+                              </svg>
+                              New branch
+                            </button>
                           )}
                         </div>
                       )}
@@ -1021,7 +1068,7 @@ export default function NamespaceHeader({
                 </svg>
                 Git Settings
               </button>
-              {canCreateBranches ? (
+              {canCreateBranch ? (
                 <button
                   style={primaryButtonStyle}
                   onClick={() => setShowCreateBranch(true)}
@@ -1227,9 +1274,9 @@ export default function NamespaceHeader({
           isOpen={showCreateBranch}
           onClose={() => setShowCreateBranch(false)}
           onCreate={handleCreateBranch}
-          namespace={namespace}
-          gitBranch={gitConfig?.git_branch || gitConfig?.default_branch}
-          isGitRoot={isGitRoot}
+          namespace={gitRootNamespace}
+          gitBranch={rootDefaultBranch}
+          isGitRoot={true}
         />
 
         <SyncToGitModal
