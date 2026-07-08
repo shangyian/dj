@@ -619,8 +619,11 @@ class Node(Base):
             )
 
             extra_kwargs.update(
+                # Full dim-node path, not the bare column: a required dim lives on a
+                # linked dimension node, so the short name doesn't round-trip (fails
+                # re-deploy in another namespace). Matches the dimension-link export.
                 required_dimensions=sorted(
-                    col.name for col in self.current.required_dimensions
+                    col.full_name() for col in self.current.required_dimensions
                 ),
                 direction=self.current.metric_metadata.direction
                 if self.current.metric_metadata
@@ -1727,7 +1730,10 @@ class NodeRevision(
                 ),
                 joinedload(DimensionLink.node_revision),
             ),
-            selectinload(NodeRevision.required_dimensions),
+            selectinload(NodeRevision.required_dimensions).options(
+                # to_spec reads col.full_name() -> col.node_revision.name; preload it.
+                joinedload(Column.node_revision).load_only(NodeRevision.name),
+            ),
             selectinload(NodeRevision.cube_elements)
             .selectinload(Column.node_revision)
             .options(
