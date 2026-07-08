@@ -72,6 +72,20 @@ router = SecureAPIRouter(tags=["git-sync"])
 _node_spec_adapter = TypeAdapter(NodeUnion)
 
 
+def _ghost_branch_exception(
+    git_branch: str,
+    github_repo_path: str,
+) -> DJInvalidInputException:
+    """Consistent error for syncing to a branch that no longer exists on the remote."""
+    return DJInvalidInputException(
+        message=(
+            f"Branch '{git_branch}' does not exist in '{github_repo_path}'. "
+            f"It may have been deleted on the remote. Recreate the branch or "
+            f"update this namespace's git configuration before syncing."
+        ),
+    )
+
+
 def _specs_are_equivalent(existing_yaml: str, new_spec: NodeUnion) -> bool:
     """
     Compare a YAML spec from git with a NodeSpec using semantic comparison.
@@ -341,14 +355,8 @@ async def sync_node_to_git(
         # A sync targeting a branch that no longer exists on the remote would
         # otherwise fail deep inside commit_file with an opaque "get ref Not Found".
         # Check up front so the user gets a clear, actionable message instead.
-        if await github.get_branch(github_repo_path, git_branch) is None:
-            raise DJInvalidInputException(
-                message=(
-                    f"Branch '{git_branch}' does not exist in '{github_repo_path}'. "
-                    f"It may have been deleted on the remote. Recreate the branch or "
-                    f"update this namespace's git configuration before syncing."
-                ),
-            )
+        if not await github.branch_exists(github_repo_path, git_branch):
+            raise _ghost_branch_exception(git_branch, github_repo_path)
 
         # Try to read existing YAML content to preserve comments
         # Also get the file SHA if it exists for the commit
@@ -468,13 +476,7 @@ async def sync_namespace_to_git(
         )
     except GitHubServiceError as e:
         if e.github_status == 404:
-            raise DJInvalidInputException(
-                message=(
-                    f"Branch '{git_branch}' does not exist in '{github_repo_path}'. "
-                    f"It may have been deleted on the remote. Recreate the branch or "
-                    f"update this namespace's git configuration before syncing."
-                ),
-            ) from e
+            raise _ghost_branch_exception(git_branch, github_repo_path) from e
         raise DJInvalidInputException(
             message=(
                 f"Could not read the current state of branch '{git_branch}' in "

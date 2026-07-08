@@ -892,13 +892,12 @@ async def update_namespace_git_config(
             )
 
     # --- Git-config invariants (guard against the class of misconfiguration that
-    # silently strands namespaces on branches that don't exist) ---
-    if config.git_branch is not None:
-        new_branch_val = config.git_branch or None
-        branch_changing = new_branch_val != node_namespace.git_branch
-
+    # silently strands namespaces on branches that don't exist). Only relevant when
+    # the branch is actually changing, so we skip the DB/GitHub lookups otherwise. ---
+    new_branch_val = config.git_branch or None
+    if config.git_branch is not None and new_branch_val != node_namespace.git_branch:
         # Resolve the effective git config for THIS namespace before the update so
-        # both guards can reason about the default branch and the repo to check.
+        # the guards can reason about the default branch and the repo to check.
         current_info = await get_git_info_for_namespace(session, namespace)
         default_branch = (current_info or {}).get("default_branch")
 
@@ -907,13 +906,7 @@ async def update_namespace_git_config(
         # be repointed to some other branch here — that is what corrupts the "main"
         # view for everyone. Branch work belongs in Create Branch, which spins up a
         # separate branch namespace instead of mutating the default one.
-        if (
-            branch_changing
-            and node_namespace.git_branch
-            and default_branch
-            and node_namespace.git_branch == default_branch
-            and new_branch_val != default_branch
-        ):
+        if default_branch and node_namespace.git_branch == default_branch:
             raise DJInvalidInputException(
                 message=(
                     f"'{namespace}' is pinned to the default branch "
@@ -927,21 +920,15 @@ async def update_namespace_git_config(
         # was deleted (or never created) leaves the namespace pointing at a ghost ref,
         # so every sync silently fails. Only enforced when GitHub is configured; if the
         # API is unreachable we fail open rather than blocking namespace administration.
-        if (
-            branch_changing
-            and new_branch_val
-            and (settings.github_service_token or settings.github_app_id)
-        ):
+        if new_branch_val and (settings.github_service_token or settings.github_app_id):
             check_repo = new_repo
             if not check_repo and new_parent:
                 check_repo, _, _ = await resolve_git_config(session, new_parent)
             if check_repo:
                 try:
-                    branch_exists = bool(
-                        await GitHubService().get_branch(
-                            check_repo,
-                            new_branch_val,
-                        ),
+                    exists = await GitHubService().branch_exists(
+                        check_repo,
+                        new_branch_val,
                     )
                 except GitHubServiceError as exc:  # pragma: no cover
                     _logger.warning(
@@ -950,8 +937,8 @@ async def update_namespace_git_config(
                         check_repo,
                         exc,
                     )
-                    branch_exists = True
-                if not branch_exists:
+                    exists = True
+                if not exists:
                     raise DJInvalidInputException(
                         message=(
                             f"Branch '{new_branch_val}' does not exist in "

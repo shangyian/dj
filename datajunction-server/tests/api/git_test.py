@@ -342,7 +342,7 @@ class TestNamespaceGitConfig:
         )
 
         mock_service = MagicMock()
-        mock_service.get_branch = AsyncMock(return_value=None)  # 404 -> ghost branch
+        mock_service.branch_exists = AsyncMock(return_value=False)  # ghost branch
         await client_with_service_setup.post("/namespaces/ghost_branch_ns")
         with patch(
             "datajunction_server.api.namespaces.GitHubService",
@@ -357,7 +357,7 @@ class TestNamespaceGitConfig:
             )
         assert response.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
         assert "does not exist in 'myorg/ghostrepo'" in response.json()["message"]
-        mock_service.get_branch.assert_awaited_once_with(
+        mock_service.branch_exists.assert_awaited_once_with(
             "myorg/ghostrepo",
             "does-not-exist",
         )
@@ -378,7 +378,7 @@ class TestNamespaceGitConfig:
         )
 
         mock_service = MagicMock()
-        mock_service.get_branch = AsyncMock(return_value={"name": "real-branch"})
+        mock_service.branch_exists = AsyncMock(return_value=True)
         await client_with_service_setup.post("/namespaces/real_branch_ns")
         with patch(
             "datajunction_server.api.namespaces.GitHubService",
@@ -2037,7 +2037,7 @@ class TestGitSync:
         ) as mock_github_class:
             mock_github = MagicMock()
             # File doesn't exist yet
-            mock_github.get_branch = AsyncMock(return_value={"name": "main"})
+            mock_github.branch_exists = AsyncMock(return_value=True)
             mock_github.get_file = AsyncMock(return_value=None)
             mock_github.commit_file = AsyncMock(
                 return_value={
@@ -2082,7 +2082,7 @@ class TestGitSync:
         ) as mock_github_class:
             mock_github = MagicMock()
             # File exists
-            mock_github.get_branch = AsyncMock(return_value={"name": "main"})
+            mock_github.branch_exists = AsyncMock(return_value=True)
             mock_github.get_file = AsyncMock(
                 return_value={
                     "sha": "existing-sha-123",
@@ -2144,7 +2144,7 @@ class TestGitSync:
             ) as mock_node_spec_to_yaml,
         ):
             mock_github = MagicMock()
-            mock_github.get_branch = AsyncMock(return_value={"name": "main"})
+            mock_github.branch_exists = AsyncMock(return_value=True)
             mock_github.get_file = AsyncMock(
                 return_value={
                     "sha": "existing-sha-456",
@@ -2232,7 +2232,7 @@ class TestGitSync:
             "datajunction_server.api.git_sync.GitHubService",
         ) as mock_github_class:
             mock_github = MagicMock()
-            mock_github.get_branch = AsyncMock(return_value={"name": "main"})
+            mock_github.branch_exists = AsyncMock(return_value=True)
             mock_github.get_file = AsyncMock(return_value=None)
             mock_github.commit_file = AsyncMock(
                 return_value={
@@ -2274,7 +2274,7 @@ class TestGitSync:
             "datajunction_server.api.git_sync.GitHubService",
         ) as mock_github_class:
             mock_github = MagicMock()
-            mock_github.get_branch = AsyncMock(return_value={"name": "main"})
+            mock_github.branch_exists = AsyncMock(return_value=True)
             mock_github.get_file = AsyncMock(return_value=None)
             mock_github.commit_file = AsyncMock(
                 side_effect=GitHubServiceError(
@@ -2715,7 +2715,7 @@ columns:
         ) as mock_github_class:
             mock_github = MagicMock()
             # Simulate file not existing by raising exception
-            mock_github.get_branch = AsyncMock(return_value={"name": "main"})
+            mock_github.branch_exists = AsyncMock(return_value=True)
             mock_github.get_file = AsyncMock(side_effect=Exception("File not found"))
             mock_github.commit_file = AsyncMock(
                 return_value={
@@ -2768,7 +2768,7 @@ mode: published
         ) as mock_github_class:
             mock_github = MagicMock()
             # Return existing file with base64 content
-            mock_github.get_branch = AsyncMock(return_value={"name": "main"})
+            mock_github.branch_exists = AsyncMock(return_value=True)
             mock_github.get_file = AsyncMock(
                 return_value={
                     "sha": "existing-file-sha",
@@ -2855,7 +2855,7 @@ dimensions:
             "datajunction_server.api.git_sync.GitHubService",
         ) as mock_github_class:
             mock_github = MagicMock()
-            mock_github.get_branch = AsyncMock(return_value={"name": "main"})
+            mock_github.branch_exists = AsyncMock(return_value=True)
             mock_github.get_file = AsyncMock(
                 return_value={
                     "sha": "existing-cube-sha",
@@ -3152,7 +3152,7 @@ dimensions:
             "datajunction_server.api.git_sync.GitHubService",
         ) as mock_github_class:
             mock_github = MagicMock()
-            mock_github.get_branch = AsyncMock(return_value=None)  # branch is gone
+            mock_github.branch_exists = AsyncMock(return_value=False)  # branch is gone
             mock_github.commit_file = AsyncMock()
             mock_github_class.return_value = mock_github
 
@@ -4711,7 +4711,7 @@ class TestGitHubServiceErrorHandling:
             "datajunction_server.api.git_sync.GitHubService",
         ) as mock_github_class:
             mock_github = MagicMock()
-            mock_github.get_branch = AsyncMock(return_value={"name": "main"})
+            mock_github.branch_exists = AsyncMock(return_value=True)
             mock_github.get_file = AsyncMock(return_value=None)
             # Simulate a GitHub error with detailed errors array
             mock_github.commit_file = AsyncMock(
@@ -5310,7 +5310,7 @@ class TestGitSyncEdgeCases:
             "datajunction_server.api.git_sync.GitHubService",
         ) as mock_github_class:
             mock_github = MagicMock()
-            mock_github.get_branch = AsyncMock(return_value={"name": "main"})
+            mock_github.branch_exists = AsyncMock(return_value=True)
             mock_github.get_file = AsyncMock(return_value=None)
             mock_github.commit_file = AsyncMock(
                 return_value={
