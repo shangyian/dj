@@ -283,6 +283,210 @@ class TestNamespaceGitConfig:
         )
 
     @pytest.mark.asyncio
+    async def test_update_git_config_cannot_repoint_default_branch(
+        self,
+        client_with_service_setup: AsyncClient,
+    ):
+        """The default-branch namespace cannot be repointed to another branch.
+
+        This is the invariant that prevents a user from silently redirecting the
+        canonical 'main' view of a namespace onto an arbitrary branch (which is
+        what corrupted production).
+        """
+        root = "guard_default.root"
+        branch_ns = "guard_default.root.main"
+
+        await client_with_service_setup.post(f"/namespaces/{root}")
+        await client_with_service_setup.patch(
+            f"/namespaces/{root}/git",
+            json={"github_repo_path": "myorg/guardrepo", "default_branch": "main"},
+        )
+
+        # Pinning the branch namespace to the default branch is the canonical
+        # 'main' namespace setup and is allowed.
+        await client_with_service_setup.post(f"/namespaces/{branch_ns}")
+        ok = await client_with_service_setup.patch(
+            f"/namespaces/{branch_ns}/git",
+            json={"parent_namespace": root, "git_branch": "main"},
+        )
+        assert ok.status_code == HTTPStatus.OK
+
+        # Repointing it off the default branch must be rejected.
+        response = await client_with_service_setup.patch(
+            f"/namespaces/{branch_ns}/git",
+            json={"parent_namespace": root, "git_branch": "some-feature"},
+        )
+        assert response.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
+        assert "pinned to the default branch 'main'" in response.json()["message"]
+        assert "Create Branch" in response.json()["message"]
+
+        # The stored branch is unchanged.
+        get_response = await client_with_service_setup.get(
+            f"/namespaces/{branch_ns}/git",
+        )
+        assert get_response.json()["git_branch"] == "main"
+
+    @pytest.mark.asyncio
+    async def test_update_git_config_rejects_nonexistent_branch(
+        self,
+        client_with_service_setup: AsyncClient,
+        monkeypatch,
+    ):
+        """A namespace cannot be pointed at a branch that doesn't exist on the remote."""
+        from datajunction_server.api import namespaces as namespaces_module
+
+        monkeypatch.setattr(
+            namespaces_module.settings,
+            "github_service_token",
+            "test-token",
+        )
+
+        mock_service = MagicMock()
+        mock_service.branch_exists = AsyncMock(return_value=False)  # ghost branch
+        await client_with_service_setup.post("/namespaces/ghost_branch_ns")
+        with patch(
+            "datajunction_server.api.namespaces.GitHubService",
+            return_value=mock_service,
+        ):
+            response = await client_with_service_setup.patch(
+                "/namespaces/ghost_branch_ns/git",
+                json={
+                    "github_repo_path": "myorg/ghostrepo",
+                    "git_branch": "does-not-exist",
+                },
+            )
+        assert response.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
+        assert "does not exist in 'myorg/ghostrepo'" in response.json()["message"]
+        mock_service.branch_exists.assert_awaited_once_with(
+            "myorg/ghostrepo",
+            "does-not-exist",
+        )
+
+    @pytest.mark.asyncio
+    async def test_update_git_config_allows_existing_branch(
+        self,
+        client_with_service_setup: AsyncClient,
+        monkeypatch,
+    ):
+        """When the target branch exists on the remote, the update succeeds."""
+        from datajunction_server.api import namespaces as namespaces_module
+
+        monkeypatch.setattr(
+            namespaces_module.settings,
+            "github_service_token",
+            "test-token",
+        )
+
+        mock_service = MagicMock()
+        mock_service.branch_exists = AsyncMock(return_value=True)
+        await client_with_service_setup.post("/namespaces/real_branch_ns")
+        with patch(
+            "datajunction_server.api.namespaces.GitHubService",
+            return_value=mock_service,
+        ):
+            response = await client_with_service_setup.patch(
+                "/namespaces/real_branch_ns/git",
+                json={
+                    "github_repo_path": "myorg/realrepo",
+                    "git_branch": "real-branch",
+                },
+            )
+        assert response.status_code == HTTPStatus.OK
+        assert response.json()["git_branch"] == "real-branch"
+
+    @pytest.mark.asyncio
+    async def test_update_git_config_branch_check_resolves_repo_from_parent(
+        self,
+        client_with_service_setup: AsyncClient,
+        monkeypatch,
+    ):
+        """A branch namespace inherits no repo of its own, so the branch-existence
+        guard must resolve the repo to check from its parent namespace."""
+        from datajunction_server.api import namespaces as namespaces_module
+
+        # Parent owns the repo; no default_branch is set so Guard 1 is skipped.
+        await client_with_service_setup.post("/namespaces/inherit_proj.root")
+        await client_with_service_setup.patch(
+            "/namespaces/inherit_proj.root/git",
+            json={"github_repo_path": "myorg/inheritrepo"},
+        )
+        # Child points at the parent on some feature branch (GitHub not yet
+        # configured, so the branch check is skipped during this setup).
+        await client_with_service_setup.post("/namespaces/inherit_proj.child")
+        await client_with_service_setup.patch(
+            "/namespaces/inherit_proj.child/git",
+            json={
+                "parent_namespace": "inherit_proj.root",
+                "git_branch": "feature-a",
+            },
+        )
+
+        monkeypatch.setattr(
+            namespaces_module.settings,
+            "github_service_token",
+            "test-token",
+        )
+        mock_service = MagicMock()
+        mock_service.branch_exists = AsyncMock(return_value=True)
+        with patch(
+            "datajunction_server.api.namespaces.GitHubService",
+            return_value=mock_service,
+        ):
+            response = await client_with_service_setup.patch(
+                "/namespaces/inherit_proj.child/git",
+                json={"git_branch": "feature-b"},
+            )
+        assert response.status_code == HTTPStatus.OK
+        assert response.json()["git_branch"] == "feature-b"
+        # The repo checked was the one inherited from the parent namespace.
+        mock_service.branch_exists.assert_awaited_once_with(
+            "myorg/inheritrepo",
+            "feature-b",
+        )
+
+    @pytest.mark.asyncio
+    async def test_update_git_config_branch_check_skipped_without_repo(
+        self,
+        client_with_service_setup: AsyncClient,
+        monkeypatch,
+    ):
+        """When no repo can be resolved (no repo of its own, no parent), the
+        branch-existence guard is skipped and the update proceeds."""
+        from datajunction_server.api import namespaces as namespaces_module
+
+        monkeypatch.setattr(
+            namespaces_module.settings,
+            "github_service_token",
+            "test-token",
+        )
+
+        await client_with_service_setup.post("/namespaces/no_repo_branch_ns")
+        mock_service = MagicMock()
+        mock_service.branch_exists = AsyncMock(return_value=False)
+        with patch(
+            "datajunction_server.api.namespaces.GitHubService",
+            return_value=mock_service,
+        ):
+            response = await client_with_service_setup.patch(
+                "/namespaces/no_repo_branch_ns/git",
+                json={"git_branch": "some-branch"},
+            )
+        assert response.status_code == HTTPStatus.OK
+        # No git root is resolvable, so the effective config comes back empty.
+        assert response.json() == {
+            "github_repo_path": None,
+            "git_path": None,
+            "git_branch": None,
+            "default_branch": None,
+            "parent_namespace": None,
+            "git_only": False,
+            "branch_namespace": None,
+            "git_root_namespace": None,
+        }
+        # No repo to check against, so the remote was never consulted.
+        mock_service.branch_exists.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_update_git_config_same_repo_different_path_ok(
         self,
         client_with_service_setup: AsyncClient,
@@ -1925,6 +2129,7 @@ class TestGitSync:
         ) as mock_github_class:
             mock_github = MagicMock()
             # File doesn't exist yet
+            mock_github.branch_exists = AsyncMock(return_value=True)
             mock_github.get_file = AsyncMock(return_value=None)
             mock_github.commit_file = AsyncMock(
                 return_value={
@@ -1969,6 +2174,7 @@ class TestGitSync:
         ) as mock_github_class:
             mock_github = MagicMock()
             # File exists
+            mock_github.branch_exists = AsyncMock(return_value=True)
             mock_github.get_file = AsyncMock(
                 return_value={
                     "sha": "existing-sha-123",
@@ -2030,6 +2236,7 @@ class TestGitSync:
             ) as mock_node_spec_to_yaml,
         ):
             mock_github = MagicMock()
+            mock_github.branch_exists = AsyncMock(return_value=True)
             mock_github.get_file = AsyncMock(
                 return_value={
                     "sha": "existing-sha-456",
@@ -2117,6 +2324,7 @@ class TestGitSync:
             "datajunction_server.api.git_sync.GitHubService",
         ) as mock_github_class:
             mock_github = MagicMock()
+            mock_github.branch_exists = AsyncMock(return_value=True)
             mock_github.get_file = AsyncMock(return_value=None)
             mock_github.commit_file = AsyncMock(
                 return_value={
@@ -2158,6 +2366,7 @@ class TestGitSync:
             "datajunction_server.api.git_sync.GitHubService",
         ) as mock_github_class:
             mock_github = MagicMock()
+            mock_github.branch_exists = AsyncMock(return_value=True)
             mock_github.get_file = AsyncMock(return_value=None)
             mock_github.commit_file = AsyncMock(
                 side_effect=GitHubServiceError(
@@ -2195,9 +2404,14 @@ class TestGitSync:
             },
         )
 
-        with patch(
-            "datajunction_server.api.git_sync.GitHubService",
-        ) as mock_github_class:
+        with (
+            patch(
+                "datajunction_server.api.git_sync.GitHubService",
+            ) as mock_github_class,
+            patch(
+                "datajunction_server.internal.git.yaml_export.GitHubService",
+            ) as mock_fetch_github_class,
+        ):
             mock_github = MagicMock()
             # Mock download_archive to return empty tarball
             mock_github.download_archive = AsyncMock(
@@ -2211,6 +2425,7 @@ class TestGitSync:
                 },
             )
             mock_github_class.return_value = mock_github
+            mock_fetch_github_class.return_value = mock_github
 
             response = await client_with_roads.post(
                 "/namespaces/default/sync-to-git",
@@ -2592,6 +2807,7 @@ columns:
         ) as mock_github_class:
             mock_github = MagicMock()
             # Simulate file not existing by raising exception
+            mock_github.branch_exists = AsyncMock(return_value=True)
             mock_github.get_file = AsyncMock(side_effect=Exception("File not found"))
             mock_github.commit_file = AsyncMock(
                 return_value={
@@ -2644,6 +2860,7 @@ mode: published
         ) as mock_github_class:
             mock_github = MagicMock()
             # Return existing file with base64 content
+            mock_github.branch_exists = AsyncMock(return_value=True)
             mock_github.get_file = AsyncMock(
                 return_value={
                     "sha": "existing-file-sha",
@@ -2730,6 +2947,7 @@ dimensions:
             "datajunction_server.api.git_sync.GitHubService",
         ) as mock_github_class:
             mock_github = MagicMock()
+            mock_github.branch_exists = AsyncMock(return_value=True)
             mock_github.get_file = AsyncMock(
                 return_value={
                     "sha": "existing-cube-sha",
@@ -2881,9 +3099,14 @@ dimensions:
             },
         )
 
-        with patch(
-            "datajunction_server.api.git_sync.GitHubService",
-        ) as mock_github_class:
+        with (
+            patch(
+                "datajunction_server.api.git_sync.GitHubService",
+            ) as mock_github_class,
+            patch(
+                "datajunction_server.internal.git.yaml_export.GitHubService",
+            ) as mock_fetch_github_class,
+        ):
             mock_github = MagicMock()
             # Mock download_archive to return empty tarball
             mock_github.download_archive = AsyncMock(
@@ -2897,6 +3120,7 @@ dimensions:
                 ),
             )
             mock_github_class.return_value = mock_github
+            mock_fetch_github_class.return_value = mock_github
 
             response = await client_with_roads.post(
                 "/namespaces/default/sync-to-git",
@@ -2908,6 +3132,133 @@ dimensions:
                 "Failed to sync to git: Repository not found"
                 in response.json()["message"]
             )
+
+    @pytest.mark.asyncio
+    async def test_sync_namespace_missing_branch_fails_loudly(
+        self,
+        client_with_roads: AsyncClient,
+    ):
+        """Syncing to a branch that no longer exists must abort with a clear error.
+
+        Previously the baseline fetch swallowed the 404 and treated the branch as
+        empty, so the sync would silently proceed against a wrong view.
+        """
+        from datajunction_server.internal.git.github_service import GitHubServiceError
+
+        await client_with_roads.patch(
+            "/namespaces/default/git",
+            json={"github_repo_path": "myorg/myrepo", "git_branch": "ghost-branch"},
+        )
+
+        with (
+            patch(
+                "datajunction_server.api.git_sync.GitHubService",
+            ) as mock_github_class,
+            patch(
+                "datajunction_server.internal.git.yaml_export.GitHubService",
+            ) as mock_fetch_github_class,
+        ):
+            mock_github = MagicMock()
+            # The branch no longer exists on the remote -> archive download 404s.
+            mock_github.download_archive = AsyncMock(
+                side_effect=GitHubServiceError(
+                    "GitHub download tarball failed: Not Found",
+                    http_status_code=502,
+                    github_status=404,
+                ),
+            )
+            mock_github.commit_files = AsyncMock()
+            mock_github_class.return_value = mock_github
+            mock_fetch_github_class.return_value = mock_github
+
+            response = await client_with_roads.post(
+                "/namespaces/default/sync-to-git",
+                json={},
+            )
+
+            assert response.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
+            assert (
+                "Branch 'ghost-branch' does not exist in 'myorg/myrepo'"
+                in response.json()["message"]
+            )
+            # Crucially, we never attempted to commit against the wrong baseline.
+            mock_github.commit_files.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_sync_namespace_unreadable_baseline_fails_loudly(
+        self,
+        client_with_roads: AsyncClient,
+    ):
+        """A non-404 failure reading the baseline must also abort, not commit blind."""
+        from datajunction_server.internal.git.github_service import GitHubServiceError
+
+        await client_with_roads.patch(
+            "/namespaces/default/git",
+            json={"github_repo_path": "myorg/myrepo", "git_branch": "main"},
+        )
+
+        with (
+            patch(
+                "datajunction_server.api.git_sync.GitHubService",
+            ) as mock_github_class,
+            patch(
+                "datajunction_server.internal.git.yaml_export.GitHubService",
+            ) as mock_fetch_github_class,
+        ):
+            mock_github = MagicMock()
+            mock_github.download_archive = AsyncMock(
+                side_effect=GitHubServiceError(
+                    "GitHub download tarball failed: Server Error",
+                    http_status_code=502,
+                    github_status=500,
+                ),
+            )
+            mock_github.commit_files = AsyncMock()
+            mock_github_class.return_value = mock_github
+            mock_fetch_github_class.return_value = mock_github
+
+            response = await client_with_roads.post(
+                "/namespaces/default/sync-to-git",
+                json={},
+            )
+
+            assert response.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
+            assert (
+                "Could not read the current state of branch 'main'"
+                in response.json()["message"]
+            )
+            mock_github.commit_files.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_sync_node_missing_branch_fails_loudly(
+        self,
+        client_with_roads: AsyncClient,
+    ):
+        """Syncing a node to a branch that no longer exists aborts with a clear error."""
+        await client_with_roads.patch(
+            "/namespaces/default/git",
+            json={"github_repo_path": "myorg/myrepo", "git_branch": "ghost-branch"},
+        )
+
+        with patch(
+            "datajunction_server.api.git_sync.GitHubService",
+        ) as mock_github_class:
+            mock_github = MagicMock()
+            mock_github.branch_exists = AsyncMock(return_value=False)  # branch is gone
+            mock_github.commit_file = AsyncMock()
+            mock_github_class.return_value = mock_github
+
+            response = await client_with_roads.post(
+                "/nodes/default.repair_orders/sync-to-git",
+                json={},
+            )
+
+            assert response.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
+            assert (
+                "Branch 'ghost-branch' does not exist in 'myorg/myrepo'"
+                in response.json()["message"]
+            )
+            mock_github.commit_file.assert_not_called()
 
 
 class TestPullRequest:
@@ -4452,6 +4803,7 @@ class TestGitHubServiceErrorHandling:
             "datajunction_server.api.git_sync.GitHubService",
         ) as mock_github_class:
             mock_github = MagicMock()
+            mock_github.branch_exists = AsyncMock(return_value=True)
             mock_github.get_file = AsyncMock(return_value=None)
             # Simulate a GitHub error with detailed errors array
             mock_github.commit_file = AsyncMock(
@@ -5050,6 +5402,7 @@ class TestGitSyncEdgeCases:
             "datajunction_server.api.git_sync.GitHubService",
         ) as mock_github_class:
             mock_github = MagicMock()
+            mock_github.branch_exists = AsyncMock(return_value=True)
             mock_github.get_file = AsyncMock(return_value=None)
             mock_github.commit_file = AsyncMock(
                 return_value={
