@@ -395,6 +395,98 @@ class TestNamespaceGitConfig:
         assert response.json()["git_branch"] == "real-branch"
 
     @pytest.mark.asyncio
+    async def test_update_git_config_branch_check_resolves_repo_from_parent(
+        self,
+        client_with_service_setup: AsyncClient,
+        monkeypatch,
+    ):
+        """A branch namespace inherits no repo of its own, so the branch-existence
+        guard must resolve the repo to check from its parent namespace."""
+        from datajunction_server.api import namespaces as namespaces_module
+
+        # Parent owns the repo; no default_branch is set so Guard 1 is skipped.
+        await client_with_service_setup.post("/namespaces/inherit_proj.root")
+        await client_with_service_setup.patch(
+            "/namespaces/inherit_proj.root/git",
+            json={"github_repo_path": "myorg/inheritrepo"},
+        )
+        # Child points at the parent on some feature branch (GitHub not yet
+        # configured, so the branch check is skipped during this setup).
+        await client_with_service_setup.post("/namespaces/inherit_proj.child")
+        await client_with_service_setup.patch(
+            "/namespaces/inherit_proj.child/git",
+            json={
+                "parent_namespace": "inherit_proj.root",
+                "git_branch": "feature-a",
+            },
+        )
+
+        monkeypatch.setattr(
+            namespaces_module.settings,
+            "github_service_token",
+            "test-token",
+        )
+        mock_service = MagicMock()
+        mock_service.branch_exists = AsyncMock(return_value=True)
+        with patch(
+            "datajunction_server.api.namespaces.GitHubService",
+            return_value=mock_service,
+        ):
+            response = await client_with_service_setup.patch(
+                "/namespaces/inherit_proj.child/git",
+                json={"git_branch": "feature-b"},
+            )
+        assert response.status_code == HTTPStatus.OK
+        assert response.json()["git_branch"] == "feature-b"
+        # The repo checked was the one inherited from the parent namespace.
+        mock_service.branch_exists.assert_awaited_once_with(
+            "myorg/inheritrepo",
+            "feature-b",
+        )
+
+    @pytest.mark.asyncio
+    async def test_update_git_config_branch_check_skipped_without_repo(
+        self,
+        client_with_service_setup: AsyncClient,
+        monkeypatch,
+    ):
+        """When no repo can be resolved (no repo of its own, no parent), the
+        branch-existence guard is skipped and the update proceeds."""
+        from datajunction_server.api import namespaces as namespaces_module
+
+        monkeypatch.setattr(
+            namespaces_module.settings,
+            "github_service_token",
+            "test-token",
+        )
+
+        await client_with_service_setup.post("/namespaces/no_repo_branch_ns")
+        mock_service = MagicMock()
+        mock_service.branch_exists = AsyncMock(return_value=False)
+        with patch(
+            "datajunction_server.api.namespaces.GitHubService",
+            return_value=mock_service,
+        ):
+            response = await client_with_service_setup.patch(
+                "/namespaces/no_repo_branch_ns/git",
+                json={"git_branch": "some-branch"},
+            )
+        assert response.status_code == HTTPStatus.OK
+        # No git root is resolvable, so the effective config comes back empty.
+        assert response.json() == {
+            "github_repo_path": None,
+            "git_path": None,
+            "git_branch": None,
+            "default_branch": None,
+            "parent_namespace": None,
+            "git_only": False,
+            "branch_namespace": None,
+            "git_root_namespace": None,
+        }
+        # No repo to check against, so the remote was never consulted.
+        mock_service.branch_exists.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_update_git_config_same_repo_different_path_ok(
         self,
         client_with_service_setup: AsyncClient,
