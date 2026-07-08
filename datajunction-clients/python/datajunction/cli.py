@@ -46,6 +46,7 @@ class DJCLI:
         namespace: str | None = None,
         verbose: bool = False,
         force: bool = False,
+        allow_empty: bool = False,
     ):
         """
         Alias for deploy without dryrun.
@@ -55,6 +56,7 @@ class DJCLI:
             namespace=namespace,
             verbose=verbose,
             force=force,
+            allow_empty=allow_empty,
         )
 
     def dryrun(
@@ -892,6 +894,15 @@ class DJCLI:
             help="Force update all nodes even if they are unchanged",
         )
         push_parser.add_argument(
+            "--allow-empty",
+            action="store_true",
+            help=(
+                "Allow a push with no node files to soft-delete all nodes in the "
+                "target namespace (otherwise refused, to guard against an "
+                "accidental empty or mistyped directory)"
+            ),
+        )
+        push_parser.add_argument(
             "--format",
             type=str,
             default="text",
@@ -1502,6 +1513,7 @@ class DJCLI:
                     namespace=args.namespace,
                     verbose=args.verbose,
                     force=args.force,
+                    allow_empty=args.allow_empty,
                 )
             except DJDeploymentFailure:
                 # Errors already displayed in the deployment panel
