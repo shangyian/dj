@@ -3007,16 +3007,24 @@ class DeploymentOrchestrator:
         return to_create + to_update, to_skip, to_delete
 
     def _guard_against_accidental_wipe(self, plan: "DeploymentPlan") -> None:
-        """Refuse to wipe a populated namespace from an empty spec.
+        """Refuse to wipe a populated namespace from a *fully empty* spec.
 
-        A zero-node spec usually means an accidental empty push (e.g. a mistyped
-        ``directory``), so treating it as "delete everything" is a data-loss
-        footgun. Require an explicit ``allow_empty`` opt-in. Also fires on dry-run,
-        so a preview surfaces the refusal instead of quietly listing deletions.
+        A deployment that carries no content at all -- no nodes, hierarchies, or
+        tags -- is the signature of an accidental empty push (e.g. a mistyped or
+        empty ``directory`` that yielded nothing). Treating that as "delete
+        everything" is a data-loss footgun, so it's refused unless the caller
+        explicitly opts in with ``allow_empty``.
+
+        A spec that carries *any* content (even just a hierarchy or a tag, as a
+        ``sync-from-git`` push may) is an intentional diff and is never guarded --
+        deleting nodes that are genuinely absent from a real spec is the expected
+        sync behavior. Also fires on dry-run, so a preview surfaces the refusal
+        instead of quietly listing deletions.
         """
-        if self.deployment_spec.allow_empty or self.deployment_spec.nodes:
-            # Either the caller opted in, or the spec has nodes and the
-            # deletions are a genuine diff (e.g. removing a few of many).
+        spec = self.deployment_spec
+        if spec.allow_empty or spec.nodes or spec.hierarchies or spec.tags:
+            # Opted in, or the spec carries content -> the deletions are a
+            # genuine diff, not an accidental wipe.
             return
         if not plan.to_delete:
             return  # empty spec, nothing to delete -- harmless

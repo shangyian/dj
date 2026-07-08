@@ -2421,9 +2421,11 @@ class TestDeployments:
             ),
         )
         assert data["status"] == "success"
+        # Deleting every node via an empty spec is intentional here, so opt in
+        # with allow_empty (the accidental-wipe guard otherwise refuses it).
         data = await deploy_and_wait(
             client,
-            DeploymentSpec(namespace=namespace, nodes=[]),
+            DeploymentSpec(namespace=namespace, nodes=[], allow_empty=True),
         )
         deletes = {
             (r["deploy_type"], r["name"]): r

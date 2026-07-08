@@ -32,6 +32,8 @@ from datajunction_server.internal.deployment.validation import (
 from datajunction_server.models.deployment import (
     ColumnSpec,
     DeploymentSpec,
+    HierarchySpec,
+    HierarchyLevelSpec,
     PartitionType,
     PartitionSpec,
     TagSpec,
@@ -170,8 +172,22 @@ class TestGuardAgainstAccidentalWipe:
     """
 
     @staticmethod
-    def _make_orchestrator(session, current_user, *, nodes, allow_empty=False):
-        spec = DeploymentSpec(namespace="test", nodes=nodes, allow_empty=allow_empty)
+    def _make_orchestrator(
+        session,
+        current_user,
+        *,
+        nodes,
+        hierarchies=None,
+        tags=None,
+        allow_empty=False,
+    ):
+        spec = DeploymentSpec(
+            namespace="test",
+            nodes=nodes,
+            hierarchies=hierarchies or [],
+            tags=tags or [],
+            allow_empty=allow_empty,
+        )
         mock_context = MagicMock(spec=DeploymentContext)
         mock_context.current_user = current_user
         return DeploymentOrchestrator(
@@ -203,6 +219,37 @@ class TestGuardAgainstAccidentalWipe:
 
     def test_non_empty_spec_bypasses_guard(self, orchestrator):
         """A spec with nodes -> deletions are a genuine diff, never guarded."""
+        orchestrator._guard_against_accidental_wipe(self._plan_deleting(3))
+
+    def test_hierarchy_only_spec_bypasses_guard(self, session, current_user):
+        """A spec carrying a hierarchy (but no nodes) is intentional content,
+        not an accidental empty push -- e.g. a sync-from-git push of a hierarchy.
+        It must not be guarded even though it would delete nodes.
+        """
+        orchestrator = self._make_orchestrator(
+            session,
+            current_user,
+            nodes=[],
+            hierarchies=[
+                HierarchySpec(
+                    name="h",
+                    levels=[
+                        HierarchyLevelSpec(name="l1", dimension_node="test.d"),
+                        HierarchyLevelSpec(name="l2", dimension_node="test.d"),
+                    ],
+                ),
+            ],
+        )
+        orchestrator._guard_against_accidental_wipe(self._plan_deleting(3))
+
+    def test_tag_only_spec_bypasses_guard(self, session, current_user):
+        """A spec carrying only tags (no nodes) is intentional content too."""
+        orchestrator = self._make_orchestrator(
+            session,
+            current_user,
+            nodes=[],
+            tags=[TagSpec(name="t", display_name="T")],
+        )
         orchestrator._guard_against_accidental_wipe(self._plan_deleting(3))
 
     def test_empty_spec_no_deletions_is_ok(self, session, current_user):
