@@ -1457,6 +1457,37 @@ class TestImpactAnalysis:
         _, kwargs = mock_push.call_args
         assert kwargs.get("force") is False
 
+    def test_push_allow_empty_flag_passed_to_service(self, tmp_path):
+        """--allow-empty on `dj push` must propagate allow_empty=True (issue #2301)."""
+        from datajunction.cli import DJCLI
+
+        cli = DJCLI(builder_client=mock.MagicMock())
+        with patch.object(cli.deployment_service, "push") as mock_push:
+            mock_push.return_value = None
+            with patch.object(
+                sys,
+                "argv",
+                ["dj", "push", str(tmp_path), "--allow-empty"],
+            ):
+                cli.run()
+
+        mock_push.assert_called_once()
+        _, kwargs = mock_push.call_args
+        assert kwargs.get("allow_empty") is True
+
+    def test_push_without_allow_empty_defaults_false(self, tmp_path):
+        """Omitting --allow-empty on `dj push` must pass allow_empty=False."""
+        from datajunction.cli import DJCLI
+
+        cli = DJCLI(builder_client=mock.MagicMock())
+        with patch.object(cli.deployment_service, "push") as mock_push:
+            mock_push.return_value = None
+            with patch.object(sys, "argv", ["dj", "push", str(tmp_path)]):
+                cli.run()
+
+        _, kwargs = mock_push.call_args
+        assert kwargs.get("allow_empty") is False
+
 
 class TestDJCLIClientCreation:
     """Tests for DJCLI client creation from environment variables."""

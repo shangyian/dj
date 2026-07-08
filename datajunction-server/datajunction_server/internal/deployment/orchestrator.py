@@ -433,6 +433,8 @@ class DeploymentOrchestrator:
                 )
             self.deployed_results.extend(pre_results)
 
+        self._guard_against_accidental_wipe(deployment_plan)
+
         if deployment_plan.is_empty() and not self.deployment_spec.hierarchies:
             return DeploymentExecuteResult(
                 results=await self._handle_no_changes(),
@@ -3003,6 +3005,42 @@ class DeploymentOrchestrator:
         ]
 
         return to_create + to_update, to_skip, to_delete
+
+    def _guard_against_accidental_wipe(self, plan: "DeploymentPlan") -> None:
+        """Refuse to wipe a populated namespace from a *fully empty* spec.
+
+        A deployment that carries no content at all -- no nodes, hierarchies, or
+        tags -- is the signature of an accidental empty push (e.g. a mistyped or
+        empty ``directory`` that yielded nothing). Treating that as "delete
+        everything" is a data-loss footgun, so it's refused unless the caller
+        explicitly opts in with ``allow_empty``.
+
+        A spec that carries *any* content (even just a hierarchy or a tag, as a
+        ``sync-from-git`` push may) is an intentional diff and is never guarded --
+        deleting nodes that are genuinely absent from a real spec is the expected
+        sync behavior. Also fires on dry-run, so a preview surfaces the refusal
+        instead of quietly listing deletions.
+        """
+        spec = self.deployment_spec
+        if spec.allow_empty or spec.nodes or spec.hierarchies or spec.tags:
+            # Opted in, or the spec carries content -> the deletions are a
+            # genuine diff, not an accidental wipe.
+            return
+        if not plan.to_delete:
+            return  # empty spec, nothing to delete -- harmless
+
+        names = sorted(node.rendered_name for node in plan.to_delete)
+        preview = ", ".join(names[:5]) + (", …" if len(names) > 5 else "")
+        raise DJInvalidDeploymentConfig(
+            message=(
+                f"Refusing to deploy to namespace "
+                f"`{self.deployment_spec.namespace}`: the deployment spec "
+                f"contains no nodes, but this would soft-delete "
+                f"{len(plan.to_delete)} existing node(s) ({preview}). This "
+                f"usually means an empty or mistyped source directory. If you "
+                f"really intend to remove all nodes, re-run with `allow_empty`."
+            ),
+        )
 
     async def check_external_deps(
         self,
