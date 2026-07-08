@@ -867,7 +867,7 @@ class DeploymentSpec(BaseModel):
             "soft-delete the existing nodes in the target namespace. Guards "
             "against an accidental empty push (e.g. a mistyped `directory` "
             "argument that resolves to no node files) silently wiping a "
-            "namespace. See issue #2301."
+            "namespace."
         ),
     )
     auto_register_sources: bool = Field(

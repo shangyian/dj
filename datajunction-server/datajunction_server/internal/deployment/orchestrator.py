@@ -3007,18 +3007,12 @@ class DeploymentOrchestrator:
         return to_create + to_update, to_skip, to_delete
 
     def _guard_against_accidental_wipe(self, plan: "DeploymentPlan") -> None:
-        """Refuse to delete a populated namespace from an empty spec.
+        """Refuse to wipe a populated namespace from an empty spec.
 
-        A deployment spec with zero nodes almost always means an accidental
-        empty push -- e.g. a mistyped ``directory`` argument on ``dj push``
-        that resolved to no node files. Interpreting that as "delete every
-        node in the namespace" is a silent data-loss footgun (issue #2301).
-        Require an explicit ``allow_empty`` opt-in for the rare intentional
-        teardown.
-
-        Note: this fires for dry-run as well, so a dry-run that *would* wipe a
-        namespace surfaces the refusal loudly rather than quietly listing the
-        deletions in its preview.
+        A zero-node spec usually means an accidental empty push (e.g. a mistyped
+        ``directory``), so treating it as "delete everything" is a data-loss
+        footgun. Require an explicit ``allow_empty`` opt-in. Also fires on dry-run,
+        so a preview surfaces the refusal instead of quietly listing deletions.
         """
         if self.deployment_spec.allow_empty or self.deployment_spec.nodes:
             # Either the caller opted in, or the spec has nodes and the
