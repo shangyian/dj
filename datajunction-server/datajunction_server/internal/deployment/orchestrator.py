@@ -433,6 +433,8 @@ class DeploymentOrchestrator:
                 )
             self.deployed_results.extend(pre_results)
 
+        self._guard_against_accidental_wipe(deployment_plan)
+
         if deployment_plan.is_empty() and not self.deployment_spec.hierarchies:
             return DeploymentExecuteResult(
                 results=await self._handle_no_changes(),
@@ -3003,6 +3005,40 @@ class DeploymentOrchestrator:
         ]
 
         return to_create + to_update, to_skip, to_delete
+
+    def _guard_against_accidental_wipe(self, plan: "DeploymentPlan") -> None:
+        """Refuse to delete a populated namespace from an empty spec.
+
+        A deployment spec with zero nodes almost always means an accidental
+        empty push -- e.g. a mistyped ``directory`` argument on ``dj push``
+        that resolved to no node files. Interpreting that as "delete every
+        node in the namespace" is a silent data-loss footgun (issue #2301).
+        Require an explicit ``allow_empty`` opt-in for the rare intentional
+        teardown.
+
+        Note: this fires for dry-run as well, so a dry-run that *would* wipe a
+        namespace surfaces the refusal loudly rather than quietly listing the
+        deletions in its preview.
+        """
+        if self.deployment_spec.allow_empty or self.deployment_spec.nodes:
+            # Either the caller opted in, or the spec has nodes and the
+            # deletions are a genuine diff (e.g. removing a few of many).
+            return
+        if not plan.to_delete:
+            return  # empty spec, nothing to delete -- harmless
+
+        names = sorted(node.rendered_name for node in plan.to_delete)
+        preview = ", ".join(names[:5]) + (", …" if len(names) > 5 else "")
+        raise DJInvalidDeploymentConfig(
+            message=(
+                f"Refusing to deploy to namespace "
+                f"`{self.deployment_spec.namespace}`: the deployment spec "
+                f"contains no nodes, but this would soft-delete "
+                f"{len(plan.to_delete)} existing node(s) ({preview}). This "
+                f"usually means an empty or mistyped source directory. If you "
+                f"really intend to remove all nodes, re-run with `allow_empty`."
+            ),
+        )
 
     async def check_external_deps(
         self,
