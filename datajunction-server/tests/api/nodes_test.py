@@ -7432,6 +7432,30 @@ class TestNodeLifecycle:
         assert data["mode"] == "draft"
 
     @pytest.mark.asyncio
+    async def test_create_source_node_mode_only_backfills_lifecycle(
+        self,
+        client_with_basic: AsyncClient,
+    ) -> None:
+        """A source node created with only mode=draft (no lifecycle)
+        persists mode=draft and derives lifecycle=dev."""
+        response = await client_with_basic.post(
+            "/nodes/source/",
+            json={
+                "name": "basic.source.mode_only_draft",
+                "description": "Mode-only draft source",
+                "columns": [{"name": "id", "type": "int"}],
+                "mode": "draft",
+                "catalog": "public",
+                "schema_": "basic",
+                "table": "mode_only_draft",
+            },
+        )
+        assert response.status_code == 200, response.json()
+        data = response.json()
+        assert data["mode"] == "draft"
+        assert data["lifecycle"] == "dev"
+
+    @pytest.mark.asyncio
     async def test_patch_node_lifecycle_derives_mode(
         self,
         client: AsyncClient,
