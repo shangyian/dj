@@ -74,6 +74,50 @@ class NodeMode(StrEnum):
     DRAFT = "draft"
 
 
+class LifecycleState(StrEnum):
+    """
+    Node lifecycle state. Ordered least-to-most mature until deprecation:
+    dev -> experimental -> stable -> deprecated -> retired.
+
+    `mode` is derived from this: dev/experimental are lenient (mode=draft,
+    may be saved invalid); stable and beyond are strict (mode=published).
+    """
+
+    DEV = "dev"
+    EXPERIMENTAL = "experimental"
+    STABLE = "stable"
+    DEPRECATED = "deprecated"
+    RETIRED = "retired"
+
+    def to_mode(self) -> "NodeMode":
+        """Derive the legacy `mode` from this lifecycle state."""
+        return NodeMode.DRAFT if self in _LENIENT_LIFECYCLES else NodeMode.PUBLISHED
+
+    @classmethod
+    def from_mode(cls, mode: "NodeMode") -> "LifecycleState":
+        """Derive a lifecycle state from a legacy `mode` (back-compat)."""
+        return cls.DEV if mode == NodeMode.DRAFT else cls.STABLE
+
+
+# States that permit saving an invalid node (mode=draft equivalent).
+_LENIENT_LIFECYCLES = {LifecycleState.DEV, LifecycleState.EXPERIMENTAL}
+
+
+def resolve_lifecycle(
+    mode: "NodeMode",
+    lifecycle: "LifecycleState | None",
+) -> "tuple[LifecycleState, NodeMode]":
+    """Reconcile the two fields into a consistent (lifecycle, mode) pair.
+
+    When `lifecycle` is supplied it wins and `mode` is derived from it. When it
+    is absent (legacy callers), `lifecycle` is derived from `mode` and `mode` is
+    kept as-is.
+    """
+    if lifecycle is not None:
+        return lifecycle, lifecycle.to_mode()
+    return LifecycleState.from_mode(mode), mode
+
+
 class NodeStatus(StrEnum):
     """
     Node status.
