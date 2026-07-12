@@ -100,7 +100,7 @@ class LifecycleState(StrEnum):
 
 
 # States that permit saving an invalid node (mode=draft equivalent).
-_LENIENT_LIFECYCLES = {LifecycleState.DEV, LifecycleState.EXPERIMENTAL}
+_LENIENT_LIFECYCLES = frozenset({LifecycleState.DEV, LifecycleState.EXPERIMENTAL})
 
 
 def resolve_lifecycle(

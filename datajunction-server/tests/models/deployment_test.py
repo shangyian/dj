@@ -230,6 +230,7 @@ def test_deployment_spec():
                 "description": None,
                 "dimension_links": [],
                 "display_name": None,
+                "lifecycle": None,
                 "mode": NodeMode.PUBLISHED,
                 "name": "test_node",
                 "node_type": NodeType.SOURCE,

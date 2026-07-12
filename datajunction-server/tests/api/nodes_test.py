@@ -7537,6 +7537,34 @@ class TestNodeLifecycle:
         assert data["mode"] == "draft"
         assert data["lifecycle"] == "dev"
 
+    @pytest.mark.asyncio
+    async def test_patch_conflicting_mode_and_lifecycle_lifecycle_wins(
+        self,
+        client: AsyncClient,
+    ) -> None:
+        """PATCHing both `mode` and `lifecycle` at once with a conflicting
+        pair (mode=draft, lifecycle=stable) must resolve in favor of the
+        explicit `lifecycle`, not the explicit `mode`."""
+        create_response = await client.post(
+            "/nodes/transform/",
+            json={
+                "name": "default.lc_patch_conflict",
+                "description": "x",
+                "query": "SELECT 1 AS one",
+                "lifecycle": "experimental",
+            },
+        )
+        assert create_response.status_code == 201
+
+        patch_response = await client.patch(
+            "/nodes/default.lc_patch_conflict/",
+            json={"mode": "draft", "lifecycle": "stable"},
+        )
+        assert patch_response.status_code == 200
+        data = patch_response.json()
+        assert data["lifecycle"] == "stable"
+        assert data["mode"] == "published"
+
 
 class TestCopyNode:
     """Tests for the copy node API endpoint"""
