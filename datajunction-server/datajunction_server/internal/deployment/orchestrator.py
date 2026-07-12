@@ -2296,25 +2296,30 @@ class DeploymentOrchestrator:
             if p.current
         }
 
-        # Check dimension reachability using the pre-computed batched BFS
+        # Role-aware reachability (see DimensionReachability): mirrors the
+        # revalidation availability check so a cube that would revalidate
+        # INVALID is rejected here at deploy.
         dim_compat_errors: list[DJError] = []
         if cube_spec.rendered_dimensions:  # pragma: no branch
-            requested_dim_nodes = {
-                dim.rsplit(SEPARATOR, 1)[0] for dim in cube_spec.rendered_dimensions
+            requested_dim_roles = {
+                (fcn.node_name, fcn.role)
+                for dim in cube_spec.rendered_dimensions
+                for fcn in (FullColumnName(dim),)
             }
-            unreachable = reachability.unreachable_dimensions(
+            unreachable = reachability.unreachable_dimension_roles(
                 cube_parent_rev_ids,
-                requested_dim_nodes,
+                requested_dim_roles,
             )
-            for dim_name, missing_from_ids in unreachable.items():
+            for (dim_name, role), missing_from_ids in unreachable.items():
                 parent_names = sorted(
                     rev_id_to_parent.get(rid, str(rid)) for rid in missing_from_ids
                 )
+                dim_label = dim_name + (f"[{role}]" if role else "")
                 dim_compat_errors.append(
                     DJError(
                         code=ErrorCode.INVALID_DIMENSION,
                         message=(
-                            f"The dimension attribute `{dim_name}` is not "
+                            f"The dimension attribute `{dim_label}` is not "
                             f"reachable from parent node(s): {', '.join(parent_names)}. "
                             f"Add a dimension link to make it available."
                         ),
@@ -2323,6 +2328,9 @@ class DeploymentOrchestrator:
 
         # Validate that dimensions referenced in filters are reachable
         # and that the specific columns exist on those dimension nodes.
+        # TODO: filter reachability is still role-agnostic; a bare filter dim
+        # reachable only under a role can deploy green and flip on revalidation,
+        # the same gap just closed above for cube dimensions.
         if cube_spec.rendered_filters and cube_parent_rev_ids:
             filter_refs = _extract_dimension_refs_from_filters(
                 cube_spec.rendered_filters,
