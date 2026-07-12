@@ -97,6 +97,7 @@ from datajunction_server.models.node import (
     NodeOutput,
     NodeStatus,
     UpdateNode,
+    resolve_lifecycle,
 )
 from datajunction_server.models.node_type import NodeType
 from datajunction_server.models.query import QueryCreate
@@ -505,6 +506,7 @@ async def create_node_revision(
     """
     Create a non-source node revision.
     """
+    lifecycle, mode = resolve_lifecycle(data.mode, data.lifecycle)
     node_revision = NodeRevision(
         name=data.name,
         display_name=(
@@ -516,7 +518,8 @@ async def create_node_revision(
         type=node_type,
         status=NodeStatus.VALID,
         query=data.query,
-        mode=data.mode,
+        mode=mode,
+        lifecycle=lifecycle,
         required_dimensions=data.required_dimensions or [],
         created_by_id=current_user.id,
         custom_metadata=data.custom_metadata,

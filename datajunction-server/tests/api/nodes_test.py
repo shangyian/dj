@@ -7328,6 +7328,86 @@ ON s.state_region = r.us_region_id""",
     ]
 
 
+class TestNodeLifecycle:
+    """Tests for the `lifecycle` field on node create and its effect on the
+    derived `mode` and the validity-enforcement threshold."""
+
+    @pytest.mark.asyncio
+    async def test_create_node_with_lifecycle_derives_mode(
+        self,
+        client: AsyncClient,
+    ) -> None:
+        """lifecycle=experimental persists mode=draft; stable persists published."""
+        for lifecycle, expected_mode in [
+            ("experimental", "draft"),
+            ("stable", "published"),
+        ]:
+            response = await client.post(
+                "/nodes/transform/",
+                json={
+                    "name": f"default.lc_{lifecycle}",
+                    "description": "x",
+                    "query": "SELECT 1 AS one",
+                    "lifecycle": lifecycle,
+                },
+            )
+            data = response.json()
+            assert response.status_code == 201
+            assert data["lifecycle"] == lifecycle
+            assert data["mode"] == expected_mode
+
+    @pytest.mark.asyncio
+    async def test_create_node_mode_only_backfills_lifecycle(
+        self,
+        client: AsyncClient,
+    ) -> None:
+        """Legacy caller sending only mode gets lifecycle derived (back-compat)."""
+        response = await client.post(
+            "/nodes/transform/",
+            json={
+                "name": "default.lc_mode_only",
+                "description": "x",
+                "query": "SELECT 1 AS one",
+                "mode": "draft",
+            },
+        )
+        data = response.json()
+        assert response.status_code == 201
+        assert data["mode"] == "draft"
+        assert data["lifecycle"] == "dev"
+
+    @pytest.mark.asyncio
+    async def test_lifecycle_gates_validity_enforcement(
+        self,
+        client: AsyncClient,
+    ) -> None:
+        """experimental may be saved invalid; stable may not."""
+        bad_query = "SELECT 1 AS one FROM default.does_not_exist"
+
+        ok = await client.post(
+            "/nodes/transform/",
+            json={
+                "name": "default.lc_invalid_ok",
+                "description": "x",
+                "query": bad_query,
+                "lifecycle": "experimental",
+            },
+        )
+        assert ok.status_code == 201
+        assert ok.json()["status"] == "invalid"
+
+        strict = await client.post(
+            "/nodes/transform/",
+            json={
+                "name": "default.lc_invalid_reject",
+                "description": "x",
+                "query": bad_query,
+                "lifecycle": "stable",
+            },
+        )
+        assert strict.status_code == 422
+
+
 class TestCopyNode:
     """Tests for the copy node API endpoint"""
 

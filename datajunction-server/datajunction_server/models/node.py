@@ -734,6 +734,7 @@ class MutableNodeFields(BaseModel):
     display_name: str | None = None
     description: str | None = None
     mode: NodeMode = NodeMode.PUBLISHED
+    lifecycle: LifecycleState | None = None
     primary_key: list[str] | None = None
     custom_metadata: dict | None = None
     owners: list[str] | None = None
@@ -1085,6 +1086,7 @@ class NodeOutput(GenericNodeOutputModel):
     version: str
     status: NodeStatus
     mode: NodeMode
+    lifecycle: LifecycleState
     catalog: CatalogInfo | None = None
     schema_: str | None = None
     table: str | None = None
