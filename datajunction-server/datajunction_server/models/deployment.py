@@ -22,6 +22,7 @@ from datajunction_server.models.dimensionlink import (
 )
 from datajunction_server.models.impact import DownstreamImpact
 from datajunction_server.models.node import (
+    LifecycleState,
     MetricDirection,
     MetricUnit,
     NodeMode,
@@ -302,6 +303,7 @@ class NodeSpec(NamespacedSpec):
     description: str | None = None
     tags: list[str] = Field(default_factory=list)
     mode: NodeMode = NodeMode.PUBLISHED
+    lifecycle: LifecycleState | None = None
     custom_metadata: dict | None = None
 
     _query_ast: Any | None = PrivateAttr(default=None)

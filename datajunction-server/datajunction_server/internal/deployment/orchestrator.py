@@ -88,6 +88,7 @@ from datajunction_server.models.node import (
     NodeMode,
     NodeStatus,
     NodeType,
+    resolve_lifecycle,
 )
 from datajunction_server.models.unit import (
     AtomicUnit,
@@ -2555,6 +2556,10 @@ class DeploymentOrchestrator:
                         namespace=namespace,
                     )
 
+                    _, cube_mode = resolve_lifecycle(
+                        cube_spec.mode,
+                        cube_spec.lifecycle,
+                    )
                     new_node = Node(
                         name=cube_spec.rendered_name,
                         namespace=namespace,
@@ -2562,7 +2567,7 @@ class DeploymentOrchestrator:
                         display_name=cube_spec.display_name,
                         current_version=(
                             str(DEFAULT_DRAFT_VERSION)
-                            if cube_spec.mode == NodeMode.DRAFT
+                            if cube_mode == NodeMode.DRAFT
                             else str(DEFAULT_PUBLISHED_VERSION)
                         ),
                         tags=[
@@ -2696,6 +2701,10 @@ class DeploymentOrchestrator:
 
             node_columns.append(node_column)
 
+        cube_lifecycle, cube_mode = resolve_lifecycle(
+            cube_spec.mode,
+            cube_spec.lifecycle,
+        )
         node_revision = NodeRevision(
             name=cube_spec.rendered_name,
             display_name=cube_spec.display_name
@@ -2715,7 +2724,8 @@ class DeploymentOrchestrator:
             created_by_id=self.context.current_user.id,
             node=new_node,
             version=new_node.current_version,
-            mode=cube_spec.mode,
+            mode=cube_mode,
+            lifecycle=cube_lifecycle,
             cube_filters=cube_spec.rendered_filters or [],
             custom_metadata=cube_spec.custom_metadata,
             # Initialize to empty so dimension_links can be appended without
@@ -3605,6 +3615,7 @@ class DeploymentOrchestrator:
         existing: Node | None,
     ) -> Node:
         """Create or update a Node object based on the spec and existing node"""
+        _, node_mode = resolve_lifecycle(node_spec.mode, node_spec.lifecycle)
         new_node = (
             Node(
                 name=node_spec.rendered_name,
@@ -3613,7 +3624,7 @@ class DeploymentOrchestrator:
                 namespace=".".join(node_spec.rendered_name.split(".")[:-1]),
                 current_version=(
                     str(DEFAULT_DRAFT_VERSION)
-                    if node_spec.mode == NodeMode.DRAFT
+                    if node_mode == NodeMode.DRAFT
                     else str(DEFAULT_PUBLISHED_VERSION)
                 ),
                 tags=[self.registry.tags[tag_name] for tag_name in node_spec.tags],
@@ -3703,12 +3714,17 @@ class DeploymentOrchestrator:
         else:
             catalog = self.registry.catalogs.get(result.spec.catalog)
 
+        node_lifecycle, node_mode = resolve_lifecycle(
+            result.spec.mode,
+            result.spec.lifecycle,
+        )
         new_revision = NodeRevision(
             name=result.spec.rendered_name,
             display_name=result.spec.display_name,
             type=result.spec.node_type,
             description=result.spec.description,
-            mode=result.spec.mode,
+            mode=node_mode,
+            lifecycle=node_lifecycle,
             version=new_node.current_version,
             node=new_node,
             catalog=catalog,

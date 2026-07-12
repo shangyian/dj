@@ -5194,3 +5194,41 @@ class TestCubeBareDimRoleAwareDeployment:
         response = await client.get(f"/nodes/{namespace}.orders_cube/")
         assert response.status_code == 200, response.json()
         assert response.json()["status"] == "valid"
+
+
+@pytest.mark.xdist_group(name="deployments")
+class TestDeploymentLifecycle:
+    @pytest.mark.asyncio
+    async def test_deploy_with_lifecycle_derives_mode(self, client):
+        namespace = "lifecycle_deploy"
+        data = await deploy_and_wait(
+            client,
+            DeploymentSpec(
+                namespace=namespace,
+                nodes=[
+                    SourceSpec(
+                        name="src",
+                        description="s",
+                        catalog="default",
+                        schema="roads",
+                        table="src",
+                        columns=[ColumnSpec(name="a", type="int")],
+                        dimension_links=[],
+                        owners=["dj"],
+                    ),
+                    TransformSpec(
+                        name="xf",
+                        description="t",
+                        query="SELECT a FROM ${prefix}src",
+                        dimension_links=[],
+                        owners=["dj"],
+                        lifecycle="experimental",
+                    ),
+                ],
+            ),
+        )
+        assert data["status"] == DeploymentStatus.SUCCESS.value
+        node = await client.get(f"/nodes/{namespace}.xf/")
+        body = node.json()
+        assert body["lifecycle"] == "experimental"
+        assert body["mode"] == "draft"
