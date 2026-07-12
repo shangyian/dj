@@ -7407,6 +7407,112 @@ class TestNodeLifecycle:
         )
         assert strict.status_code == 422
 
+    @pytest.mark.asyncio
+    async def test_create_source_node_with_lifecycle_derives_mode(
+        self,
+        client_with_basic: AsyncClient,
+    ) -> None:
+        """A source node created with lifecycle=experimental persists
+        mode=draft, matching the non-source create path."""
+        response = await client_with_basic.post(
+            "/nodes/source/",
+            json={
+                "name": "basic.source.lc_experimental",
+                "description": "Experimental source",
+                "columns": [{"name": "id", "type": "int"}],
+                "lifecycle": "experimental",
+                "catalog": "public",
+                "schema_": "basic",
+                "table": "lc_experimental",
+            },
+        )
+        assert response.status_code == 200, response.json()
+        data = response.json()
+        assert data["lifecycle"] == "experimental"
+        assert data["mode"] == "draft"
+
+    @pytest.mark.asyncio
+    async def test_patch_node_lifecycle_derives_mode(
+        self,
+        client: AsyncClient,
+    ) -> None:
+        """PATCHing lifecycle=deprecated on a node sets mode=published on the
+        new revision, mirroring the create path's lifecycle->mode derivation."""
+        create_response = await client.post(
+            "/nodes/transform/",
+            json={
+                "name": "default.lc_patch_target",
+                "description": "x",
+                "query": "SELECT 1 AS one",
+                "lifecycle": "experimental",
+            },
+        )
+        assert create_response.status_code == 201
+
+        patch_response = await client.patch(
+            "/nodes/default.lc_patch_target/",
+            json={"lifecycle": "deprecated"},
+        )
+        assert patch_response.status_code == 200
+        data = patch_response.json()
+        assert data["lifecycle"] == "deprecated"
+        assert data["mode"] == "published"
+
+    @pytest.mark.asyncio
+    async def test_patch_unrelated_field_preserves_lifecycle(
+        self,
+        client: AsyncClient,
+    ) -> None:
+        """PATCHing only `description` on an experimental node must not reset
+        its lifecycle/mode back to the stable/published defaults."""
+        create_response = await client.post(
+            "/nodes/transform/",
+            json={
+                "name": "default.lc_patch_preserve",
+                "description": "x",
+                "query": "SELECT 1 AS one",
+                "lifecycle": "experimental",
+            },
+        )
+        assert create_response.status_code == 201
+
+        patch_response = await client.patch(
+            "/nodes/default.lc_patch_preserve/",
+            json={"description": "new description"},
+        )
+        assert patch_response.status_code == 200
+        data = patch_response.json()
+        assert data["description"] == "new description"
+        assert data["lifecycle"] == "experimental"
+        assert data["mode"] == "draft"
+
+    @pytest.mark.asyncio
+    async def test_patch_mode_only_backfills_lifecycle(
+        self,
+        client: AsyncClient,
+    ) -> None:
+        """Legacy caller PATCHing only `mode` still gets lifecycle derived
+        from the new mode (back-compat), on a node that starts out stable."""
+        create_response = await client.post(
+            "/nodes/transform/",
+            json={
+                "name": "default.lc_patch_mode_only",
+                "description": "x",
+                "query": "SELECT 1 AS one",
+                "lifecycle": "stable",
+            },
+        )
+        assert create_response.status_code == 201
+
+        patch_response = await client.patch(
+            "/nodes/default.lc_patch_mode_only/",
+            json={"mode": "draft"},
+        )
+        assert patch_response.status_code == 200
+        data = patch_response.json()
+        assert data["mode"] == "draft"
+        assert data["lifecycle"] == "dev"
+
 
 class TestCopyNode:
     """Tests for the copy node API endpoint"""

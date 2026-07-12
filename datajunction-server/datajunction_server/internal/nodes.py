@@ -92,6 +92,7 @@ from datajunction_server.models.node import (
     CreateCubeNode,
     CreateNode,
     CreateSourceNode,
+    LifecycleState,
     LineageColumn,
     NodeMode,
     NodeOutput,
@@ -189,6 +190,7 @@ async def create_a_source_node(
         )
         for idx, column_data in enumerate(data.columns)
     ]
+    lifecycle, mode = resolve_lifecycle(data.mode, data.lifecycle)
     node_revision = NodeRevision(
         name=data.name,
         display_name=data.display_name or f"{catalog.name}.{data.schema_}.{data.table}",
@@ -202,6 +204,8 @@ async def create_a_source_node(
         parents=[],
         created_by_id=current_user.id,
         query=data.query,
+        mode=mode,
+        lifecycle=lifecycle,
     )
     node.display_name = node_revision.display_name
 
@@ -210,7 +214,7 @@ async def create_a_source_node(
         session,
         node_revision,
         node,
-        data.mode,
+        mode,
         current_user=current_user,
         save_history=save_history,
     )
@@ -497,6 +501,30 @@ async def set_node_column_attributes(
     return [column]
 
 
+def resolve_updated_lifecycle(
+    old_lifecycle: LifecycleState,
+    old_mode: NodeMode,
+    new_mode: NodeMode,
+    lifecycle: Optional[LifecycleState],
+) -> "tuple[LifecycleState, NodeMode]":
+    """Resolve the (lifecycle, mode) pair for a revision derived from a prior
+    one (update/copy-forward paths).
+
+    An explicit ``lifecycle`` always wins (mode is re-derived from it), same
+    as ``resolve_lifecycle``. Absent an explicit lifecycle: if the mode being
+    applied hasn't changed from the prior revision, the prior lifecycle is
+    preserved as-is (so an update that doesn't touch mode/lifecycle can't
+    silently reset e.g. `experimental` back to `dev`); if the mode *has*
+    changed (legacy `mode`-only input), lifecycle is derived fresh from the
+    new mode, matching `resolve_lifecycle`'s back-compat behavior.
+    """
+    if lifecycle is not None:
+        return resolve_lifecycle(new_mode, lifecycle)
+    if new_mode == old_mode:
+        return old_lifecycle, new_mode
+    return resolve_lifecycle(new_mode, None)
+
+
 async def create_node_revision(
     data: CreateNode,
     node_type: NodeType,
@@ -669,6 +697,7 @@ async def create_cube_node_revision(
 
         node_columns.append(node_column)
 
+    cube_lifecycle, cube_mode = resolve_lifecycle(data.mode, data.lifecycle)
     node_revision = NodeRevision(
         name=data.name,
         display_name=data.display_name or labelize(data.name.split(SEPARATOR)[-1]),
@@ -681,7 +710,8 @@ async def create_cube_node_revision(
         status=status,
         catalog=catalog,
         created_by_id=current_user.id,
-        mode=data.mode,
+        mode=cube_mode,
+        lifecycle=cube_lifecycle,
         cube_filters=data.filters or None,
         custom_metadata=data.custom_metadata,
     )
@@ -987,6 +1017,7 @@ async def copy_to_new_node(
         description=old_revision.description,
         query=old_revision.query,
         mode=old_revision.mode,
+        lifecycle=old_revision.lifecycle,
         version=old_revision.version,
         node=new_node,
         catalog=old_revision.catalog,
@@ -1441,6 +1472,11 @@ def has_minor_changes(
         or (data and data.mode and old_revision.mode != data.mode)
         or (
             data
+            and data.lifecycle is not None
+            and old_revision.lifecycle != data.lifecycle
+        )
+        or (
+            data
             and data.display_name
             and old_revision.display_name != data.display_name
         )
@@ -1497,13 +1533,21 @@ async def update_cube_node(
     major_changes = (data.metrics and data.metrics != old_metrics) or (
         data.dimensions and data.dimensions != old_dimensions
     )
+    cube_new_mode = data.mode or node_revision.mode
+    cube_lifecycle, cube_mode = resolve_updated_lifecycle(
+        node_revision.lifecycle,
+        node_revision.mode,
+        cube_new_mode,
+        data.lifecycle,
+    )
     create_cube = CreateCubeNode(
         name=node_revision.name,
         display_name=data.display_name or node_revision.display_name,
         description=data.description or node_revision.description,
         metrics=data.metrics or old_metrics,
         dimensions=data.dimensions or old_dimensions,
-        mode=data.mode or node_revision.mode,
+        mode=cube_mode,
+        lifecycle=cube_lifecycle,
         filters=data.filters
         if data.filters is not None
         else (node_revision.cube_filters or []),
@@ -1807,6 +1851,7 @@ def copy_existing_node_revision(old_revision: NodeRevision, current_user: User):
         table=old_revision.table,
         parents=old_revision.parents,
         mode=old_revision.mode,
+        lifecycle=old_revision.lifecycle,
         materializations=old_revision.materializations,
         status=old_revision.status,
         required_dimensions=list(old_revision.required_dimensions),
@@ -1870,6 +1915,7 @@ async def create_node_from_inactive(
                 display_name=data.display_name,
                 description=data.description,
                 mode=data.mode,
+                lifecycle=data.lifecycle,
             )
             if isinstance(data, CreateSourceNode):
                 update_node.catalog = data.catalog
@@ -1987,6 +2033,11 @@ async def create_new_revision_from_existing(
         or (data and data.mode and old_revision.mode != data.mode)
         or (
             data
+            and data.lifecycle is not None
+            and old_revision.lifecycle != data.lifecycle
+        )
+        or (
+            data
             and data.display_name
             and old_revision.display_name != data.display_name
         )
@@ -2037,6 +2088,12 @@ async def create_new_revision_from_existing(
 
     old_version = Version.parse(node.current_version)
     new_mode = data.mode if data and data.mode else old_revision.mode
+    new_lifecycle, new_mode = resolve_updated_lifecycle(
+        old_revision.lifecycle,
+        old_revision.mode,
+        new_mode,
+        data.lifecycle if data else None,
+    )
     new_revision = NodeRevision(
         name=old_revision.name,
         node_id=node.id,
@@ -2071,6 +2128,7 @@ async def create_new_revision_from_existing(
         table=old_revision.table,
         parents=[],
         mode=new_mode,
+        lifecycle=new_lifecycle,
         materializations=[],
         status=old_revision.status,
         metric_metadata=(
@@ -3855,6 +3913,7 @@ async def refresh_source(
         display_name=current_revision.display_name,
         description=current_revision.description,
         mode=current_revision.mode,
+        lifecycle=current_revision.lifecycle,
         catalog_id=current_revision.catalog_id,
         schema_=current_revision.schema_,
         table=current_revision.table,
