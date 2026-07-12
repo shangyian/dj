@@ -68,6 +68,7 @@ from datajunction_server.models.deployment import (
 from datajunction_server.models.node import (
     DEFAULT_DRAFT_VERSION,
     BuildCriteria,
+    LifecycleState,
     MetricUnit,
     NodeCursor,
     NodeMode,
@@ -1490,6 +1491,12 @@ class NodeRevision(
     mode: Mapped[NodeMode] = mapped_column(
         Enum(NodeMode),
         default=NodeMode.PUBLISHED,
+    )
+    lifecycle: Mapped[LifecycleState] = mapped_column(
+        Enum(LifecycleState),
+        default=LifecycleState.STABLE,
+        server_default=LifecycleState.STABLE.name,
+        nullable=False,
     )
 
     version: Mapped[Optional[str]] = mapped_column(
