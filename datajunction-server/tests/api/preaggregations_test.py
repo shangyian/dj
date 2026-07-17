@@ -687,6 +687,7 @@ class TestGetPreaggregationById:
                 "grain_alias": None,
                 "merge": "SUM",
                 "name": "line_total_sum_e1f61696",
+                "source_column": None,
                 "rule": {
                     "level": None,
                     "type": "full",
@@ -753,6 +754,7 @@ class TestGetPreaggregationById:
                 "grain_alias": None,
                 "merge": "SUM",
                 "name": "quantity_sum_06b64d2e",
+                "source_column": None,
                 "rule": {
                     "level": None,
                     "type": "full",
@@ -2392,7 +2394,8 @@ class TestRegisterPreAggregations:
 
     @pytest.mark.asyncio
     async def test_register_rejects_non_measure(
-        self, client_with_build_v3: AsyncClient
+        self,
+        client_with_build_v3: AsyncClient,
     ):
         """A derived/ratio metric cannot be used as a measure_columns key."""
         _mock_query_service(client_with_build_v3, ["some_col"])
@@ -2441,5 +2444,142 @@ class TestRegisterPreAggregations:
             )
             assert response.status_code == 422
             assert "not found in table" in response.text
+        finally:
+            del client_with_build_v3.app.dependency_overrides[get_query_service_client]
+
+    @pytest.mark.asyncio
+    async def test_register_without_valid_through_ts_is_pending(
+        self,
+        client_with_build_v3: AsyncClient,
+    ):
+        """Without a valid_through_ts, the pre-agg is registered but pending."""
+        _mock_query_service(client_with_build_v3, ["revenue_total", "order_cnt"])
+        try:
+            response = await client_with_build_v3.post(
+                "/preaggs/register",
+                json={
+                    "metrics": ["v3.avg_order_value"],
+                    "dimensions": ["v3.product.category"],
+                    "table": {
+                        "catalog": "default",
+                        "schema": "analytics",
+                        "table": "agg_pending",
+                    },
+                    "measure_columns": {
+                        "v3.total_revenue": "revenue_total",
+                        "v3.order_count": "order_cnt",
+                    },
+                },
+            )
+            assert response.status_code == 201, response.text
+            assert response.json()["preaggs"][0]["status"] == "pending"
+        finally:
+            del client_with_build_v3.app.dependency_overrides[get_query_service_client]
+
+    @pytest.mark.asyncio
+    async def test_register_is_idempotent(self, client_with_build_v3: AsyncClient):
+        """Registering the same table twice updates the existing pre-agg."""
+        _mock_query_service(client_with_build_v3, ["revenue_total", "order_cnt"])
+        payload = {
+            "metrics": ["v3.avg_order_value"],
+            "dimensions": ["v3.product.category"],
+            "table": {
+                "catalog": "default",
+                "schema": "analytics",
+                "table": "agg_idem",
+                "valid_through_ts": 1700000000,
+            },
+            "measure_columns": {
+                "v3.total_revenue": "revenue_total",
+                "v3.order_count": "order_cnt",
+            },
+        }
+        try:
+            first = await client_with_build_v3.post("/preaggs/register", json=payload)
+            assert first.status_code == 201, first.text
+            second = await client_with_build_v3.post("/preaggs/register", json=payload)
+            assert second.status_code == 201, second.text
+            assert first.json()["preaggs"][0]["id"] == second.json()["preaggs"][0]["id"]
+        finally:
+            del client_with_build_v3.app.dependency_overrides[get_query_service_client]
+
+    @pytest.mark.asyncio
+    async def test_register_rejects_uncovered_measure(
+        self,
+        client_with_build_v3: AsyncClient,
+    ):
+        """Every component measure of the requested metrics must be covered."""
+        _mock_query_service(client_with_build_v3, ["revenue_total"])
+        try:
+            response = await client_with_build_v3.post(
+                "/preaggs/register",
+                json={
+                    "metrics": ["v3.avg_order_value"],
+                    "dimensions": ["v3.product.category"],
+                    "table": {
+                        "catalog": "default",
+                        "schema": "analytics",
+                        "table": "agg_partial",
+                    },
+                    # order_count's measure is missing.
+                    "measure_columns": {"v3.total_revenue": "revenue_total"},
+                },
+            )
+            assert response.status_code == 422
+            assert "not covered by measure_columns" in response.text
+        finally:
+            del client_with_build_v3.app.dependency_overrides[get_query_service_client]
+
+    @pytest.mark.asyncio
+    async def test_register_rejects_unknown_metric(
+        self,
+        client_with_build_v3: AsyncClient,
+    ):
+        """A measure_columns key that is not a metric node is rejected."""
+        _mock_query_service(client_with_build_v3, ["c"])
+        try:
+            response = await client_with_build_v3.post(
+                "/preaggs/register",
+                json={
+                    "metrics": ["v3.avg_order_value"],
+                    "dimensions": ["v3.product.category"],
+                    "table": {
+                        "catalog": "default",
+                        "schema": "analytics",
+                        "table": "t",
+                    },
+                    "measure_columns": {"v3.does_not_exist": "c"},
+                },
+            )
+            assert response.status_code == 422
+            assert "not a metric node" in response.text
+        finally:
+            del client_with_build_v3.app.dependency_overrides[get_query_service_client]
+
+    @pytest.mark.asyncio
+    async def test_register_requires_query_service(
+        self,
+        client_with_build_v3: AsyncClient,
+    ):
+        """Registration requires a configured query service for column inference."""
+        client_with_build_v3.app.dependency_overrides[get_query_service_client] = (
+            lambda: None
+        )
+        try:
+            response = await client_with_build_v3.post(
+                "/preaggs/register",
+                json={
+                    "metrics": ["v3.avg_order_value"],
+                    "dimensions": ["v3.product.category"],
+                    "table": {
+                        "catalog": "default",
+                        "schema": "analytics",
+                        "table": "t",
+                    },
+                    "measure_columns": {"v3.total_revenue": "revenue_total"},
+                },
+            )
+            assert response.status_code != 201
+            assert "query service" in response.text
         finally:
             del client_with_build_v3.app.dependency_overrides[get_query_service_client]

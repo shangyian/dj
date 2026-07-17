@@ -89,8 +89,7 @@ class ExternalPreAggTable(BaseModel):
     """An externally-built table backing a registered pre-aggregation."""
 
     catalog: str = Field(description="Catalog where the external table exists")
-    schema_: Optional[str] = Field(
-        default=None,
+    schema_: str = Field(
         alias="schema",
         description="Schema where the external table exists",
     )
