@@ -2336,3 +2336,110 @@ class TestIncrementalTimeMaterialization:
         assert temporal_partition.column_name is not None
         assert temporal_partition.format == "yyyyMMdd"
         assert temporal_partition.granularity == "day"
+
+
+def _mock_query_service(client_with_build_v3, columns: list[str]):
+    """Override the query service so get_columns_for_table returns ``columns``."""
+    from types import SimpleNamespace
+
+    async def _fake_get_columns(*args, **kwargs):
+        return [SimpleNamespace(name=name) for name in columns]
+
+    mock_client = MagicMock()
+    mock_client.get_columns_for_table = _fake_get_columns
+    client_with_build_v3.app.dependency_overrides[get_query_service_client] = (
+        lambda: mock_client
+    )
+
+
+class TestRegisterPreAggregations:
+    """Tests for POST /preaggs/register (externally-built tables)."""
+
+    @pytest.mark.asyncio
+    async def test_register_external_preagg(self, client_with_build_v3: AsyncClient):
+        """A derived metric is registered by mapping its base measures to columns."""
+        _mock_query_service(
+            client_with_build_v3,
+            ["revenue_total", "order_cnt", "category"],
+        )
+        try:
+            response = await client_with_build_v3.post(
+                "/preaggs/register",
+                json={
+                    "metrics": ["v3.avg_order_value"],
+                    "dimensions": ["v3.product.category"],
+                    "table": {
+                        "catalog": "default",
+                        "schema": "analytics",
+                        "table": "avg_order_value_agg",
+                        "valid_through_ts": 1700000000,
+                    },
+                    "measure_columns": {
+                        "v3.total_revenue": "revenue_total",
+                        "v3.order_count": "order_cnt",
+                    },
+                },
+            )
+            assert response.status_code == 201, response.text
+            preagg = response.json()["preaggs"][0]
+            # Every measure is bound to its declared physical column.
+            source_columns = {m["source_column"] for m in preagg["measures"]}
+            assert source_columns == {"revenue_total", "order_cnt"}
+            # valid_through_ts was provided, so it is immediately available.
+            assert preagg["status"] == "active"
+        finally:
+            del client_with_build_v3.app.dependency_overrides[get_query_service_client]
+
+    @pytest.mark.asyncio
+    async def test_register_rejects_non_measure(
+        self, client_with_build_v3: AsyncClient
+    ):
+        """A derived/ratio metric cannot be used as a measure_columns key."""
+        _mock_query_service(client_with_build_v3, ["some_col"])
+        try:
+            response = await client_with_build_v3.post(
+                "/preaggs/register",
+                json={
+                    "metrics": ["v3.avg_order_value"],
+                    "dimensions": ["v3.product.category"],
+                    "table": {
+                        "catalog": "default",
+                        "schema": "analytics",
+                        "table": "bad_agg",
+                    },
+                    "measure_columns": {"v3.avg_order_value": "some_col"},
+                },
+            )
+            assert response.status_code == 422
+            assert "not a measure" in response.text
+        finally:
+            del client_with_build_v3.app.dependency_overrides[get_query_service_client]
+
+    @pytest.mark.asyncio
+    async def test_register_rejects_missing_column(
+        self,
+        client_with_build_v3: AsyncClient,
+    ):
+        """Declared physical columns must exist in the external table."""
+        _mock_query_service(client_with_build_v3, ["only_this_column"])
+        try:
+            response = await client_with_build_v3.post(
+                "/preaggs/register",
+                json={
+                    "metrics": ["v3.avg_order_value"],
+                    "dimensions": ["v3.product.category"],
+                    "table": {
+                        "catalog": "default",
+                        "schema": "analytics",
+                        "table": "avg_agg",
+                    },
+                    "measure_columns": {
+                        "v3.total_revenue": "revenue_total",
+                        "v3.order_count": "order_cnt",
+                    },
+                },
+            )
+            assert response.status_code == 422
+            assert "not found in table" in response.text
+        finally:
+            del client_with_build_v3.app.dependency_overrides[get_query_service_client]
