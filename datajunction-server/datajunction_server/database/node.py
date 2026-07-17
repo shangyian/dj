@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 import sqlalchemy as sa
 from pydantic import ConfigDict
 from sqlalchemy import JSON, and_, case, desc, func
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import aliased
 
 from sqlalchemy import Column as SqlalchemyColumn
@@ -1460,6 +1461,12 @@ class NodeRevision(
             postgresql_using="gin",
             postgresql_ops={"description": "gin_trgm_ops"},
         ),
+        Index(
+            "ix_noderevision_custom_metadata_gin",
+            "custom_metadata",
+            postgresql_using="gin",
+            postgresql_ops={"custom_metadata": "jsonb_path_ops"},
+        ),
     )
 
     id: Mapped[int] = mapped_column(
@@ -1618,7 +1625,7 @@ class NodeRevision(
     )
 
     custom_metadata: Mapped[Optional[Dict]] = mapped_column(
-        JSON,
+        JSON().with_variant(JSONB(), "postgresql"),
         default=None,
     )
 
