@@ -650,7 +650,9 @@ class TestFindMatchingPreagg:
             grain_columns=["dim1", "dim2"],
             measures=[
                 make_preagg_measure(
-                    "num_users", "DISTINCT user_id", aggregation="COUNT"
+                    "num_users",
+                    "DISTINCT user_id",
+                    aggregation="COUNT",
                 ),
             ],
             sql="SELECT ...",
@@ -706,7 +708,9 @@ class TestFindMatchingPreagg:
             grain_columns=["dim1", "dim2"],
             measures=[
                 make_preagg_measure(
-                    "num_users", "DISTINCT user_id", aggregation="COUNT"
+                    "num_users",
+                    "DISTINCT user_id",
+                    aggregation="COUNT",
                 ),
             ],
             sql="SELECT ...",
