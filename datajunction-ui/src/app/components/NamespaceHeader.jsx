@@ -292,8 +292,7 @@ export default function NamespaceHeader({
   // editable. `rootDefaultBranch` is resolved above from the git root's config
   // (parentGitConfig), which has finished loading by the time the verdict fires
   // below — setGitConfigLoading(false) runs after that fetch.
-  const onSubBranch =
-    !!branchNamespace && branchNamespace !== gitRootNamespace;
+  const onSubBranch = !!branchNamespace && branchNamespace !== gitRootNamespace;
   const isDefaultBranch = onSubBranch
     ? gitConfig?.git_branch === rootDefaultBranch
     : gitShape === 'root' || gitShape === 'flat';

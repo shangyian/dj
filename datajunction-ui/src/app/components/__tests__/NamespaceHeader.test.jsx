@@ -71,9 +71,7 @@ const renderReadOnlyVerdict = ({ namespace, configByNamespace, sources }) => {
         sources || { total_deployments: 0, primary_source: null },
       ),
     listDeployments: vi.fn().mockResolvedValue([]),
-    getNamespaceGitConfig: vi.fn(ns =>
-      Promise.resolve(configByNamespace[ns]),
-    ),
+    getNamespaceGitConfig: vi.fn(ns => Promise.resolve(configByNamespace[ns])),
     getNamespaceBranches: vi.fn().mockResolvedValue([]),
     getPullRequest: vi.fn().mockResolvedValue(null),
   };
@@ -784,17 +782,19 @@ describe('<NamespaceHeader />', () => {
       },
     ];
 
-    cases.forEach(({ what, namespace, configByNamespace, sources, expectedReadOnly }) => {
-      it(`reports ${what}`, async () => {
-        const { onReadOnlyChange } = renderReadOnlyVerdict({
-          namespace,
-          configByNamespace,
-          sources,
+    cases.forEach(
+      ({ what, namespace, configByNamespace, sources, expectedReadOnly }) => {
+        it(`reports ${what}`, async () => {
+          const { onReadOnlyChange } = renderReadOnlyVerdict({
+            namespace,
+            configByNamespace,
+            sources,
+          });
+          await waitFor(() => expect(onReadOnlyChange).toHaveBeenCalled());
+          expect(onReadOnlyChange).toHaveBeenLastCalledWith(expectedReadOnly);
         });
-        await waitFor(() => expect(onReadOnlyChange).toHaveBeenCalled());
-        expect(onReadOnlyChange).toHaveBeenLastCalledWith(expectedReadOnly);
-      });
-    });
+      },
+    );
   });
 
   it('should open Create Branch modal when button is clicked', async () => {
