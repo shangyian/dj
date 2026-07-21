@@ -697,6 +697,120 @@ describe('<NamespaceHeader />', () => {
     ).toBeInTheDocument();
   });
 
+  it('reports a sub-namespace of a feature branch as EDITABLE (not read-only)', async () => {
+    // Regression: a sub-namespace inside a feature branch resolves with an
+    // inherited github_repo_path + git_branch but NO parent_namespace of its
+    // own, so detectShape returns 'flat'. The old shape-based check locked it,
+    // bouncing the node editor. It must be editable because 'feature' is not
+    // the repo's default branch ('main').
+    const onReadOnlyChange = vi.fn();
+    const mockDjClient = {
+      namespaceSources: vi.fn().mockResolvedValue({
+        total_deployments: 0,
+        primary_source: null,
+      }),
+      listDeployments: vi.fn().mockResolvedValue([]),
+      getNamespaceGitConfig: vi
+        .fn()
+        // 1) the sub-namespace itself — flat shape (no parent_namespace)
+        .mockResolvedValueOnce({
+          github_repo_path: 'test/repo',
+          git_branch: 'feature',
+          git_path: 'nodes/',
+          git_only: false,
+          parent_namespace: null,
+          branch_namespace: 'test.feature',
+          git_root_namespace: 'test',
+        })
+        // 2) the branch namespace (carries the FK to the git root)
+        .mockResolvedValueOnce({
+          github_repo_path: 'test/repo',
+          git_branch: 'feature',
+          parent_namespace: 'test',
+          branch_namespace: 'test.feature',
+          git_root_namespace: 'test',
+        })
+        // 3) the git root (carries default_branch)
+        .mockResolvedValueOnce({
+          github_repo_path: 'test/repo',
+          git_branch: null,
+          default_branch: 'main',
+          git_root_namespace: 'test',
+        }),
+      getNamespaceBranches: vi.fn().mockResolvedValue([]),
+      getPullRequest: vi.fn().mockResolvedValue(null),
+    };
+
+    render(
+      <MemoryRouter>
+        <DJClientContext.Provider value={{ DataJunctionAPI: mockDjClient }}>
+          <NamespaceHeader
+            namespace="test.feature.metrics"
+            onReadOnlyChange={onReadOnlyChange}
+          />
+        </DJClientContext.Provider>
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => {
+      expect(onReadOnlyChange).toHaveBeenCalled();
+    });
+    expect(onReadOnlyChange).toHaveBeenLastCalledWith(false);
+  });
+
+  it('reports a sub-namespace of the default branch as READ-ONLY', async () => {
+    const onReadOnlyChange = vi.fn();
+    const mockDjClient = {
+      namespaceSources: vi.fn().mockResolvedValue({
+        total_deployments: 0,
+        primary_source: null,
+      }),
+      listDeployments: vi.fn().mockResolvedValue([]),
+      getNamespaceGitConfig: vi
+        .fn()
+        .mockResolvedValueOnce({
+          github_repo_path: 'test/repo',
+          git_branch: 'main',
+          git_path: 'nodes/',
+          git_only: false,
+          parent_namespace: null,
+          branch_namespace: 'test.main',
+          git_root_namespace: 'test',
+        })
+        .mockResolvedValueOnce({
+          github_repo_path: 'test/repo',
+          git_branch: 'main',
+          parent_namespace: 'test',
+          branch_namespace: 'test.main',
+          git_root_namespace: 'test',
+        })
+        .mockResolvedValueOnce({
+          github_repo_path: 'test/repo',
+          git_branch: null,
+          default_branch: 'main',
+          git_root_namespace: 'test',
+        }),
+      getNamespaceBranches: vi.fn().mockResolvedValue([]),
+      getPullRequest: vi.fn().mockResolvedValue(null),
+    };
+
+    render(
+      <MemoryRouter>
+        <DJClientContext.Provider value={{ DataJunctionAPI: mockDjClient }}>
+          <NamespaceHeader
+            namespace="test.main.metrics"
+            onReadOnlyChange={onReadOnlyChange}
+          />
+        </DJClientContext.Provider>
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => {
+      expect(onReadOnlyChange).toHaveBeenCalled();
+    });
+    expect(onReadOnlyChange).toHaveBeenLastCalledWith(true);
+  });
+
   it('should open Create Branch modal when button is clicked', async () => {
     const mockDjClient = {
       namespaceSources: vi.fn().mockResolvedValue({
