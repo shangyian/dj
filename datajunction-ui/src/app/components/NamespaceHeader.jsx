@@ -302,7 +302,13 @@ export default function NamespaceHeader({
     !!sources &&
     sources.total_deployments > 0 &&
     sources.primary_source?.type === 'git';
-  const isGitManaged = isGitDeployed || isReadOnly;
+  // A non-default (feature) branch and its sub-namespaces stay editable even
+  // when git-deployed — editing then syncing back is the point. The
+  // git-deployed lock only applies elsewhere (default branch, 1:1 flat, git
+  // root, or an unrecognized-but-git-deployed shape), which `isReadOnly`
+  // already covers for the recognized cases.
+  const isFeatureBranch = onSubBranch && !isDefaultBranch;
+  const isGitManaged = isReadOnly || (isGitDeployed && !isFeatureBranch);
   // Repo config is owned by the git root. On a branch, edits target the root
   // (its config is parentGitConfig — branches sit one level below the root); a
   // flat or plain namespace owns its own config. This keeps flat namespaces

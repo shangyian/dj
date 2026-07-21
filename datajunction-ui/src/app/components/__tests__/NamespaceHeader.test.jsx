@@ -811,6 +811,57 @@ describe('<NamespaceHeader />', () => {
     expect(onReadOnlyChange).toHaveBeenLastCalledWith(true);
   });
 
+  it('reports a git-deployed feature branch as EDITABLE (deploy status does not lock feature branches)', async () => {
+    // A feature branch that has been deployed from git is still editable in the
+    // UI (edit, then sync/PR back). Only the default branch / 1:1 / root are
+    // locked — git-deployment alone must not lock a feature branch.
+    const onReadOnlyChange = vi.fn();
+    const mockDjClient = {
+      namespaceSources: vi.fn().mockResolvedValue({
+        total_deployments: 2,
+        primary_source: { type: 'git' },
+      }),
+      listDeployments: vi.fn().mockResolvedValue([]),
+      getNamespaceGitConfig: vi
+        .fn()
+        // 1) the branch root itself (branch_namespace === namespace, so no
+        //    extra branch fetch — it carries the FK to the git root directly)
+        .mockResolvedValueOnce({
+          github_repo_path: 'test/repo',
+          git_branch: 'feature',
+          git_only: false,
+          parent_namespace: 'test',
+          branch_namespace: 'test.feature',
+          git_root_namespace: 'test',
+        })
+        // 2) the git root (carries default_branch)
+        .mockResolvedValueOnce({
+          github_repo_path: 'test/repo',
+          git_branch: null,
+          default_branch: 'main',
+          git_root_namespace: 'test',
+        }),
+      getNamespaceBranches: vi.fn().mockResolvedValue([]),
+      getPullRequest: vi.fn().mockResolvedValue(null),
+    };
+
+    render(
+      <MemoryRouter>
+        <DJClientContext.Provider value={{ DataJunctionAPI: mockDjClient }}>
+          <NamespaceHeader
+            namespace="test.feature"
+            onReadOnlyChange={onReadOnlyChange}
+          />
+        </DJClientContext.Provider>
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => {
+      expect(onReadOnlyChange).toHaveBeenCalled();
+    });
+    expect(onReadOnlyChange).toHaveBeenLastCalledWith(false);
+  });
+
   it('should open Create Branch modal when button is clicked', async () => {
     const mockDjClient = {
       namespaceSources: vi.fn().mockResolvedValue({
@@ -1027,13 +1078,15 @@ describe('<NamespaceHeader />', () => {
     // to start a new branch is the branch switcher on the branch page. Creating
     // one must still target the git root (`test`), not the current branch.
     const gitConfigByNamespace = {
-      'test.feature': {
+      // The default-branch page (the git root redirects here). It's read-only,
+      // so it renders the inline "New Branch" toolbar flow this test drives.
+      'test.main': {
         github_repo_path: 'test/repo',
-        git_branch: 'feature',
+        git_branch: 'main',
         git_path: 'nodes/',
         git_only: false,
         parent_namespace: 'test',
-        branch_namespace: 'test.feature',
+        branch_namespace: 'test.main',
         git_root_namespace: 'test',
       },
       test: {
@@ -1076,7 +1129,7 @@ describe('<NamespaceHeader />', () => {
     render(
       <MemoryRouter>
         <DJClientContext.Provider value={{ DataJunctionAPI: mockDjClient }}>
-          <NamespaceHeader namespace="test.feature" />
+          <NamespaceHeader namespace="test.main" />
         </DJClientContext.Provider>
       </MemoryRouter>,
     );
@@ -1089,7 +1142,7 @@ describe('<NamespaceHeader />', () => {
     // Click the branch-crumb button (not the <code> in the git strip).
     fireEvent.click(
       screen
-        .getAllByText('feature')
+        .getAllByText('main')
         .find(el => el.closest('button') && el.tagName !== 'CODE'),
     );
     expect(await screen.findByText('New branch')).toBeInTheDocument();
