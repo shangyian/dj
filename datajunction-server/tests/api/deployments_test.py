@@ -5853,17 +5853,17 @@ class TestCrossParentRatioDeployment:
     get_dimensions sees only each base metric's parent-local columns and the
     shared-dimension intersection is empty. The cross-fact check must not reject
     the derived metric mid-deploy when the pending links establish a common
-    dimension. Mirrors the production repro (visit-rate: fact ÷ dimension-node).
+    dimension. Mirrors the minimal fact ÷ dimension-node repro.
     """
 
     def _nodes(self):
         return [
             SourceSpec(
-                name="visit_raw",
-                description="Raw account-day visit facts",
+                name="fd_fact_raw",
+                description="Raw fact rows",
                 catalog="default",
                 schema="roads",
-                table="visit_raw",
+                table="fd_fact_raw",
                 columns=[
                     ColumnSpec(name="account_id", type="bigint"),
                     ColumnSpec(name="dateint", type="int"),
@@ -5873,11 +5873,11 @@ class TestCrossParentRatioDeployment:
                 owners=["dj"],
             ),
             SourceSpec(
-                name="stream_raw",
-                description="Raw account-day streaming eligibility",
+                name="fd_dim_raw",
+                description="Raw dimension rows",
                 catalog="default",
                 schema="roads",
-                table="stream_raw",
+                table="fd_dim_raw",
                 columns=[
                     ColumnSpec(name="account_id", type="bigint"),
                     ColumnSpec(name="dateint", type="int"),
@@ -5887,77 +5887,72 @@ class TestCrossParentRatioDeployment:
                 owners=["dj"],
             ),
             SourceSpec(
-                name="dates_raw",
+                name="dt_date_raw",
                 description="Raw dates",
                 catalog="default",
                 schema="roads",
-                table="dates_raw",
+                table="dt_date_raw",
                 columns=[ColumnSpec(name="dateint", type="int")],
                 dimension_links=[],
                 owners=["dj"],
             ),
             DimensionSpec(
-                name="dates_d",
+                name="dt_date_d_v2",
                 description="Conformed date dimension",
-                query="SELECT dateint FROM ${prefix}dates_raw",
+                query="SELECT dateint FROM ${prefix}dt_date_raw",
                 primary_key=["dateint"],
                 dimension_links=[],
                 owners=["dj"],
             ),
             # Numerator parent: a TRANSFORM, linked to the shared date dim.
             TransformSpec(
-                name="visit_f",
-                description="Account-day visit fact",
-                query="SELECT account_id, dateint, visited FROM ${prefix}visit_raw",
+                name="fd_fact",
+                description="Fact transform",
+                query="SELECT account_id, dateint, visited FROM ${prefix}fd_fact_raw",
                 dimension_links=[
                     DimensionJoinLinkSpec(
-                        dimension_node="${prefix}dates_d",
+                        dimension_node="${prefix}dt_date_d_v2",
                         join_type="left",
-                        join_on="${prefix}visit_f.dateint = ${prefix}dates_d.dateint",
+                        join_on="${prefix}fd_fact.dateint = ${prefix}dt_date_d_v2.dateint",
                     ),
                 ],
                 owners=["dj"],
             ),
             # Denominator parent: a DIMENSION node, linked to the same date dim.
             DimensionSpec(
-                name="stream_d",
-                description="Account-day streaming-eligibility dimension",
-                query=(
-                    "SELECT account_id, dateint, can_stream FROM ${prefix}stream_raw"
-                ),
+                name="fd_dim",
+                description="Dimension node holding the denominator",
+                query="SELECT account_id, dateint, can_stream FROM ${prefix}fd_dim_raw",
                 primary_key=["account_id", "dateint"],
                 dimension_links=[
                     DimensionJoinLinkSpec(
-                        dimension_node="${prefix}dates_d",
+                        dimension_node="${prefix}dt_date_d_v2",
                         join_type="left",
-                        join_on="${prefix}stream_d.dateint = ${prefix}dates_d.dateint",
+                        join_on="${prefix}fd_dim.dateint = ${prefix}dt_date_d_v2.dateint",
                     ),
                 ],
                 owners=["dj"],
             ),
             MetricSpec(
-                name="visited_count",
-                description="Accounts that visited",
-                query="SELECT SUM(visited) FROM ${prefix}visit_f",
+                name="fd_num",
+                description="Numerator (parent = transform)",
+                query="SELECT SUM(visited) FROM ${prefix}fd_fact",
                 dimension_links=[],
                 owners=["dj"],
             ),
             MetricSpec(
-                name="can_stream_count",
-                description="Accounts that can stream",
-                query="SELECT SUM(can_stream) FROM ${prefix}stream_d",
+                name="fd_den",
+                description="Denominator (parent = dimension node)",
+                query="SELECT SUM(can_stream) FROM ${prefix}fd_dim",
                 dimension_links=[],
                 owners=["dj"],
             ),
             # Cross-parent ratio: numerator (transform) ÷ denominator (dim node),
-            # sharing dates_d only through links deployed in this same batch.
+            # sharing dt_date_d_v2 only through links deployed in this same batch.
             MetricSpec(
-                name="visit_rate",
-                description="Visit rate = visited / can_stream",
-                query=(
-                    "SELECT CAST(${prefix}visited_count AS DOUBLE) "
-                    "/ ${prefix}can_stream_count"
-                ),
+                name="fd_ratio_cross",
+                description="fd_num / fd_den",
+                query=("SELECT CAST(${prefix}fd_num AS DOUBLE) / ${prefix}fd_den"),
                 dimension_links=[],
                 owners=["dj"],
             ),
@@ -5974,7 +5969,7 @@ class TestCrossParentRatioDeployment:
             DeploymentSpec(namespace=namespace, nodes=self._nodes()),
         )
         ratio_result = next(
-            r for r in data["results"] if r["name"] == f"{namespace}.visit_rate"
+            r for r in data["results"] if r["name"] == f"{namespace}.fd_ratio_cross"
         )
         # Before the fix this deployed with node status INVALID and the message
         # "[invalid] ... no shared dimensions"; the result status is the deploy
@@ -5983,6 +5978,6 @@ class TestCrossParentRatioDeployment:
         assert "invalid" not in ratio_result["message"], ratio_result
 
         # Deploy-time status must match what a fresh read/revalidation computes.
-        response = await client.get(f"/nodes/{namespace}.visit_rate/")
+        response = await client.get(f"/nodes/{namespace}.fd_ratio_cross/")
         assert response.status_code == 200, response.json()
         assert response.json()["status"] == "valid"

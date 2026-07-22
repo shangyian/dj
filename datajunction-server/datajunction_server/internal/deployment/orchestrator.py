@@ -3501,14 +3501,12 @@ class DeploymentOrchestrator:
 
     def _deployment_link_targets(self) -> dict[str, set[str]]:
         """Map each linkable node to the dimension nodes it links to, across the
-        ENTIRE deployment (all topological levels).
+        whole deployment (rendered names, to match node_graph).
 
-        Dimension links are deployed only after every node level, so per-level
-        validation cannot observe links declared on nodes in other levels via the
-        committed graph. The cross-fact derived-metric check consults this
-        spec-derived map to avoid a false negative when two base metrics share a
-        dimension only through links this deployment will create. Keyed and valued
-        by rendered names to match node_graph / dependency_nodes.
+        Links deploy only after every node level, so per-level validation can't
+        see links on nodes in other levels via the committed graph. The
+        cross-fact check uses this to avoid a false negative when base metrics
+        share a dimension only through links this deployment will create.
         """
         targets: dict[str, set[str]] = {}
         for node_spec in self.deployment_spec.nodes:
