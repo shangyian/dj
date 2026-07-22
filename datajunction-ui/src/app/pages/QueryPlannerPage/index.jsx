@@ -440,10 +440,6 @@ export function QueryPlannerPage() {
         // dimension references that pre-aggs are created with
         const requestedDims = measuresResult.requested_dimensions || [];
         const grainColsForLookup = requestedDims.join(',');
-        console.log(
-          'grainCols for pre-agg lookup (from requested_dimensions):',
-          grainColsForLookup,
-        );
 
         await Promise.all(
           measuresResult.grain_groups.map(async gg => {
@@ -455,10 +451,6 @@ export function QueryPlannerPage() {
               .filter(Boolean)
               .join(',');
 
-            console.log(
-              `Looking for pre-agg: node=${gg.parent_name}, grain=${grainColsForLookup}, measures=${measureNames}`,
-            );
-
             // First try exact match using requested_dimensions
             let result = await djClient.listPreaggs({
               node_name: gg.parent_name,
@@ -466,8 +458,6 @@ export function QueryPlannerPage() {
               grain_mode: 'exact',
               measures: measureNames || undefined,
             });
-
-            console.log(`Exact match result for ${gg.parent_name}:`, result);
 
             let preaggs = result.items || result.pre_aggregations || [];
             let match = preaggs[0];
@@ -480,10 +470,6 @@ export function QueryPlannerPage() {
                 grain_mode: 'superset',
                 measures: measureNames || undefined,
               });
-              console.log(
-                `Superset match result for ${gg.parent_name}:`,
-                result,
-              );
               preaggs = result.items || result.pre_aggregations || [];
               match = preaggs[0];
 
@@ -494,10 +480,7 @@ export function QueryPlannerPage() {
             }
 
             if (match) {
-              console.log(`Found pre-agg match for ${gg.parent_name}:`, match);
               newPreaggs[grainKey] = match;
-            } else {
-              console.log(`No pre-agg match found for ${gg.parent_name}`);
             }
           }),
         );
@@ -749,15 +732,10 @@ export function QueryPlannerPage() {
           // Show toast with backfill info
           const successfulBackfills = backfillResults.filter(r => r?.job_url);
           if (successfulBackfills.length > 0) {
-            console.log('Backfills started:', successfulBackfills);
           }
         }
 
         // Step 3: If Druid cube enabled, schedule cube materialization
-        console.log(
-          'Scheduling Druid cube materialization for:',
-          config.enableDruidCube,
-        );
         if (config.enableDruidCube) {
           // Use existing cube if loaded, otherwise use the new cube name from config
           const cubeName = loadedCubeName || config.druidCubeName;
@@ -769,7 +747,6 @@ export function QueryPlannerPage() {
           }
 
           // Continue with cube creation/materialization
-          console.log('Scheduling Druid cube materialization for:', cubeName);
 
           // If no existing cube, create one first
           if (!loadedCubeName && config.druidCubeName) {
@@ -793,9 +770,6 @@ export function QueryPlannerPage() {
                 setMaterializationError(`Failed to create cube: ${errorMsg}`);
                 return result; // Don't proceed with materialization
               }
-              console.log(
-                'Cube already exists, proceeding with materialization',
-              );
             }
             // Set the loaded cube name so the banner shows it
             setLoadedCubeName(config.druidCubeName);
@@ -821,17 +795,8 @@ export function QueryPlannerPage() {
               `Pre-aggs created but cube materialization failed: ${errorMsg}`,
             );
           } else {
-            console.log(
-              'Cube materialization scheduled:',
-              cubeMaterializeResult.json,
-            );
-            console.log(
-              'Workflow URLs from response:',
-              cubeMaterializeResult.json?.workflow_urls,
-            );
             // Store workflow URLs for display
             const urls = cubeMaterializeResult.json?.workflow_urls || [];
-            console.log('Setting workflowUrls to:', urls);
             setWorkflowUrls(urls);
 
             // If backfill is enabled, also kick off cube backfill
@@ -840,12 +805,6 @@ export function QueryPlannerPage() {
               config.backfillFrom &&
               config.backfillTo
             ) {
-              console.log(
-                'Running cube backfill from',
-                config.backfillFrom,
-                'to',
-                config.backfillTo,
-              );
               try {
                 const cubeBackfillResult = await djClient.runCubeBackfill(
                   cubeName,
@@ -858,11 +817,6 @@ export function QueryPlannerPage() {
                     cubeBackfillResult.message,
                   );
                   // Don't throw - cube materialization was still created
-                } else {
-                  console.log(
-                    'Cube backfill started:',
-                    cubeBackfillResult.job_url,
-                  );
                 }
               } catch (cubeBackfillErr) {
                 console.error('Failed to run cube backfill:', cubeBackfillErr);

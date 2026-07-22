@@ -470,7 +470,6 @@ export function QueryOverviewPanel({
         }
       });
       await Promise.all(promises);
-      console.log('[fetchAllNodePartitions] results:', results);
       setAllNodePartitions(results);
       return results;
     } catch (err) {
@@ -493,11 +492,6 @@ export function QueryOverviewPanel({
       return nodePartitions?.temporalPartitions?.length > 0;
     });
 
-    console.log('[hasActualTemporalPartitions]', {
-      parentNodes,
-      allNodePartitions,
-      allHaveTemporal,
-    });
     return allHaveTemporal;
   }, [getUniqueParentNodes, allNodePartitions]);
 
@@ -528,12 +522,6 @@ export function QueryOverviewPanel({
     const parentNodes = getUniqueParentNodes();
     const allHaveTemporal = parentNodes.every(
       nodeName => partitionResults[nodeName]?.temporalPartitions?.length > 0,
-    );
-    console.log(
-      '[openConfigForm] allHaveTemporal:',
-      allHaveTemporal,
-      'partitionResults:',
-      partitionResults,
     );
 
     // Initialize partition forms for nodes missing partitions
