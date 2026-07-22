@@ -5840,3 +5840,149 @@ class TestExternalPreAggDeploy:
             assert listing.json()["items"] == []
         finally:
             _clear_query_service(client)
+
+
+@pytest.mark.xdist_group(name="deployments")
+class TestCrossParentRatioDeployment:
+    """Cross-parent ratio metric (numerator on a transform, denominator on a
+    DIMENSION node) whose base metrics share a dimension ONLY via dimension
+    links created in the same deployment.
+
+    Regression for the deploy-time false negative: dimension links are deployed
+    after nodes (_deploy_nodes runs before _deploy_links), so at validation time
+    get_dimensions sees only each base metric's parent-local columns and the
+    shared-dimension intersection is empty. The cross-fact check must not reject
+    the derived metric mid-deploy when the pending links establish a common
+    dimension. Mirrors the production repro (visit-rate: fact ÷ dimension-node).
+    """
+
+    def _nodes(self):
+        return [
+            SourceSpec(
+                name="visit_raw",
+                description="Raw account-day visit facts",
+                catalog="default",
+                schema="roads",
+                table="visit_raw",
+                columns=[
+                    ColumnSpec(name="account_id", type="bigint"),
+                    ColumnSpec(name="dateint", type="int"),
+                    ColumnSpec(name="visited", type="int"),
+                ],
+                dimension_links=[],
+                owners=["dj"],
+            ),
+            SourceSpec(
+                name="stream_raw",
+                description="Raw account-day streaming eligibility",
+                catalog="default",
+                schema="roads",
+                table="stream_raw",
+                columns=[
+                    ColumnSpec(name="account_id", type="bigint"),
+                    ColumnSpec(name="dateint", type="int"),
+                    ColumnSpec(name="can_stream", type="int"),
+                ],
+                dimension_links=[],
+                owners=["dj"],
+            ),
+            SourceSpec(
+                name="dates_raw",
+                description="Raw dates",
+                catalog="default",
+                schema="roads",
+                table="dates_raw",
+                columns=[ColumnSpec(name="dateint", type="int")],
+                dimension_links=[],
+                owners=["dj"],
+            ),
+            DimensionSpec(
+                name="dates_d",
+                description="Conformed date dimension",
+                query="SELECT dateint FROM ${prefix}dates_raw",
+                primary_key=["dateint"],
+                dimension_links=[],
+                owners=["dj"],
+            ),
+            # Numerator parent: a TRANSFORM, linked to the shared date dim.
+            TransformSpec(
+                name="visit_f",
+                description="Account-day visit fact",
+                query="SELECT account_id, dateint, visited FROM ${prefix}visit_raw",
+                dimension_links=[
+                    DimensionJoinLinkSpec(
+                        dimension_node="${prefix}dates_d",
+                        join_type="left",
+                        join_on="${prefix}visit_f.dateint = ${prefix}dates_d.dateint",
+                    ),
+                ],
+                owners=["dj"],
+            ),
+            # Denominator parent: a DIMENSION node, linked to the same date dim.
+            DimensionSpec(
+                name="stream_d",
+                description="Account-day streaming-eligibility dimension",
+                query=(
+                    "SELECT account_id, dateint, can_stream FROM ${prefix}stream_raw"
+                ),
+                primary_key=["account_id", "dateint"],
+                dimension_links=[
+                    DimensionJoinLinkSpec(
+                        dimension_node="${prefix}dates_d",
+                        join_type="left",
+                        join_on="${prefix}stream_d.dateint = ${prefix}dates_d.dateint",
+                    ),
+                ],
+                owners=["dj"],
+            ),
+            MetricSpec(
+                name="visited_count",
+                description="Accounts that visited",
+                query="SELECT SUM(visited) FROM ${prefix}visit_f",
+                dimension_links=[],
+                owners=["dj"],
+            ),
+            MetricSpec(
+                name="can_stream_count",
+                description="Accounts that can stream",
+                query="SELECT SUM(can_stream) FROM ${prefix}stream_d",
+                dimension_links=[],
+                owners=["dj"],
+            ),
+            # Cross-parent ratio: numerator (transform) ÷ denominator (dim node),
+            # sharing dates_d only through links deployed in this same batch.
+            MetricSpec(
+                name="visit_rate",
+                description="Visit rate = visited / can_stream",
+                query=(
+                    "SELECT CAST(${prefix}visited_count AS DOUBLE) "
+                    "/ ${prefix}can_stream_count"
+                ),
+                dimension_links=[],
+                owners=["dj"],
+            ),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_cross_parent_ratio_shared_dim_via_pending_links_is_valid(
+        self,
+        client,
+    ):
+        namespace = "cross_parent_ratio"
+        data = await deploy_and_wait(
+            client,
+            DeploymentSpec(namespace=namespace, nodes=self._nodes()),
+        )
+        ratio_result = next(
+            r for r in data["results"] if r["name"] == f"{namespace}.visit_rate"
+        )
+        # Before the fix this deployed with node status INVALID and the message
+        # "[invalid] ... no shared dimensions"; the result status is the deploy
+        # outcome ("success"), the node validity is asserted via GET below.
+        assert ratio_result["status"] == "success", ratio_result
+        assert "invalid" not in ratio_result["message"], ratio_result
+
+        # Deploy-time status must match what a fresh read/revalidation computes.
+        response = await client.get(f"/nodes/{namespace}.visit_rate/")
+        assert response.status_code == 200, response.json()
+        assert response.json()["status"] == "valid"

@@ -3499,6 +3499,26 @@ class DeploymentOrchestrator:
 
         return to_deploy, []
 
+    def _deployment_link_targets(self) -> dict[str, set[str]]:
+        """Map each linkable node to the dimension nodes it links to, across the
+        ENTIRE deployment (all topological levels).
+
+        Dimension links are deployed only after every node level, so per-level
+        validation cannot observe links declared on nodes in other levels via the
+        committed graph. The cross-fact derived-metric check consults this
+        spec-derived map to avoid a false negative when two base metrics share a
+        dimension only through links this deployment will create. Keyed and valued
+        by rendered names to match node_graph / dependency_nodes.
+        """
+        targets: dict[str, set[str]] = {}
+        for node_spec in self.deployment_spec.nodes:
+            if isinstance(node_spec, LinkableNodeSpec) and node_spec.dimension_links:
+                for link in node_spec.dimension_links:
+                    targets.setdefault(node_spec.rendered_name, set()).add(
+                        link.rendered_dimension_node,
+                    )
+        return targets
+
     async def bulk_deploy_nodes_in_level(
         self,
         node_specs: list[NodeSpec],
@@ -3542,6 +3562,7 @@ class DeploymentOrchestrator:
                     self.session,
                     dependency_nodes=dependency_nodes,
                     deployment_namespace=self.deployment_spec.namespace,
+                    deployment_link_targets=self._deployment_link_targets(),
                 )
             p.append(f"{len(validation_results)} results")
 

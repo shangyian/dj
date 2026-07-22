@@ -66,6 +66,14 @@ class ValidationContext:
     node_graph: Dict[str, List[str]]
     dependency_nodes: Dict[str, Node]
     deployment_namespace: Optional[str] = None
+    # Source node name -> set of dimension node names it links to via
+    # dimension_links declared ANYWHERE in this deployment (all topological
+    # levels), keyed and valued by rendered names. Dimension links are deployed
+    # after all node levels, so the committed graph cannot yet reveal them; the
+    # cross-fact derived-metric check consults this to avoid a false negative
+    # when the shared dimension only materializes once the deployment's links
+    # land. Empty for non-deployment (single-node) validation.
+    deployment_link_targets: Dict[str, set] = field(default_factory=dict)
 
 
 @dataclass
@@ -806,6 +814,27 @@ class NodeSpecBulkValidator:
         if shared:
             return None
 
+        # Fail-open: dimension links are deployed AFTER nodes (orchestrator runs
+        # _deploy_nodes before _deploy_links), so at validation time the committed
+        # graph does not yet reflect links being created in this same deployment.
+        # get_dimensions can therefore only see each base metric's parent-local
+        # columns, yielding an empty intersection even when the base metrics will
+        # share a dimension once the pending links land. Before reporting a false
+        # negative, check whether the base metrics can reach a common dimension
+        # node once this deployment's links are applied; if so, suppress the
+        # error. A genuine offender (no common dimension even with pending links)
+        # still fails below.
+        reachable = [
+            self._reachable_dimension_nodes(node.name) for node in metric_parents
+        ]
+        reachable = [nodes for nodes in reachable if nodes]
+        if len(reachable) >= 2:
+            common = reachable[0]
+            for nodes in reachable[1:]:
+                common = common & nodes
+            if common:
+                return None
+
         metric_names = [m.name for m in metric_parents]
         return DJError(
             code=ErrorCode.INVALID_PARENT,
@@ -816,6 +845,47 @@ class NodeSpecBulkValidator:
                 f"at least one shared dimension for joining."
             ),
         )
+
+    def _reachable_dimension_nodes(self, base_metric_name: str) -> set[str]:
+        """
+        The set of dimension node names a base metric can be sliced by, combining
+        the committed graph with dimension links created in THIS deployment.
+
+        Two sources are unioned:
+          * committed dimensions (from get_dimensions, stored in
+            self._metric_dimensions), reduced to their dimension-node names — a
+            dimension attribute name looks like ``<dim_node>.<col>`` with an
+            optional ``[role]`` suffix; only the node portion matters for
+            join-feasibility.
+          * dimension nodes reachable from the base metric's parent node(s) via
+            dimension_links declared anywhere in this deployment
+            (context.deployment_link_targets), walked transitively so multi-hop
+            link chains created in the same deployment are covered. Links are
+            deployed after all node levels, so this spec-derived map — not the
+            committed graph — is what reveals the pending links.
+
+        Used only as a fail-open guard: if two base metrics reach a common
+        dimension node here, they can be joined once the deployment completes, so
+        the cross-fact check must not reject them mid-deploy.
+        """
+        nodes: set[str] = set()
+        for dim_name in self._metric_dimensions.get(base_metric_name, set()):
+            base = dim_name.split("[", 1)[0]
+            if "." in base:
+                nodes.add(base.rsplit(".", 1)[0])
+
+        # Walk pending links starting from the base metric's parent node(s).
+        pending = self.context.deployment_link_targets
+        frontier = list(self.context.node_graph.get(base_metric_name, []))
+        seen = set(frontier)
+        while frontier:
+            current = frontier.pop()
+            for target in pending.get(current, set()):
+                nodes.add(target)
+                if target not in seen:
+                    seen.add(target)
+                    frontier.append(target)
+        return nodes
 
     def _create_error_result(
         self,
@@ -903,6 +973,7 @@ async def bulk_validate_node_data(
     session: AsyncSession,
     dependency_nodes: Dict[str, Node],
     deployment_namespace: Optional[str] = None,
+    deployment_link_targets: Optional[Dict[str, set]] = None,
 ) -> List[NodeValidationResult]:
     """
     Bulk validate node specifications.
@@ -925,6 +996,7 @@ async def bulk_validate_node_data(
         node_graph=node_graph,
         dependency_nodes=dependency_nodes,
         deployment_namespace=deployment_namespace,
+        deployment_link_targets=deployment_link_targets or {},
     )
     validator = NodeSpecBulkValidator(context)
 
