@@ -131,6 +131,10 @@ class PreAggSpec(NamespacedSpec):
     table: str
     valid_through_ts: int | None = None
     measure_columns: dict[str, str] = Field(default_factory=dict)
+    # Optional physical-column binding for grain/dimension columns, keyed by the
+    # dimension reference (same strings used in ``dimensions``). Unmapped
+    # dimensions default to their DJ column name.
+    dimension_columns: dict[str, str] = Field(default_factory=dict)
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -147,6 +151,13 @@ class PreAggSpec(NamespacedSpec):
         return {
             render_prefixes(metric, self.namespace): column
             for metric, column in self.measure_columns.items()
+        }
+
+    @property
+    def rendered_dimension_columns(self) -> dict[str, str]:
+        return {
+            render_prefixes(dimension, self.namespace): column
+            for dimension, column in self.dimension_columns.items()
         }
 
 
