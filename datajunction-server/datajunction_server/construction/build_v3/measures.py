@@ -1786,20 +1786,16 @@ def build_grain_group_from_preagg(
     unique_components: list[MetricComponent] = []
     seen_components: set[str] = set()
 
-    # Add dimension columns (grain columns).
-    # grain_col_names holds the logical (output) grain column names; group_by_cols
-    # holds the physical columns actually read from the table. They diverge only
-    # when an externally-registered pre-agg maps a dimension to a differently
-    # named physical column.
+    # Dimension (grain) columns. grain_col_names = logical output names;
+    # group_by_cols = physical columns read (they differ only when an external
+    # pre-agg remaps a dimension's column).
     grain_col_names: list[str] = []
     group_by_cols: list[str] = []
     for dim in resolved_dimensions:
         col_name = dim.column_name
         grain_col_names.append(col_name)
 
-        # Externally-registered pre-aggs may store this dimension under a
-        # different physical column name; read the physical column and alias it
-        # back to the DJ column name so downstream references are unchanged.
+        # Read the physical column (may be remapped) and alias to the DJ name.
         physical_col = get_preagg_dimension_column(preagg, dim.original_ref, col_name)
         group_by_cols.append(physical_col)
 
@@ -1813,8 +1809,7 @@ def build_grain_group_from_preagg(
                 ),
             )
 
-        # Type metadata is stored under the DJ column name (source_column is
-        # separate), so look it up by col_name, not the physical column.
+        # Type metadata is keyed by the DJ name, not the physical column.
         col_type = preagg.get_column_type(col_name, default="string")
         columns.append(
             ColumnMetadata(

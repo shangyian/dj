@@ -78,10 +78,8 @@ class V3ColumnMetadata(BaseModel):
         serialization_alias="semantic_entity",
     )
     semantic_type: str  # "dimension" or "metric"
-    # For externally-registered pre-aggregations: the physical column in the
-    # external table backing this element, when it differs from ``name``. None
-    # means the physical column matches ``name`` (the default / DJ-materialized
-    # case). Mirrors ``PreAggMeasure.source_column`` for dimension/grain columns.
+    # Physical column backing this element when it differs from name (external
+    # pre-aggs); None means it matches name. Mirrors PreAggMeasure.source_column.
     source_column: str | None = None
 
     model_config = ConfigDict(populate_by_name=True)

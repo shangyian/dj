@@ -43,16 +43,14 @@ def assert_column_type_compatible(
     table: ExternalPreAggTable,
 ) -> None:
     """
-    Reject a mapping whose physical column type is incompatible with the expected
-    type of the element it backs (e.g. a SUM measure, or a numeric dimension,
-    bound to a string column). ``subject`` names the element in the error message,
-    e.g. ``"measure 'x'"`` or ``"dimension 'ns.d.attr'"``.
+    Reject a mapping whose physical column type is incompatible with the element
+    it backs (e.g. a SUM measure, or numeric dimension, bound to a string
+    column). subject names the element in the error message.
 
-    Conservative by design: both types are re-parsed into concrete ``ColumnType``
-    subclasses (the query service wraps physical types as a bare ``ColumnType``
-    string, which ``is_compatible`` cannot reason about), and the check is skipped
-    whenever a type is unknown or unparseable. Only clear cross-family mismatches
-    are rejected, so int-vs-bigint never false-fails.
+    Conservative: both types are re-parsed to concrete ColumnType subclasses (the
+    query service returns a bare type string is_compatible can't reason about),
+    and the check is skipped on unknown/unparseable types, so int-vs-bigint never
+    false-fails.
     """
     from datajunction_server.sql.parsing.backends.antlr4 import parse_rule
     from datajunction_server.sql.parsing.types import ColumnType
@@ -224,11 +222,8 @@ async def register_external_preaggregations(
                 ),
             )
 
-        # Bind grain/dimension columns to physical columns where the external
-        # table names them differently (dimension_columns), keyed by the
-        # dimension reference (col.semantic_name == the requested dim ref). The
-        # measure columns keep source_column=None here; their physical binding
-        # travels on the PreAggMeasure above.
+        # Bind dimension columns to physical columns via dimension_columns, keyed
+        # by dimension reference. Measures carry their binding on PreAggMeasure.
         columns = []
         for col in grain_group.columns:
             source_column = None
