@@ -741,6 +741,90 @@ class TestExternalPreAggRouting:
             in bad_type.json()["message"]
         )
 
+    @pytest.mark.asyncio
+    async def test_external_preagg_joined_attribute_read_directly(
+        self,
+        client_with_build_v3,
+    ):
+        """A joined dimension attribute stored (denormalized) in the external
+        table is read directly from it via dimension_columns -- no join back to
+        the dimension node."""
+        await _register_external_preagg(
+            client_with_build_v3,
+            metrics=["v3.total_revenue"],
+            dimensions=["v3.product.category"],
+            table_ref={
+                "catalog": "default",
+                "schema": "analytics",
+                "table": "revenue_by_category",
+                "valid_through_ts": 20250101,
+            },
+            measure_columns={"v3.total_revenue": "rev_sum"},
+            dimension_columns={"v3.product.category": "cat"},
+            table_columns={"cat": "string", "rev_sum": "double"},
+        )
+        measures_response = await client_with_build_v3.get(
+            "/sql/measures/v3/",
+            params={
+                "metrics": ["v3.total_revenue"],
+                "dimensions": ["v3.product.category"],
+            },
+        )
+        assert measures_response.status_code == 200
+        measures_sql = get_first_grain_group(measures_response.json())["sql"]
+        # No JOIN to the product dimension -- the attribute is read from the agg.
+        assert "join" not in measures_sql.lower()
+        assert_sql_equal(
+            measures_sql,
+            """
+            SELECT cat category, SUM(rev_sum) rev_sum
+            FROM default.analytics.revenue_by_category
+            GROUP BY cat
+            """,
+        )
+
+    @pytest.mark.asyncio
+    async def test_external_preagg_renamed_measure_and_dimensions(
+        self,
+        client_with_build_v3,
+    ):
+        """Renamed measure and multiple renamed dimensions (a local column and a
+        joined attribute) coexist on one external table."""
+        await _register_external_preagg(
+            client_with_build_v3,
+            metrics=["v3.total_revenue"],
+            dimensions=["v3.order_details.status", "v3.product.category"],
+            table_ref={
+                "catalog": "default",
+                "schema": "analytics",
+                "table": "revenue_by_status_category",
+                "valid_through_ts": 20250101,
+            },
+            measure_columns={"v3.total_revenue": "rev_sum"},
+            dimension_columns={
+                "v3.order_details.status": "st",
+                "v3.product.category": "cat",
+            },
+            table_columns={"st": "string", "cat": "string", "rev_sum": "double"},
+        )
+        measures_response = await client_with_build_v3.get(
+            "/sql/measures/v3/",
+            params={
+                "metrics": ["v3.total_revenue"],
+                "dimensions": ["v3.order_details.status", "v3.product.category"],
+            },
+        )
+        assert measures_response.status_code == 200
+        measures_sql = get_first_grain_group(measures_response.json())["sql"]
+        assert_sql_equal(
+            measures_sql,
+            """
+            SELECT st status, cat category, SUM(rev_sum) rev_sum
+            FROM default.analytics.revenue_by_status_category
+            GROUP BY st, cat
+            """,
+        )
+
 
 class TestMetricsSQLWithPreAggregation:
     """
