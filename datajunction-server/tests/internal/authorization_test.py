@@ -318,7 +318,8 @@ def test_admin_authorizes_explicit_grants_via_bypass() -> None:
     )[0]
 
     assert decision.approved is True
-    assert decision.reason == "admin"
+    # Admins are authorized via the break-glass bypass path (authorize()).
+    assert decision.reason == "admin_bypass"
 
 
 def _scope(action, scope_type, scope_value):
