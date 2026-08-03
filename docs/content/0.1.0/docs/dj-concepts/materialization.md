@@ -336,12 +336,49 @@ WHERE order_date = CAST(DATE_FORMAT(CAST('2024-01-15T00:00:00' AS TIMESTAMP), 'y
 WHERE order_date = 20240115
 ```
 
+### Authoring Form: DJ_LOGICAL_TIMESTAMP()
+
+The placeholder has an authoring counterpart. In a node's query you write it as a
+function call, `DJ_LOGICAL_TIMESTAMP()`, and DJ compiles that to the placeholder string
+configured by [`dj_logical_timestamp_format`](../../deploying-dj/running-a-dj-server)
+(default `${dj_logical_timestamp}`), which is what you see in generated SQL:
+
+```sql
+-- What you author, in a node query
+SELECT ... FROM orders
+WHERE order_date = CAST(DATE_FORMAT(CAST(DJ_LOGICAL_TIMESTAMP() AS TIMESTAMP), 'yyyyMMdd') AS INT)
+
+-- What DJ returns
+WHERE order_date = CAST(DATE_FORMAT(CAST(${dj_logical_timestamp} AS TIMESTAMP), 'yyyyMMdd') AS INT)
+```
+
+They are the same value at different stages: authored as a function, rendered as a
+placeholder, substituted at run time. `DJ_LOGICAL_TIMESTAMP()` is not evaluated by a query
+engine — it never survives into executable SQL as a function call.
+
+This means the placeholder can reach your SQL two different ways:
+
+- **From temporal partition config**, generated for you when `include_temporal_filters=true`
+  (the setup described above); or
+- **From a `DJ_LOGICAL_TIMESTAMP()` call in the node's own query**, if an author wrote one.
+
+Either way it is unresolved until something substitutes it, so the same rule applies: the
+SQL is not directly runnable. If you execute it as-is, the engine fails on the placeholder
+rather than on anything mentioning a timestamp — and because the placeholder is rewritten
+per dialect during transpilation, the error may name a character you never typed. In Trino,
+for instance, `${dj_logical_timestamp}` renders as `@dj_logical_timestamp`, so the failure
+reads as a syntax error on `@`. Substitute the timestamp first, then run it.
+
 ### When Temporal Filters Are Applied
 
 Temporal filters are **only applied when**:
 1. `include_temporal_filters=true` is set
 2. The requested metrics + dimensions resolve to a cube
 3. That cube has temporal partition columns configured
+
+All three are required. In particular, requesting dimensions that don't resolve to a
+temporally-partitioned cube produces SQL with no temporal filter at all, even with
+`include_temporal_filters=true`.
 
 If no matching cube exists, the parameter is ignored and no filters are added.
 
