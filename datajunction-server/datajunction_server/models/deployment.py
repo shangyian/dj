@@ -1338,6 +1338,7 @@ class DeploymentResult(BaseModel):
         TAG = "tag"
         NAMESPACE = "namespace"
         PREAGG = "preaggregation"
+        MATERIALIZATION = "materialization"
         GENERAL = "general"
 
     name: str
