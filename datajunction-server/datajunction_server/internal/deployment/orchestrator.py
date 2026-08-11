@@ -2607,6 +2607,11 @@ class DeploymentOrchestrator:
                     ),
                 )
                 if superseded:
+                    self._warn_superseded_materializations(
+                        revision.name,
+                        block,
+                        superseded,
+                    )
                     # Stopped before the declared materialization is scheduled, and as
                     # its own unit of work, because both sit on the same cube version:
                     # a superseded row with no workflow names of its own falls back to
@@ -2717,6 +2722,41 @@ class DeploymentOrchestrator:
                 new_version=revision.version,
                 rebuilt_names=[],
                 superseded=active,
+            ),
+        )
+
+    def _warn_superseded_materializations(
+        self,
+        name: str,
+        block: MaterializationSpec,
+        superseded: list[Materialization],
+    ) -> None:
+        """
+        Say which materializations a declared block stopped.
+
+        A `materialization:` block describes a cube's only materialization, so
+        declaring one strategy stops whatever else was running. That is the right
+        outcome: they all write the same Druid datasource and a full rebuild replaces
+        it wholesale, so two live workflows delete each other's data.
+
+        It is still a teardown the author did not ask for in so many words -- the row
+        may have been configured through the UI, by someone else. Removal is
+        otherwise always explicit, which is the whole reason `materialization: none`
+        is a value rather than an inferred absence, so an implicit one has to be said
+        out loud rather than left to be discovered in Maestro.
+        """
+        stopped = ", ".join(
+            f"`{materialization.name}`" for materialization in superseded
+        )
+        self.warnings.append(
+            DJError(
+                code=ErrorCode.INVALID_ARGUMENTS_TO_FUNCTION,
+                message=(
+                    f"Cube `{name}` declares a `{block.strategy.value}` "
+                    f"materialization, so its other materializations were stopped: "
+                    f"{stopped}. A `materialization:` block describes the only "
+                    "materialization a cube has."
+                ),
             ),
         )
 

@@ -5255,6 +5255,73 @@ class TestDeclaredCubeMaterializations:
         ]
 
     @pytest.mark.asyncio
+    async def test_supersede_says_what_it_stopped(
+        self,
+        client,
+        upstreams,
+        mock_qs,
+    ):
+        """
+        Stopping a materialization the block did not build has to be said out loud.
+
+        A cube's materializations all write one Druid datasource and a full rebuild
+        replaces it wholesale, so leaving two running is the data loss this reconciler
+        exists to prevent -- but the row may have been configured through the UI, by
+        someone other than whoever pushed. Removal is explicit everywhere else, which
+        is why `materialization: none` is a value rather than an inferred absence, so
+        an implicit one is warned about rather than left to be found in Maestro.
+        """
+        namespace = "cube_mat_supersede"
+        cube_name = f"{namespace}.default.repairs_cube"
+        incremental = self._cube(
+            materialization=MaterializationSpec(
+                schedule="0 6 * * *",
+                lookback_window="1 DAY",
+            ),
+        )
+        data = await deploy_and_wait(
+            client,
+            DeploymentSpec(namespace=namespace, nodes=[*upstreams, incremental]),
+        )
+        assert data["status"] == "success", data
+        assert data["warnings"] == []
+
+        # Declaring `full` derives a different name -- the name carries job, strategy
+        # and partition -- so the incremental row is a competing writer, not the same
+        # row reconfigured.
+        full = self._cube(
+            materialization=MaterializationSpec(
+                schedule="0 6 * * *",
+                strategy=MaterializationStrategy.FULL,
+            ),
+        )
+        mock_qs.reset_mock()
+        data = await deploy_and_wait(
+            client,
+            DeploymentSpec(namespace=namespace, nodes=[*upstreams, full]),
+        )
+        assert data["status"] == "success", data
+        assert [item["message"] for item in data["warnings"]] == [
+            f"Cube `{cube_name}` declares a `full` materialization, so its other "
+            f"materializations were stopped: `{self._materialization_name(namespace)}`. "
+            "A `materialization:` block describes the only materialization a cube has.",
+        ]
+        assert await self._persisted_materializations(client, cube_name) == [
+            (
+                self._materialization_name(namespace),
+                "0 6 * * *",
+                "incremental_time",
+                False,
+            ),
+            (
+                f"druid_cube__full__{namespace}.default.hard_hat.hire_date",
+                "0 6 * * *",
+                "full",
+                True,
+            ),
+        ]
+
+    @pytest.mark.asyncio
     async def test_definition_and_schedule_edit_rebuilds_once(
         self,
         client,
