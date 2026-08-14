@@ -6134,6 +6134,126 @@ class TestDeclaredCubeMaterializations:
         assert scheduled.cube.name == working_name
         assert await self._persisted_materializations(client, broken_name) == []
 
+    @pytest.mark.asyncio
+    async def test_unscheduled_materialization_fails_the_deployment(
+        self,
+        client,
+        upstreams,
+        mock_qs,
+    ):
+        """
+        A query service that refuses to schedule the workflow fails the deployment.
+
+        DJ commits its own state and then asks the query service to schedule, so a
+        query service that is down leaves a cube with a materialization and no
+        workflow behind it. That happened in production, and the only record of it
+        was a server log line: the deploy reported `success`. The materialization
+        stays committed -- the row is what the author asked for, and re-pushing is
+        what schedules it -- but the deployment says out loud that it did not happen.
+        """
+        namespace = "cube_mat_schedule_fails"
+        cube_name = f"{namespace}.default.repairs_cube"
+        materialization_name = self._materialization_name(namespace)
+        mock_qs.materialize_cube.side_effect = RuntimeError("query service is down")
+        nodes = [
+            *upstreams,
+            self._cube(
+                materialization=MaterializationSpec(
+                    schedule="0 6 * * *",
+                    lookback_window="1 DAY",
+                ),
+            ),
+        ]
+        data = await deploy_and_wait(
+            client,
+            DeploymentSpec(namespace=namespace, nodes=nodes),
+        )
+        failure = (
+            f"Cube `{cube_name}`: DJ recorded the materialization "
+            f"`{materialization_name}` at version v1.0, but the query service did not "
+            "schedule a workflow for it: query service is down. Nothing is "
+            "materializing the cube until the deployment is retried."
+        )
+        assert data["status"] == "failed", data
+        assert self._materialization_results(data) == [
+            (
+                cube_name,
+                "create",
+                "success",
+                "cube materialization on schedule 0 6 * * *",
+            ),
+            (cube_name, "unknown", "failed", failure),
+        ]
+        assert [item["message"] for item in data["warnings"]] == [failure]
+        assert await self._persisted_materializations(client, cube_name) == [
+            (materialization_name, "0 6 * * *", "incremental_time", True),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_unstopped_materialization_fails_the_deployment(
+        self,
+        client,
+        upstreams,
+        mock_qs,
+    ):
+        """
+        A workflow the query service would not stop fails the deployment too.
+
+        `materialization: none` reporting `success` while the workflow keeps running
+        is the same silent gap in the other direction, and worse than an unscheduled
+        one: DJ has retired the row, so the next materialization of this cube writes
+        the same Druid datasource as a workflow nobody is tracking any more, where a
+        full rebuild deletes what the other one added.
+        """
+        namespace = "cube_mat_stop_fails"
+        cube_name = f"{namespace}.default.repairs_cube"
+        materialization_name = self._materialization_name(namespace)
+        cube = self._cube(
+            materialization=MaterializationSpec(
+                schedule="0 6 * * *",
+                lookback_window="1 DAY",
+            ),
+        )
+        nodes = [
+            *upstreams,
+            cube,
+        ]
+        data = await deploy_and_wait(
+            client,
+            DeploymentSpec(namespace=namespace, nodes=nodes),
+        )
+        assert data["status"] == "success", data
+
+        mock_qs.reset_mock()
+        mock_qs.deactivate_cube_workflow.side_effect = RuntimeError(
+            "query service is down",
+        )
+        cube.materialization = MaterializationAction.NONE
+        data = await deploy_and_wait(
+            client,
+            DeploymentSpec(namespace=namespace, nodes=nodes),
+        )
+        failure = (
+            f"Cube `{cube_name}`: DJ retired the materialization "
+            f"`{materialization_name}` at version v1.0, but the query service did not "
+            "stop its workflow: query service is down. The superseded workflow may "
+            "still be writing the cube's table until the deployment is retried."
+        )
+        assert data["status"] == "failed", data
+        assert self._materialization_results(data) == [
+            (
+                cube_name,
+                "delete",
+                "success",
+                "cube materialization removed by `materialization: none`",
+            ),
+            (cube_name, "unknown", "failed", failure),
+        ]
+        assert [item["message"] for item in data["warnings"]] == [failure]
+        assert await self._persisted_materializations(client, cube_name) == [
+            (materialization_name, "0 6 * * *", "incremental_time", False),
+        ]
+
 
 @pytest.mark.xdist_group(name="deployments")
 class TestDeploymentHistoryTracking:

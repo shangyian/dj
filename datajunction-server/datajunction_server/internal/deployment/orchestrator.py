@@ -2771,17 +2771,46 @@ class DeploymentOrchestrator:
         Hand the deployment's committed cube materialization swaps to the query
         service. Called only after the outer transaction commits, so a deploy that
         rolls back has told the query service nothing.
+
+        Applying a swap never raises -- there is no transaction left to abort, and
+        throwing here would take out the deployment's response along with it -- so
+        anything the query service refused to do comes back as a message instead, and
+        is reported on the deployment. FAILED, not WARNING, for the same reason a cube
+        that could not be materialized at all is: `api/deployments.py` derives the
+        aggregate status from these results, and a materialization the author asked
+        for with no workflow behind it is exactly the silent gap this feature exists
+        to close. Reporting `success` for it -- which is what only logging did, and
+        what let a real deploy hide a cube with no workflow behind a green result --
+        would reopen it. DJ's own state stays committed either way: the row says what
+        was asked for, and the message says what still has to happen for it to be
+        true.
         """
         request_headers = (
             dict(self.context.request.headers) if self.context.request else {}
         )
         for swap in self._cube_materialization_swaps:
-            await apply_cube_materialization_swap(
+            outcome = await apply_cube_materialization_swap(
                 self.session,
                 swap,
                 self.context.query_service_client,
                 request_headers=request_headers,
             )
+            for message in outcome.failures:
+                self.warnings.append(
+                    DJError(
+                        code=ErrorCode.INVALID_ARGUMENTS_TO_FUNCTION,
+                        message=message,
+                    ),
+                )
+                self.deployed_results.append(
+                    DeploymentResult(
+                        name=swap.cube_name,
+                        deploy_type=DeploymentResult.Type.MATERIALIZATION,
+                        status=DeploymentResult.Status.FAILED,
+                        operation=DeploymentResult.Operation.UNKNOWN,
+                        message=message,
+                    ),
+                )
 
     async def _bulk_validate_cubes(
         self,

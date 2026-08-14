@@ -388,6 +388,30 @@ class CubeMaterializationSwap:
     superseded: list[Materialization]
 
 
+@dataclass
+class CubeMaterializationSwapResult:
+    """
+    What the query service refused to do with a committed cube materialization swap.
+
+    Carries rendered messages rather than the exceptions themselves: applying a swap
+    happens after the transaction has committed, so a caller can only report what
+    went wrong, and every caller that reports it wants the same sentence. Both fields
+    are `None` on the happy path, which is what `failures` being empty means.
+    """
+
+    schedule_failure: str | None = None
+    stop_failure: str | None = None
+
+    @property
+    def failures(self) -> list[str]:
+        """Every failure worth reporting, in the order the calls were made."""
+        return [
+            failure
+            for failure in (self.schedule_failure, self.stop_failure)
+            if failure is not None
+        ]
+
+
 async def reconcile_declared_materialization(
     session: AsyncSession,
     revision: NodeRevision,
@@ -639,7 +663,7 @@ async def apply_cube_materialization_swap(
     swap: CubeMaterializationSwap,
     query_service_client: QueryServiceClient | None,
     request_headers: dict[str, str] | None = None,
-) -> None:
+) -> CubeMaterializationSwapResult:
     """
     Hand a committed cube materialization swap to the query service.
 
@@ -649,10 +673,16 @@ async def apply_cube_materialization_swap(
     their workflow running would keep posting availability for a table the current
     revision cannot use.
 
-    Never raises. With no query service configured there is nothing to do at all.
+    Never raises -- the transaction is already committed and there is nothing left to
+    abort -- but what the query service refused to do is returned rather than only
+    logged. DJ's own state says the materialization is active or retired, and a caller
+    that reports `success` while the workflow behind it does not exist has hidden the
+    whole failure in a log line. With no query service configured there is nothing to
+    do at all.
     """
+    result = CubeMaterializationSwapResult()
     if not query_service_client:
-        return
+        return result
     if swap.rebuilt_names:
         try:
             await schedule_materialization_jobs(
@@ -663,6 +693,13 @@ async def apply_cube_materialization_swap(
                 request_headers=request_headers,
             )
         except Exception as exc:
+            names = ", ".join(f"`{name}`" for name in swap.rebuilt_names)
+            result.schedule_failure = (
+                f"Cube `{swap.cube_name}`: DJ recorded the materialization {names} at "
+                f"version {swap.new_version}, but the query service did not schedule "
+                f"a workflow for it: {exc}. Nothing is materializing the cube until "
+                f"the deployment is retried."
+            )
             _logger.warning(
                 "Failed to schedule rebuilt materializations for cube=%s version=%s: "
                 "%s (continuing)",
@@ -671,13 +708,14 @@ async def apply_cube_materialization_swap(
                 str(exc),
                 exc_info=True,
             )
-    stop_cube_materialization_workflows(
+    result.stop_failure = stop_cube_materialization_workflows(
         query_service_client=query_service_client,
         cube_name=swap.cube_name,
         cube_version=swap.previous_version,
         materializations=swap.superseded,
         request_headers=request_headers,
     )
+    return result
 
 
 def stop_cube_materialization_workflows(
@@ -686,7 +724,7 @@ def stop_cube_materialization_workflows(
     cube_version: str,
     materializations: list[Materialization],
     request_headers: dict[str, str] | None = None,
-) -> None:
+) -> str | None:
     """
     Ask the query service to stop the workflows behind cube materializations.
 
@@ -697,6 +735,10 @@ def stop_cube_materialization_workflows(
 
     Never raises: a query service that is unreachable, or that has already forgotten
     the workflow, must not block the DJ-side operation that triggered the teardown.
+    Returns a message describing the failure instead, `None` when there was none, so
+    a caller that can report it does not have to settle for a log line: a superseded
+    workflow left running is two writers on one Druid datasource, where a full
+    rebuild deletes what the other one added.
     """
     workflow_names: list[str] = []
     needs_legacy_stop = False
@@ -738,6 +780,14 @@ def stop_cube_materialization_workflows(
             cube_version,
             str(exc),
         )
+        names = ", ".join(f"`{mat.name}`" for mat in materializations)
+        return (
+            f"Cube `{cube_name}`: DJ retired the materialization {names} at version "
+            f"{cube_version}, but the query service did not stop its workflow: {exc}. "
+            f"The superseded workflow may still be writing the cube's table until the "
+            f"deployment is retried."
+        )
+    return None
 
 
 async def schedule_materialization_jobs(
