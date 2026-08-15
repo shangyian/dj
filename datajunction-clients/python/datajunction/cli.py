@@ -768,6 +768,15 @@ class DJCLI:
             console.print(
                 f"  {created} created, {updated} updated, {skipped} unchanged",
             )
+            # A sync that lands invalid nodes still returns 200, so the per-result
+            # statuses are the only signal that it did not succeed.
+            failed = DeploymentService.failed_results(info)
+            if failed:
+                console.print(
+                    f"[bold red]Sync finished:[/bold red] FAILED "
+                    f"({len(failed)} node(s) did not deploy)",
+                )
+                raise SystemExit(1)
         except DJClientException as exc:
             console.print(f"[bold red]ERROR:[/bold red] {exc}")
             raise SystemExit(1)

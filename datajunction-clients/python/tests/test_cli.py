@@ -3417,6 +3417,36 @@ class TestGitSyncCommand:
 
             mock_sync.assert_called_once_with(namespace="myns")
 
+    def test_git_sync_exits_nonzero_on_invalid_nodes(
+        self,
+        builder_client: DJBuilder,
+        capsys,
+    ):
+        """A sync that lands invalid nodes must fail, not just report a summary."""
+        with patch.object(
+            builder_client,
+            "sync_from_git",
+            return_value={
+                "source": {"branch": "main", "commit_sha": "abc123def456789"},
+                "results": [
+                    {
+                        "name": "shop.customers",
+                        "operation": "create",
+                        "status": "success",
+                    },
+                    {"name": "shop.orders", "operation": "create", "status": "invalid"},
+                ],
+            },
+        ):
+            test_args = ["dj", "git", "sync", "myns"]
+            with patch.object(sys, "argv", test_args):
+                with pytest.raises(SystemExit) as exc_info:
+                    main(builder_client=builder_client)
+            assert exc_info.value.code == 1
+        captured = capsys.readouterr()
+        assert "Synced namespace" in captured.out
+        assert "FAILED" in captured.out
+
     def test_git_sync_no_source(self, builder_client: DJBuilder):
         """Test `dj git sync` handles missing source gracefully (branch/sha show as unknown/empty)."""
         with patch.object(
