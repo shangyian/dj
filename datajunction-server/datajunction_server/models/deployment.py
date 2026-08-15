@@ -1398,6 +1398,19 @@ class DeploymentSpec(BaseModel):
             "Falls back to the virtual catalog if not set."
         ),
     )
+    schedule_materializations_on_branch: bool = Field(
+        default=False,
+        description=(
+            "If True, materializations declared in a deployment to a branch namespace "
+            "are scheduled with the query service, as they are on the default branch. "
+            "Off by default: a branch namespace is for review and gets reaped, so its "
+            "materializations are built and persisted -- which is what validates them "
+            "-- but no production workflow or Druid datasource is created for them. "
+            "Set per deploy rather than in a node's YAML, so that turning a branch's "
+            "materialization on for a live test does not become a file edit to undo "
+            "before merging. Has no effect on a default-branch deployment."
+        ),
+    )
 
     @model_validator(mode="after")
     def set_namespaces(self):

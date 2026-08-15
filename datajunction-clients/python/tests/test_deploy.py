@@ -701,6 +701,38 @@ def test_push_omits_allow_empty_by_default(tmp_path):
     assert "allow_empty" not in captured["spec"]
 
 
+def test_push_threads_schedule_materializations_on_branch(tmp_path):
+    """
+    The branch-materialization opt-in reaches the deployment spec only when asked
+    for, so an ordinary push to a branch namespace leaves its declared
+    materializations persisted but unscheduled.
+    """
+    _write_min_project(tmp_path)
+
+    def pushed_spec(**kwargs) -> dict:
+        svc = DeploymentService(MagicMock())
+        captured = {}
+
+        def fake_deploy(spec):
+            captured["spec"] = spec
+            # Short-circuit before the poll/print machinery -- we only care about
+            # the spec handed to the server.
+            raise DJClientException("stop")
+
+        svc.client.deploy = MagicMock(side_effect=fake_deploy)
+        with pytest.raises(DJClientException, match="stop"):
+            svc.push(tmp_path, namespace="foo", **kwargs)
+        return captured["spec"]
+
+    assert "schedule_materializations_on_branch" not in pushed_spec()
+    assert (
+        pushed_spec(schedule_materializations_on_branch=True)[
+            "schedule_materializations_on_branch"
+        ]
+        is True
+    )
+
+
 def test_system_seed_matches_server_deployment_spec():
     """
     The bundled system-node seed is deployed at bootstrap by

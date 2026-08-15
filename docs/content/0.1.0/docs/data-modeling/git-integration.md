@@ -52,6 +52,17 @@ In your new branch namespace, you can freely:
 
 All changes are isolated to this branch -- your production namespace is unaffected.
 
+That isolation extends to materialization. A cube you deploy to a branch namespace still has its
+`materialization:` block read, built and persisted, so you find out here rather than after merging if
+the cube cannot be materialized at all -- but DJ stops short of asking the query service to schedule
+the workflow, because the branch namespace goes away when the branch does and the workflow and its
+Druid datasource would outlive everything that reads them. The deployment says so in its results,
+against the cube it applies to. When you do want a live workflow on the branch -- to see the
+materialized data before you merge, say -- pass `--schedule-materializations-on-branch` to `dj push`
+for that one deploy. It lives on the deploy rather than in the cube's YAML so that turning it on is
+not a file edit you have to remember to undo before merging, and it makes no difference to a deploy
+to the default branch, which always schedules.
+
 ### 4. Commit and Create a PR
 
 Once you're satisfied with your changes:

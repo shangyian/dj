@@ -47,6 +47,7 @@ class DJCLI:
         verbose: bool = False,
         force: bool = False,
         allow_empty: bool = False,
+        schedule_materializations_on_branch: bool = False,
     ):
         """
         Alias for deploy without dryrun.
@@ -57,6 +58,7 @@ class DJCLI:
             verbose=verbose,
             force=force,
             allow_empty=allow_empty,
+            schedule_materializations_on_branch=schedule_materializations_on_branch,
         )
 
     def dryrun(
@@ -912,6 +914,17 @@ class DJCLI:
             ),
         )
         push_parser.add_argument(
+            "--schedule-materializations-on-branch",
+            action="store_true",
+            help=(
+                "Schedule declared materializations even though the target is a "
+                "branch namespace. A branch deploy builds and persists its "
+                "materializations but does not schedule them, since the branch "
+                "(and its namespace) goes away on merge; pass this when a live "
+                "workflow on the branch is what you are after"
+            ),
+        )
+        push_parser.add_argument(
             "--format",
             type=str,
             default="text",
@@ -1523,6 +1536,9 @@ class DJCLI:
                     verbose=args.verbose,
                     force=args.force,
                     allow_empty=args.allow_empty,
+                    schedule_materializations_on_branch=(
+                        args.schedule_materializations_on_branch
+                    ),
                 )
             except DJDeploymentFailure:
                 # Errors already displayed in the deployment panel

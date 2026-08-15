@@ -126,6 +126,7 @@ class DeploymentService:
         verbose: bool = False,
         force: bool = False,
         allow_empty: bool = False,
+        schedule_materializations_on_branch: bool = False,
     ):
         """
         Push a local project to a namespace.
@@ -180,6 +181,8 @@ class DeploymentService:
             deployment_spec["force"] = True
         if allow_empty:
             deployment_spec["allow_empty"] = True
+        if schedule_materializations_on_branch:
+            deployment_spec["schedule_materializations_on_branch"] = True
         deployment_data = self.client.deploy(deployment_spec)
         deployment_uuid = deployment_data["uuid"]
 

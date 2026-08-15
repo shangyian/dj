@@ -355,6 +355,9 @@ class DeploymentOrchestrator:
         self.deployed_results: list[DeploymentResult] = []
         self._timer = DeploymentTimer()
         self._cube_materialization_swaps: list[CubeMaterializationSwap] = []
+        # Resolved once the namespaces exist, by `_plan_and_execute`. Deployments
+        # that never get that far schedule nothing anyway.
+        self._schedules_materializations = True
 
     @property
     def _history_user(self) -> str:
@@ -450,6 +453,8 @@ class DeploymentOrchestrator:
         """
         with self._timer.phase("setup resources"):
             await self._setup_deployment_resources()
+
+        self._schedules_materializations = await self._resolve_scheduling()
 
         with self._timer.phase("validate resources"):
             await self._validate_deployment_resources()
@@ -2634,13 +2639,27 @@ class DeploymentOrchestrator:
                         superseded=[],
                     ),
                 )
+        # Not a failure and not a warning: a branch namespace not scheduling
+        # production work is what is supposed to happen. Said out loud all the same,
+        # so a cube that is configured but has no workflow behind it is a reported
+        # outcome of the deploy rather than something to discover later.
+        message = (
+            f"cube materialization on schedule {block.schedule}"
+            if self._schedules_materializations
+            else (
+                f"cube materialization on schedule {block.schedule} validated and "
+                f"persisted but not scheduled, because `{self.deployment_spec.namespace}`"
+                " is a branch namespace. Deploy with "
+                "`schedule_materializations_on_branch` to schedule it."
+            )
+        )
         self.deployed_results.append(
             DeploymentResult(
                 name=revision.name,
                 deploy_type=DeploymentResult.Type.MATERIALIZATION,
                 status=DeploymentResult.Status.SUCCESS,
                 operation=operation,
-                message=f"cube materialization on schedule {block.schedule}",
+                message=message,
             ),
         )
 
@@ -2766,12 +2785,55 @@ class DeploymentOrchestrator:
             ),
         )
 
+    async def _resolve_scheduling(self) -> bool:
+        """
+        Whether this deployment's materializations get handed to the query service.
+
+        A branch namespace exists to review and iterate on a change, and is reaped
+        when the branch is; scheduling from one leaves behind a production workflow
+        and a Druid datasource that nothing will ever read. So a branch deploy builds
+        and persists its materializations -- which is what catches a cube that cannot
+        be materialized at all -- and stops short of the remote call.
+
+        `schedule_materializations_on_branch` opts a single deploy back in, for the
+        case where a live workflow on a branch is the point.
+
+        Resolved after the setup phase, so a namespace this deploy creates is already
+        there to be asked about.
+        """
+        # Imported here rather than at module scope, as this module's other reach
+        # into `internal.namespaces` is, so the two stay independent of each other's
+        # import order.
+        from datajunction_server.internal.namespaces import (
+            is_default_branch_namespace,
+        )
+
+        if self.deployment_spec.schedule_materializations_on_branch:
+            return True
+        return await is_default_branch_namespace(
+            self.session,
+            self.deployment_spec.namespace,
+        )
+
     async def _apply_cube_materialization_swaps(self) -> None:
         """
         Hand the deployment's committed cube materialization swaps to the query
         service. Called only after the outer transaction commits, so a deploy that
         rolls back has told the query service nothing.
+
+        A branch deploy hands over nothing at all: its materializations are already
+        built and persisted, and the queued swaps are dropped here rather than
+        earlier so that every DJ-side check they went through still ran.
         """
+        if not self._schedules_materializations:
+            logger.info(
+                "Deployment %s targets branch namespace %s; %d cube materialization "
+                "swap(s) were persisted but not scheduled.",
+                self.deployment_id,
+                self.deployment_spec.namespace,
+                len(self._cube_materialization_swaps),
+            )
+            return
         request_headers = (
             dict(self.context.request.headers) if self.context.request else {}
         )

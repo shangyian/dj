@@ -1526,6 +1526,31 @@ class TestImpactAnalysis:
         _, kwargs = mock_push.call_args
         assert kwargs.get("allow_empty") is False
 
+    def test_push_schedule_materializations_on_branch_flag(self, tmp_path):
+        """
+        `--schedule-materializations-on-branch` must reach the service, and default
+        to off: a branch deploy persists its materializations without asking the
+        query service to schedule a workflow that the branch will outlive.
+        """
+        from datajunction.cli import DJCLI
+
+        def push_kwargs(*args: str) -> dict:
+            cli = DJCLI(builder_client=mock.MagicMock())
+            with patch.object(cli.deployment_service, "push") as mock_push:
+                mock_push.return_value = None
+                with patch.object(sys, "argv", ["dj", "push", str(tmp_path), *args]):
+                    cli.run()
+            _, kwargs = mock_push.call_args
+            return kwargs
+
+        assert push_kwargs()["schedule_materializations_on_branch"] is False
+        assert (
+            push_kwargs("--schedule-materializations-on-branch")[
+                "schedule_materializations_on_branch"
+            ]
+            is True
+        )
+
 
 class TestDJCLIClientCreation:
     """Tests for DJCLI client creation from environment variables."""

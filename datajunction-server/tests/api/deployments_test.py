@@ -6134,6 +6134,257 @@ class TestDeclaredCubeMaterializations:
         assert scheduled.cube.name == working_name
         assert await self._persisted_materializations(client, broken_name) == []
 
+    @staticmethod
+    async def _branch_namespaces(client, root: str, branches: dict[str, str]) -> None:
+        """
+        A git root whose default branch is `main`, with one namespace per branch.
+
+        The same shape the branch flow and `dj push` leave behind: the root owns the
+        repo and names the default branch, and each branch namespace carries its own
+        `git_branch` and points back at the root. The namespaces are created before
+        the root's git config because one cannot be created under a git root.
+        """
+        for namespace in [root, *(f"{root}.{segment}" for segment in branches)]:
+            response = await client.post(f"/namespaces/{namespace}/")
+            assert response.status_code == 201, response.json()
+        response = await client.patch(
+            f"/namespaces/{root}/git",
+            json={"github_repo_path": f"corp/{root}", "default_branch": "main"},
+        )
+        assert response.status_code == 200, response.json()
+        for segment, branch in branches.items():
+            response = await client.patch(
+                f"/namespaces/{root}.{segment}/git",
+                json={"git_branch": branch, "parent_namespace": root},
+            )
+            assert response.status_code == 200, response.json()
+
+    @pytest.mark.asyncio
+    async def test_branch_deploy_persists_without_scheduling(
+        self,
+        client,
+        upstreams,
+        mock_qs,
+    ):
+        """
+        A deploy to a branch namespace configures the materialization and asks the
+        query service for nothing.
+
+        A branch namespace is reaped when its branch is, so a workflow scheduled from
+        one outlives everything that would read it. Everything DJ does locally still
+        happens -- the config is built and the row persisted, which is what catches a
+        cube that cannot be materialized at all -- and the result says so, since a
+        cube configured with no workflow behind it should be a reported outcome of
+        the deploy rather than a discovery.
+        """
+        root = "cube_mat_branch"
+        namespace = f"{root}.feature_x"
+        cube_name = f"{namespace}.default.repairs_cube"
+        await self._branch_namespaces(
+            client,
+            root,
+            {"main": "main", "feature_x": "feature-x"},
+        )
+        nodes = [
+            *upstreams,
+            self._cube(
+                materialization=MaterializationSpec(
+                    schedule="0 6 * * *",
+                    lookback_window="1 DAY",
+                ),
+            ),
+        ]
+        data = await deploy_and_wait(
+            client,
+            DeploymentSpec(namespace=namespace, nodes=nodes),
+        )
+        assert data["status"] == "success", data
+        assert self._materialization_results(data) == [
+            (
+                cube_name,
+                "create",
+                "success",
+                "cube materialization on schedule 0 6 * * * validated and persisted "
+                f"but not scheduled, because `{namespace}` is a branch namespace. "
+                "Deploy with `schedule_materializations_on_branch` to schedule it.",
+            ),
+        ]
+        assert mock_qs.method_calls == []
+        assert await self._persisted_materializations(client, cube_name) == [
+            (
+                self._materialization_name(namespace),
+                "0 6 * * *",
+                "incremental_time",
+                True,
+            ),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_default_branch_deploy_still_schedules(
+        self,
+        client,
+        upstreams,
+        mock_qs,
+    ):
+        """
+        The namespace holding the repo's default branch schedules exactly as an
+        unconfigured one does.
+
+        Guards the other direction of the branch rule: reading `main` as a branch --
+        because a column the rule leans on happens to be empty -- would silently stop
+        production materializing, which is no better than scheduling from a branch.
+        """
+        root = "cube_mat_default_branch"
+        namespace = f"{root}.main"
+        cube_name = f"{namespace}.default.repairs_cube"
+        await self._branch_namespaces(client, root, {"main": "main"})
+        nodes = [
+            *upstreams,
+            self._cube(
+                materialization=MaterializationSpec(
+                    schedule="0 6 * * *",
+                    lookback_window="1 DAY",
+                ),
+            ),
+        ]
+        data = await deploy_and_wait(
+            client,
+            DeploymentSpec(namespace=namespace, nodes=nodes),
+        )
+        assert data["status"] == "success", data
+        assert self._materialization_results(data) == [
+            (
+                cube_name,
+                "create",
+                "success",
+                "cube materialization on schedule 0 6 * * *",
+            ),
+        ]
+        assert mock_qs.materialize_cube.call_count == 1
+        scheduled = mock_qs.materialize_cube.call_args.kwargs["materialization_input"]
+        assert (
+            scheduled.cube.name,
+            scheduled.cube.version,
+            scheduled.schedule,
+        ) == (cube_name, "v1.0", "0 6 * * *")
+        assert await self._persisted_materializations(client, cube_name) == [
+            (
+                self._materialization_name(namespace),
+                "0 6 * * *",
+                "incremental_time",
+                True,
+            ),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_branch_deploy_schedules_when_asked_to(
+        self,
+        client,
+        upstreams,
+        mock_qs,
+    ):
+        """
+        `schedule_materializations_on_branch` opts one deploy back into scheduling.
+
+        A live workflow on a branch is sometimes the whole point of the branch, and
+        the opt-in rides on the deployment request rather than on the cube's YAML so
+        that turning it on is not a file edit to remember to undo before merging.
+        """
+        root = "cube_mat_branch_override"
+        namespace = f"{root}.feature_y"
+        cube_name = f"{namespace}.default.repairs_cube"
+        await self._branch_namespaces(
+            client,
+            root,
+            {"main": "main", "feature_y": "feature-y"},
+        )
+        nodes = [
+            *upstreams,
+            self._cube(
+                materialization=MaterializationSpec(
+                    schedule="0 6 * * *",
+                    lookback_window="1 DAY",
+                ),
+            ),
+        ]
+        data = await deploy_and_wait(
+            client,
+            DeploymentSpec(
+                namespace=namespace,
+                nodes=nodes,
+                schedule_materializations_on_branch=True,
+            ),
+        )
+        assert data["status"] == "success", data
+        assert self._materialization_results(data) == [
+            (
+                cube_name,
+                "create",
+                "success",
+                "cube materialization on schedule 0 6 * * *",
+            ),
+        ]
+        assert mock_qs.materialize_cube.call_count == 1
+        scheduled = mock_qs.materialize_cube.call_args.kwargs["materialization_input"]
+        assert (
+            scheduled.cube.name,
+            scheduled.cube.version,
+            scheduled.schedule,
+        ) == (cube_name, "v1.0", "0 6 * * *")
+        assert await self._persisted_materializations(client, cube_name) == [
+            (
+                self._materialization_name(namespace),
+                "0 6 * * *",
+                "incremental_time",
+                True,
+            ),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_namespace_without_git_config_schedules(
+        self,
+        client,
+        upstreams,
+        mock_qs,
+    ):
+        """
+        A namespace with no git configuration behind it materializes as it always
+        has. Nothing about it names a branch, so there is no branch to infer.
+        """
+        namespace = "cube_mat_no_git"
+        cube_name = f"{namespace}.default.repairs_cube"
+        nodes = [
+            *upstreams,
+            self._cube(
+                materialization=MaterializationSpec(
+                    schedule="0 6 * * *",
+                    lookback_window="1 DAY",
+                ),
+            ),
+        ]
+        data = await deploy_and_wait(
+            client,
+            DeploymentSpec(namespace=namespace, nodes=nodes),
+        )
+        assert data["status"] == "success", data
+        assert self._materialization_results(data) == [
+            (
+                cube_name,
+                "create",
+                "success",
+                "cube materialization on schedule 0 6 * * *",
+            ),
+        ]
+        assert mock_qs.materialize_cube.call_count == 1
+        assert await self._persisted_materializations(client, cube_name) == [
+            (
+                self._materialization_name(namespace),
+                "0 6 * * *",
+                "incremental_time",
+                True,
+            ),
+        ]
+
 
 @pytest.mark.xdist_group(name="deployments")
 class TestDeploymentHistoryTracking:

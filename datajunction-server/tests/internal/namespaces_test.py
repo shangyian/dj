@@ -5,11 +5,13 @@ Tests for internal namespace functions
 from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap, CommentedSeq
 
+from datajunction_server.database.namespace import NodeNamespace
 from datajunction_server.database.user import User
 from datajunction_server.internal.namespaces import (
     _merge_list_with_key,
     _merge_yaml_preserving_comments,
     create_or_reactivate_namespace,
+    is_default_branch_namespace,
     node_spec_to_yaml,
 )
 from datajunction_server.models.deployment import MetricSpec, TransformSpec
@@ -43,6 +45,161 @@ async def test_create_or_reactivate_namespace_reports_already_exists(
 
     assert (await create()).status == NamespaceWriteStatus.CREATED
     assert (await create()).status == NamespaceWriteStatus.ALREADY_EXISTS
+
+
+class TestIsDefaultBranchNamespace:
+    """
+    Telling the default-branch view of a repo apart from a branch namespace.
+
+    Production work -- a scheduled materialization workflow, a Druid datasource --
+    is only started from the former, so this has to be wrong in neither direction:
+    a branch read as the default branch schedules work that outlives the branch,
+    and the default branch read as a branch silently stops production
+    materializing.
+    """
+
+    @staticmethod
+    async def _namespaces(session, *rows: NodeNamespace) -> None:
+        """Persist namespace rows in order, so a parent exists before its child."""
+        for row in rows:
+            session.add(row)
+            await session.commit()
+
+    async def test_no_git_configuration_is_the_default_branch(self, session):
+        """
+        A namespace with nothing git-related on it, the common case: there is no
+        branch here to infer, and it must keep materializing as it always has.
+        """
+        await self._namespaces(session, NodeNamespace(namespace="idb_plain"))
+        assert await is_default_branch_namespace(session, "idb_plain") is True
+
+    async def test_repo_without_branching_is_the_default_branch(self, session):
+        """
+        A namespace that owns a repo and is pinned to a branch, with no
+        `default_branch` and no parent: a flat repo-backed namespace. No branch
+        namespace was ever made from it -- that needs a `default_branch` to branch
+        from -- so its branch, whatever it is called, is the only view there is.
+        """
+        await self._namespaces(
+            session,
+            NodeNamespace(
+                namespace="idb_flat",
+                github_repo_path="corp/flat",
+                git_branch="trunk",
+            ),
+        )
+        assert await is_default_branch_namespace(session, "idb_flat") is True
+
+    async def test_git_root_itself_is_the_default_branch(self, session):
+        """The namespace that configures the repo is never a branch of itself."""
+        await self._namespaces(
+            session,
+            NodeNamespace(
+                namespace="idb_root",
+                github_repo_path="corp/root",
+                default_branch="main",
+            ),
+        )
+        assert await is_default_branch_namespace(session, "idb_root") is True
+
+    async def test_branch_namespaces_under_a_git_root(self, session):
+        """
+        The shape the branch API and `dj push` produce: a git root naming the default
+        branch, with a namespace per branch carrying its own `git_branch`. A
+        subnamespace of a branch resolves through it.
+        """
+        await self._namespaces(
+            session,
+            NodeNamespace(
+                namespace="idb_repo",
+                github_repo_path="corp/repo",
+                default_branch="main",
+            ),
+            NodeNamespace(
+                namespace="idb_repo.main",
+                git_branch="main",
+                parent_namespace="idb_repo",
+            ),
+            NodeNamespace(
+                namespace="idb_repo.feature_x",
+                git_branch="feature-x",
+                parent_namespace="idb_repo",
+            ),
+            NodeNamespace(namespace="idb_repo.feature_x.cubes"),
+        )
+        assert await is_default_branch_namespace(session, "idb_repo.main") is True
+        assert await is_default_branch_namespace(session, "idb_repo.feature_x") is False
+        assert (
+            await is_default_branch_namespace(session, "idb_repo.feature_x.cubes")
+        ) is False
+
+    async def test_unpopulated_git_branch_falls_back_to_the_segment(self, session):
+        """
+        A namespace under a git root that carries no `git_branch` of its own -- an
+        ordinary deploy creates one this way, never touching the branch columns.
+
+        Its final segment is then the only thing left to go on: `main` under a root
+        whose default branch is `main` is the default branch, and anything else is
+        treated as a branch rather than assumed to be production.
+        """
+        await self._namespaces(
+            session,
+            NodeNamespace(
+                namespace="idb_bare",
+                github_repo_path="corp/bare",
+                default_branch="main",
+            ),
+            NodeNamespace(namespace="idb_bare.main"),
+            NodeNamespace(namespace="idb_bare.scratch"),
+        )
+        assert await is_default_branch_namespace(session, "idb_bare.main") is True
+        assert await is_default_branch_namespace(session, "idb_bare.scratch") is False
+
+    async def test_no_default_branch_to_compare_against_is_a_branch(self, session):
+        """
+        A namespace pointing at a parent, with no `default_branch` recorded anywhere.
+
+        The default-branch namespace carries a `parent_namespace` too, so there is
+        nothing here to tell the two apart -- and of the two ways to be wrong, not
+        scheduling is the one that gets reported and can be overridden per deploy.
+        """
+        await self._namespaces(
+            session,
+            NodeNamespace(namespace="idb_nodefault", github_repo_path="corp/nodefault"),
+            NodeNamespace(
+                namespace="idb_nodefault.main",
+                git_branch="main",
+                parent_namespace="idb_nodefault",
+            ),
+        )
+        assert (
+            await is_default_branch_namespace(session, "idb_nodefault.main")
+        ) is False
+
+    async def test_default_branch_resolves_through_a_sibling_parent(self, session):
+        """
+        A branch namespace may point at a sibling rather than at a string ancestor
+        (`idb_sib.feature` -> `idb_sib.main`), which is then where the repo and the
+        default branch are configured. One FK hop keeps that visible; without it the
+        branch would look like a namespace with no default branch to compare to.
+        """
+        await self._namespaces(
+            session,
+            NodeNamespace(namespace="idb_sib"),
+            NodeNamespace(
+                namespace="idb_sib.main",
+                github_repo_path="corp/sib",
+                git_branch="main",
+                default_branch="main",
+            ),
+            NodeNamespace(
+                namespace="idb_sib.feature",
+                git_branch="feature",
+                parent_namespace="idb_sib.main",
+            ),
+        )
+        assert await is_default_branch_namespace(session, "idb_sib.main") is True
+        assert await is_default_branch_namespace(session, "idb_sib.feature") is False
 
 
 class TestMergeListWithKey:

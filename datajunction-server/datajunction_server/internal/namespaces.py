@@ -2045,6 +2045,78 @@ async def resolve_git_config(
     return git_info["repo"], git_info["path"], git_info["branch"]
 
 
+def _branch_segment(branch: str) -> str:
+    """
+    The namespace segment a git branch name maps to, matching how the branch
+    creation flow derives one (``feature/x`` -> ``feature_x``).
+    """
+    return branch.replace("-", "_").replace("/", "_")
+
+
+def is_default_branch_from_git_info(namespace: str, git_info: dict | None) -> bool:
+    """
+    Whether ``namespace`` holds the default-branch (production) view of its repo,
+    given the resolved git info from ``resolve_git_info_from_map``.
+
+    Reads several of the resolved fields rather than one, because the
+    branch-management columns behind them are written by different flows and no
+    single one is dependable: the branch API sets ``git_branch`` and
+    ``parent_namespace``, ``dj push`` sets those two from the local checkout, and
+    ``default_branch`` is only ever set on the namespace that configures the repo. A
+    namespace created by a plain deploy under a git root has none of them and merely
+    inherits the root's repo.
+
+    Deliberately stricter than the resolver's own ``is_default_branch``, which
+    answers True for an unresolved branch and so fails open -- the direction that
+    schedules production work from a namespace that gets reaped. This has to fail
+    closed in both directions, since the default branch mistaken for a branch
+    silently stops production materializing, so "default branch" is never inferred
+    from a field's absence:
+
+    - No git context resolved at all: the default branch, trivially. Namespaces with
+      no repo behind them are the common case and must keep behaving as they always
+      have.
+    - A repo with no ``default_branch`` and no ``parent_namespace``: also the default
+      branch. This is a flat repo-backed namespace, which no branch namespace was
+      ever created from -- creating one requires a ``default_branch`` to branch from.
+    - ``parent_namespace`` set but no ``default_branch``: a branch. The
+      default-branch namespace carries a ``parent_namespace`` too, so with no default
+      branch recorded there is nothing left to tell the two apart, and the
+      reported-and-overridable outcome is the one to fail into.
+    - Otherwise the default branch has to be positively identified: by the resolved
+      ``git_branch``, or -- for a namespace whose ``git_branch`` was never populated
+      -- by its own final segment (``shared.main`` -> ``main``). The namespace that
+      configures the repo is never a branch of itself.
+    """
+    if not git_info:
+        return True
+
+    default_branch = git_info["default_branch"]
+    if default_branch is None:
+        return git_info["parent_namespace"] is None
+
+    default_segment = _branch_segment(default_branch)
+    branch = git_info["branch"]
+    if branch is not None:
+        return branch == default_branch or _branch_segment(branch) == default_segment
+    if namespace == git_info["git_root_namespace"]:
+        return True
+    return namespace.rsplit(SEPARATOR, 1)[-1] == default_segment
+
+
+async def is_default_branch_namespace(session: AsyncSession, namespace: str) -> bool:
+    """
+    Whether ``namespace`` holds the default-branch view of its repo. See
+    ``is_default_branch_from_git_info`` for the rule; the git info comes from the
+    shared resolver, which loads the ancestor namespaces and hops to a parent that
+    is a sibling rather than a string ancestor.
+    """
+    return is_default_branch_from_git_info(
+        namespace,
+        await get_git_info_for_namespace(session, namespace),
+    )
+
+
 def _rollup_branch_counts(
     branch_ns: str,
     counts_by_ns: dict[str, tuple[int, int, datetime]],
