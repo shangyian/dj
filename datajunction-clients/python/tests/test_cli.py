@@ -1197,6 +1197,63 @@ class TestPushDeploymentSourceFlags:
             assert os.environ.get("DJ_DEPLOY_BRANCH") == "existing-branch"
 
 
+def _impact_results(orders_status: str) -> dict:
+    """An impact response for a two-node project, with orders in a given status."""
+    return {
+        "uuid": "dry_run",
+        "namespace": "shop",
+        "status": "success",
+        "results": [
+            {
+                "name": "shop.customers",
+                "operation": "create",
+                "status": "success",
+                "message": "",
+            },
+            {
+                "name": "shop.orders",
+                "operation": "create",
+                "status": orders_status,
+                "message": "Column `customer_id` does not exist",
+            },
+        ],
+        "downstream_impacts": [],
+    }
+
+
+def _impact_with_invalid_node() -> dict:
+    return _impact_results("invalid")
+
+
+def _impact_with_valid_nodes() -> dict:
+    return _impact_results("success")
+
+
+def _dryrun_cli(tmp_path, monkeypatch, impact: dict):
+    """A CLI wired to a mock server that returns the given impact response."""
+    import yaml
+
+    from datajunction.cli import DJCLI
+
+    (tmp_path / "dj.yaml").write_text(yaml.safe_dump({"namespace": "shop"}))
+    (tmp_path / "customers.yaml").write_text(
+        yaml.safe_dump({"name": "shop.customers", "node_type": "source"}),
+    )
+    (tmp_path / "orders.yaml").write_text(
+        yaml.safe_dump({"name": "shop.orders", "node_type": "transform"}),
+    )
+    monkeypatch.delenv("DJ_DEPLOY_REPO", raising=False)
+    monkeypatch.delenv("DJ_DEPLOY_BRANCH", raising=False)
+    monkeypatch.setattr(
+        "datajunction.deployment.DeploymentService._detect_git_branch",
+        lambda **kwargs: None,
+    )
+
+    mock_client = mock.MagicMock()
+    mock_client.get_deployment_impact.return_value = impact
+    return DJCLI(builder_client=mock_client)
+
+
 class TestImpactAnalysis:
     """Tests for deployment impact analysis (dryrun)."""
 
@@ -1379,6 +1436,101 @@ class TestImpactAnalysis:
         assert "downstream" in rendered
         assert "invalid" in rendered
 
+    def test_dryrun_exits_nonzero_on_invalid_nodes(self, tmp_path, monkeypatch, capsys):
+        """A dry run that finds invalid nodes prints the report, then exits non-zero."""
+        cli = _dryrun_cli(tmp_path, monkeypatch, _impact_with_invalid_node())
+
+        with patch.object(sys, "argv", ["dj", "push", str(tmp_path), "--dryrun"]):
+            with pytest.raises(SystemExit) as exc_info:
+                cli.run()
+
+        assert exc_info.value.code == 1
+        captured = capsys.readouterr()
+        # The full impact report is still rendered before the failure
+        assert "dry_run" in captured.out
+        assert "orders" in captured.out
+        assert "customers" in captured.out
+        assert "invalid" in captured.out
+        assert "Dry run finished" in captured.out
+
+    def test_dryrun_exits_zero_on_valid_deployment(self, tmp_path, monkeypatch, capsys):
+        """A dry run with no invalid nodes still succeeds."""
+        cli = _dryrun_cli(tmp_path, monkeypatch, _impact_with_valid_nodes())
+
+        with patch.object(sys, "argv", ["dj", "push", str(tmp_path), "--dryrun"]):
+            cli.run()
+
+        captured = capsys.readouterr()
+        assert "orders" in captured.out
+        assert "Dry run finished" not in captured.out
+
+    def test_dryrun_json_format_prints_impact_before_failing(
+        self,
+        tmp_path,
+        monkeypatch,
+        capsys,
+    ):
+        """JSON output is unaffected by the failure: full impact on stdout, exit 1."""
+        cli = _dryrun_cli(tmp_path, monkeypatch, _impact_with_invalid_node())
+
+        argv = ["dj", "push", str(tmp_path), "--dryrun", "--format", "json"]
+        with patch.object(sys, "argv", argv):
+            with pytest.raises(SystemExit) as exc_info:
+                cli.run()
+
+        assert exc_info.value.code == 1
+        impact = json.loads(capsys.readouterr().out)
+        assert [result["status"] for result in impact["results"]] == [
+            "success",
+            "invalid",
+        ]
+
+    def test_dryrun_json_format_valid_deployment_exits_zero(
+        self,
+        tmp_path,
+        monkeypatch,
+        capsys,
+    ):
+        """JSON output for a clean dry run keeps its zero exit."""
+        cli = _dryrun_cli(tmp_path, monkeypatch, _impact_with_valid_nodes())
+
+        argv = ["dj", "push", str(tmp_path), "--dryrun", "--format", "json"]
+        with patch.object(sys, "argv", argv):
+            cli.run()
+
+        impact = json.loads(capsys.readouterr().out)
+        assert [result["status"] for result in impact["results"]] == [
+            "success",
+            "success",
+        ]
+
+    def test_deploy_dryrun_exits_nonzero_on_invalid_nodes(
+        self,
+        tmp_path,
+        monkeypatch,
+        capsys,
+    ):
+        """`dj deploy --dryrun` gates the same way as `dj push --dryrun`."""
+        cli = _dryrun_cli(tmp_path, monkeypatch, _impact_with_invalid_node())
+
+        with patch.object(sys, "argv", ["dj", "deploy", str(tmp_path), "--dryrun"]):
+            with pytest.raises(SystemExit) as exc_info:
+                cli.run()
+
+        assert exc_info.value.code == 1
+        assert "invalid" in capsys.readouterr().out
+
+    def test_dryrun_failed_result_also_fails(self, tmp_path, monkeypatch, capsys):
+        """A failed result counts as a failure, not just an invalid one."""
+        cli = _dryrun_cli(tmp_path, monkeypatch, _impact_results("failed"))
+
+        with patch.object(sys, "argv", ["dj", "push", str(tmp_path), "--dryrun"]):
+            with pytest.raises(SystemExit) as exc_info:
+                cli.run()
+
+        assert exc_info.value.code == 1
+        assert "Dry run finished" in capsys.readouterr().out
+
     def test_dryrun_with_exception(self, capsys):
         """Test dryrun handles DJClientException properly (covers lines 276-286)."""
         from unittest.mock import MagicMock
@@ -1393,7 +1545,8 @@ class TestImpactAnalysis:
             side_effect=DJClientException({"message": "Test error message"}),
         )
 
-        cli.dryrun("/fake/directory", format="text")
+        with pytest.raises(DJClientException):
+            cli.dryrun("/fake/directory", format="text")
 
         captured = capsys.readouterr()
         assert "ERROR" in captured.out
@@ -1413,7 +1566,8 @@ class TestImpactAnalysis:
             side_effect=DJClientException({"message": "JSON error message"}),
         )
 
-        cli.dryrun("/fake/directory", format="json")
+        with pytest.raises(DJClientException):
+            cli.dryrun("/fake/directory", format="json")
 
         captured = capsys.readouterr()
         import json as json_module
@@ -1436,7 +1590,8 @@ class TestImpactAnalysis:
             side_effect=DJClientException("Simple string error"),
         )
 
-        cli.dryrun("/fake/directory", format="text")
+        with pytest.raises(DJClientException):
+            cli.dryrun("/fake/directory", format="text")
 
         captured = capsys.readouterr()
         assert "ERROR" in captured.out

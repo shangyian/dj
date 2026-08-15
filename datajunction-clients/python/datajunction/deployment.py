@@ -19,7 +19,7 @@ from datajunction.exceptions import (
     DJClientException,
     DJDeploymentFailure,
 )
-from datajunction.models import DeploymentInfo
+from datajunction.models import DeploymentInfo, DeploymentResult
 from datajunction.rendering import print_deployment_header, print_results
 
 
@@ -234,6 +234,17 @@ class DeploymentService:
             raise DJClientException(
                 "Fix file name mismatches before deploying.",
             )
+
+    @staticmethod
+    def failed_results(data: dict[str, Any]) -> list[DeploymentResult]:
+        """
+        Results in a deployment or impact response that mean it would not succeed.
+        """
+        return [
+            result
+            for result in DeploymentInfo.from_dict(data).results
+            if result.status in (ResultStatus.FAILED, ResultStatus.INVALID)
+        ]
 
     def get_impact(
         self,

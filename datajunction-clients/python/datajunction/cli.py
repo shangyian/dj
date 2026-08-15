@@ -67,6 +67,9 @@ class DJCLI:
     ):
         """
         Perform a dry run of deployment, showing impact analysis.
+
+        Raises DJDeploymentFailure once the full report has been shown if the dry
+        run found nodes that would not deploy.
         """
         console = Console()
 
@@ -91,6 +94,20 @@ class DJCLI:
                 print(json.dumps({"error": message}, indent=2))
             else:
                 console.print(f"[red bold]ERROR:[/red bold] {message}")
+            raise
+
+        # Fail only after the report is printed, so the dry run gates like a push.
+        failures = DeploymentService.failed_results(impact)
+        if failures:
+            if format != "json":
+                console.print(
+                    f"\nDry run finished: [bold red]FAILED[/bold red] "
+                    f"({len(failures)} node(s) would not deploy)",
+                )
+            raise DJDeploymentFailure(
+                project_name=impact.get("namespace") or str(directory),
+                errors=[failure.__dict__ for failure in failures],
+            )
 
     def pull(self, namespace: str, directory: str):
         """
@@ -1490,7 +1507,11 @@ class DJCLI:
         if args.command == "deploy":
             # deploy is similar to push but supports --dryrun
             if args.dryrun:
-                self.dryrun(args.directory, format=args.format)
+                try:
+                    self.dryrun(args.directory, format=args.format)
+                except DJClientException:
+                    # Errors already displayed by the dry run
+                    raise SystemExit(1)
                 return
             try:
                 self.push(args.directory, verbose=args.verbose, force=args.force)
@@ -1499,11 +1520,15 @@ class DJCLI:
         elif args.command == "push":
             # Handle dry run first
             if args.dryrun:
-                self.dryrun(
-                    args.directory,
-                    namespace=args.namespace,
-                    format=args.format,
-                )
+                try:
+                    self.dryrun(
+                        args.directory,
+                        namespace=args.namespace,
+                        format=args.format,
+                    )
+                except DJClientException:
+                    # Errors already displayed by the dry run
+                    raise SystemExit(1)
                 return
             # CLI flags override env vars for deployment source tracking
             if args.repo:

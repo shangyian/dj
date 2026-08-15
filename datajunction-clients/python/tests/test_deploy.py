@@ -1289,6 +1289,39 @@ class TestGetImpact:
         assert call_args["namespace"] == "project.feature_new_metric"
 
 
+class TestFailedResults:
+    """Tests for the failed_results helper."""
+
+    @staticmethod
+    def _data(*statuses: str) -> dict:
+        return {
+            "uuid": "dry_run",
+            "namespace": "shop",
+            "status": "success",
+            "results": [
+                {
+                    "name": f"shop.node_{idx}",
+                    "operation": "create",
+                    "status": status,
+                    "message": "",
+                }
+                for idx, status in enumerate(statuses)
+            ],
+        }
+
+    def test_no_failures(self):
+        data = self._data("success", "noop", "skipped")
+        assert DeploymentService.failed_results(data) == []
+
+    def test_invalid_and_failed_are_failures(self):
+        data = self._data("success", "invalid", "failed")
+        names = [result.name for result in DeploymentService.failed_results(data)]
+        assert names == ["shop.node_1", "shop.node_2"]
+
+    def test_empty_response(self):
+        assert DeploymentService.failed_results({}) == []
+
+
 class TestDetectGitBranch:
     """Tests for _detect_git_branch."""
 
