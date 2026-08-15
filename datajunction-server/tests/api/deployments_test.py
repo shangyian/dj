@@ -1514,6 +1514,224 @@ class TestDeployments:
         assert "INVALID" in link["message"]
 
     @pytest.mark.asyncio
+    async def test_deploy_join_link_without_join_on_infers_clause(self, client):
+        """
+        A join link that omits join_on has its ON clause inferred from the linked
+        dimension's primary key, so it never deploys without a join condition.
+        """
+        namespace = "inferred_join_on"
+        customers = SourceSpec(
+            name="customers",
+            catalog="default",
+            schema="store",
+            table="customers",
+            columns=[
+                ColumnSpec(name="id", type="int"),
+                ColumnSpec(name="name", type="string"),
+            ],
+        )
+        customer = DimensionSpec(
+            name="customer",
+            query="SELECT id, name FROM ${prefix}customers",
+            primary_key=["id"],
+        )
+        orders = SourceSpec(
+            name="orders",
+            catalog="default",
+            schema="store",
+            table="orders",
+            columns=[
+                ColumnSpec(name="order_id", type="int"),
+                ColumnSpec(name="customer_id", type="int"),
+                ColumnSpec(name="shipping_customer_id", type="int"),
+                ColumnSpec(name="billing_customer_id", type="int"),
+            ],
+            dimension_links=[
+                DimensionJoinLinkSpec(
+                    dimension_node="${prefix}customer",
+                    node_column="customer_id",
+                ),
+                # A role-played link infers the same way.
+                DimensionJoinLinkSpec(
+                    dimension_node="${prefix}customer",
+                    node_column="shipping_customer_id",
+                    role="shipping",
+                ),
+                # An explicit join_on is left exactly as written.
+                DimensionJoinLinkSpec(
+                    dimension_node="${prefix}customer",
+                    role="billing",
+                    join_on=(
+                        "${prefix}orders.billing_customer_id = ${prefix}customer.id"
+                    ),
+                ),
+            ],
+        )
+        data = await deploy_and_wait(
+            client,
+            DeploymentSpec(
+                namespace=namespace,
+                nodes=[customers, customer, orders],
+            ),
+        )
+        assert data["status"] == "success", data
+
+        response = await client.get(f"/nodes/{namespace}.orders")
+        links = {
+            link["role"]: link["join_sql"]
+            for link in response.json()["dimension_links"]
+        }
+        assert links == {
+            None: f"{namespace}.orders.customer_id = {namespace}.customer.id",
+            "shipping": (
+                f"{namespace}.orders.shipping_customer_id = {namespace}.customer.id"
+            ),
+            "billing": (
+                f"{namespace}.orders.billing_customer_id = {namespace}.customer.id"
+            ),
+        }
+
+    @pytest.mark.asyncio
+    async def test_deploy_join_link_without_join_on_compound_primary_key(self, client):
+        """
+        A compound primary key is inferred by matching column names, producing one
+        equality predicate per key column.
+        """
+        namespace = "inferred_compound_join_on"
+        prices = SourceSpec(
+            name="prices",
+            catalog="default",
+            schema="store",
+            table="prices",
+            columns=[
+                ColumnSpec(name="product_id", type="int"),
+                ColumnSpec(name="currency", type="string"),
+                ColumnSpec(name="amount", type="double"),
+            ],
+        )
+        product_price = DimensionSpec(
+            name="product_price",
+            query="SELECT product_id, currency, amount FROM ${prefix}prices",
+            primary_key=["product_id", "currency"],
+        )
+        orders = SourceSpec(
+            name="orders",
+            catalog="default",
+            schema="store",
+            table="orders",
+            columns=[
+                ColumnSpec(name="order_id", type="int"),
+                ColumnSpec(name="product_id", type="int"),
+                ColumnSpec(name="currency", type="string"),
+            ],
+            dimension_links=[
+                DimensionJoinLinkSpec(dimension_node="${prefix}product_price"),
+            ],
+        )
+        data = await deploy_and_wait(
+            client,
+            DeploymentSpec(
+                namespace=namespace,
+                nodes=[prices, product_price, orders],
+            ),
+        )
+        assert data["status"] == "success", data
+
+        response = await client.get(f"/nodes/{namespace}.orders")
+        assert [link["join_sql"] for link in response.json()["dimension_links"]] == [
+            f"{namespace}.orders.product_id = {namespace}.product_price.product_id AND "
+            f"{namespace}.orders.currency = {namespace}.product_price.currency",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_deploy_cross_join_link_without_join_on(self, client):
+        """
+        A cross join has no ON clause by definition, so nothing is inferred for one.
+        """
+        namespace = "cross_join_link"
+        calendars = SourceSpec(
+            name="calendars",
+            catalog="default",
+            schema="store",
+            table="calendars",
+            columns=[ColumnSpec(name="dateint", type="int")],
+        )
+        calendar = DimensionSpec(
+            name="calendar",
+            query="SELECT dateint FROM ${prefix}calendars",
+            primary_key=["dateint"],
+        )
+        orders = SourceSpec(
+            name="orders",
+            catalog="default",
+            schema="store",
+            table="orders",
+            columns=[ColumnSpec(name="order_id", type="int")],
+            dimension_links=[
+                DimensionJoinLinkSpec(
+                    dimension_node="${prefix}calendar",
+                    join_type="cross",
+                ),
+            ],
+        )
+        data = await deploy_and_wait(
+            client,
+            DeploymentSpec(
+                namespace=namespace,
+                nodes=[calendars, calendar, orders],
+            ),
+        )
+        assert data["status"] == "success", data
+
+        response = await client.get(f"/nodes/{namespace}.orders")
+        assert [link["join_sql"] for link in response.json()["dimension_links"]] == [""]
+
+    @pytest.mark.asyncio
+    async def test_deploy_join_link_without_join_on_or_primary_key_fails(self, client):
+        """
+        With no primary key on the dimension there is nothing to infer against, so
+        the link fails with a message naming the problem rather than deploying a
+        join with no ON clause.
+        """
+        namespace = "uninferrable_join_on"
+        customers = SourceSpec(
+            name="customers",
+            catalog="default",
+            schema="store",
+            table="customers",
+            columns=[ColumnSpec(name="id", type="int")],
+        )
+        customer = DimensionSpec(
+            name="customer",
+            query="SELECT id FROM ${prefix}customers",
+        )
+        orders = SourceSpec(
+            name="orders",
+            catalog="default",
+            schema="store",
+            table="orders",
+            columns=[ColumnSpec(name="customer_id", type="int")],
+            dimension_links=[
+                DimensionJoinLinkSpec(
+                    dimension_node="${prefix}customer",
+                    node_column="customer_id",
+                ),
+            ],
+        )
+        data = await deploy_and_wait(
+            client,
+            DeploymentSpec(
+                namespace=namespace,
+                nodes=[customers, customer, orders],
+            ),
+        )
+        assert data["status"] == "failed", data
+        assert "has no primary key" in json.dumps(data["results"])
+
+        response = await client.get(f"/nodes/{namespace}.orders")
+        assert response.json()["dimension_links"] == []
+
+    @pytest.mark.asyncio
     async def test_deploy_with_dimension_link_removal(
         self,
         session,

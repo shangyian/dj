@@ -1,7 +1,10 @@
 import pytest
 from pydantic import ValidationError
 
-from datajunction_server.errors import DJInvalidDeploymentConfig
+from datajunction_server.errors import (
+    DJInvalidDeploymentConfig,
+    DJInvalidInputException,
+)
 from datajunction_server.models.deployment import (
     ChangeTier,
     ColumnSpec,
@@ -394,6 +397,71 @@ def test_eq_columns_source_column_removal():
 
     # For non-source (compare_types=False), missing columns are NOT flagged
     assert eq_columns([col_id], [col_id, col_val], compare_types=False)
+
+
+def test_infer_join_on_from_single_primary_key():
+    """An omitted join_on becomes node_column = the dimension's primary key."""
+    link_spec = DimensionJoinLinkSpec(
+        dimension_node="store.customer",
+        node_column="customer_id",
+    )
+    assert (
+        link_spec.infer_join_on("store.orders", ["id"])
+        == "store.orders.customer_id = store.customer.id"
+    )
+
+
+def test_infer_join_on_is_unaffected_by_role():
+    """A role lives on the link itself, so it does not change the inferred clause."""
+    link_spec = DimensionJoinLinkSpec(
+        dimension_node="store.customer",
+        node_column="billing_customer_id",
+        role="billing",
+    )
+    assert (
+        link_spec.infer_join_on("store.orders", ["id"])
+        == "store.orders.billing_customer_id = store.customer.id"
+    )
+
+
+def test_infer_join_on_from_compound_primary_key():
+    """With no node_column, a compound primary key is matched column name by name."""
+    link_spec = DimensionJoinLinkSpec(dimension_node="store.product_price")
+    assert link_spec.infer_join_on("store.orders", ["product_id", "currency"]) == (
+        "store.orders.product_id = store.product_price.product_id AND "
+        "store.orders.currency = store.product_price.currency"
+    )
+
+
+def test_infer_join_on_compound_primary_key_with_node_column():
+    """A single node_column cannot join a compound primary key."""
+    link_spec = DimensionJoinLinkSpec(
+        dimension_node="store.product_price",
+        node_column="product_id",
+    )
+    with pytest.raises(DJInvalidInputException) as exc_info:
+        link_spec.infer_join_on("store.orders", ["product_id", "currency"])
+    assert "compound primary key (product_id, currency)" in str(exc_info.value)
+
+
+def test_infer_join_on_for_cross_join():
+    """A cross join has no ON clause, so nothing is inferred for one."""
+    link_spec = DimensionJoinLinkSpec(
+        dimension_node="store.calendar",
+        join_type="cross",
+    )
+    assert link_spec.infer_join_on("store.orders", ["id"]) == ""
+
+
+def test_infer_join_on_without_primary_key():
+    """There is nothing to infer against when the dimension has no primary key."""
+    link_spec = DimensionJoinLinkSpec(
+        dimension_node="store.customer",
+        node_column="customer_id",
+    )
+    with pytest.raises(DJInvalidInputException) as exc_info:
+        link_spec.infer_join_on("store.orders", [])
+    assert "has no primary key" in str(exc_info.value)
 
 
 def test_dimension_join_link_spec_with_default_value():

@@ -2139,12 +2139,32 @@ class DeploymentOrchestrator:
         dimension_node: Node,
     ) -> DeploymentResult:
         activity_type = ActivityType.CREATE
+        role_suffix = f"[{link_spec.role}]" if link_spec.role else ""
+        resolved_join_on = None
         if link_spec.type == LinkType.JOIN:
             join_link = cast(DimensionJoinLinkSpec, link_spec)
+            # An omitted join_on is documented as inferred from the dimension's
+            # primary key; without a clause the join would have no ON condition.
+            try:
+                resolved_join_on = (
+                    join_link.rendered_join_on
+                    or join_link.infer_join_on(
+                        new_revision.name,
+                        [col.name for col in dimension_node.current.primary_key()],
+                    )
+                )
+            except DJInvalidInputException as exc:
+                return DeploymentResult(
+                    name=f"{new_revision.name} -> {dimension_node.name}" + role_suffix,
+                    deploy_type=DeploymentResult.Type.LINK,
+                    status=DeploymentResult.Status.FAILED,
+                    operation=DeploymentResult.Operation.CREATE,
+                    message=exc.message,
+                )
             link_input = JoinLinkInput(
                 dimension_node=join_link.rendered_dimension_node,
                 join_type=join_link.join_type,
-                join_on=join_link.rendered_join_on,
+                join_on=resolved_join_on,
                 role=join_link.role,
                 default_value=join_link.default_value,
                 spark_hints=join_link.spark_hints,
@@ -2175,7 +2195,6 @@ class DeploymentOrchestrator:
                 if reference_link.role
                 else reference_link.dimension_attribute
             )
-        role_suffix = f"[{link_spec.role}]" if link_spec.role else ""
 
         # Track history for dimension link create/update (skip REFRESH/NOOP)
         if activity_type in (ActivityType.CREATE, ActivityType.UPDATE):
@@ -2188,7 +2207,7 @@ class DeploymentOrchestrator:
             if link_spec.type == LinkType.JOIN:
                 join_link = cast(DimensionJoinLinkSpec, link_spec)
                 link_details["join_type"] = join_link.join_type
-                link_details["join_on"] = join_link.rendered_join_on
+                link_details["join_on"] = resolved_join_on
 
             self.session.add(
                 History(

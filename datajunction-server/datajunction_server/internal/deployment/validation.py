@@ -16,6 +16,7 @@ from datajunction_server.database.dimensionlink import DimensionLink
 from datajunction_server.database.node import Node, NodeRevision
 from datajunction_server.errors import (
     DJError,
+    DJInvalidInputException,
     ErrorCode,
 )
 from datajunction_server.internal.deployment.type_inference import validate_node_query
@@ -184,6 +185,11 @@ class NodeSpecBulkValidator:
         results: list["NodeValidationResult"],
     ) -> None:
         """Validate dimension links for all node results."""
+        batch_primary_keys = {
+            result.spec.rendered_name: result.spec.primary_key
+            for result in results
+            if isinstance(result.spec, LinkableNodeSpec)
+        }
         for result in results:
             spec = result.spec
             if not isinstance(spec, LinkableNodeSpec) or not spec.dimension_links:
@@ -194,12 +200,19 @@ class NodeSpecBulkValidator:
 
             for link in spec.dimension_links:
                 if isinstance(link, DimensionJoinLinkSpec):
-                    if link.rendered_join_on:
+                    join_on = link.rendered_join_on or self._infer_link_join_on(
+                        result,
+                        link,
+                        node_name,
+                        batch_primary_keys,
+                    )
+                    if join_on:
                         self._validate_join_link(
                             result,
                             link,
                             node_name,
                             inferred_col_names,
+                            join_on,
                         )
                 else:
                     self._validate_reference_link(
@@ -209,12 +222,41 @@ class NodeSpecBulkValidator:
                         inferred_col_names,
                     )
 
+    def _infer_link_join_on(
+        self,
+        result: "NodeValidationResult",
+        link: DimensionJoinLinkSpec,
+        node_name: str,
+        batch_primary_keys: dict[str, list[str]],
+    ) -> str | None:
+        """
+        Resolve the ON clause for a link that omits `join_on`, so the column checks
+        below apply to the inferred clause too. Returns None when the dimension is
+        neither in this batch nor already deployed; the deploy reports that.
+        """
+        dim_name = link.rendered_dimension_node
+        primary_key = batch_primary_keys.get(dim_name)
+        if primary_key is None:
+            dim_node = self._dim_link_nodes.get(dim_name)
+            if dim_node is None or dim_node.current is None:
+                return None
+            primary_key = [col.name for col in dim_node.current.primary_key()]
+        try:
+            return link.infer_join_on(node_name, primary_key)
+        except DJInvalidInputException as exc:
+            result.errors.append(
+                DJError(code=ErrorCode.INVALID_SQL_QUERY, message=exc.message),
+            )
+            result.status = NodeStatus.INVALID
+            return None
+
     def _validate_join_link(
         self,
         result: "NodeValidationResult",
         link: DimensionJoinLinkSpec,
         node_name: str,
         inferred_col_names: set,
+        join_on: str,
     ) -> None:
         """
         Validate a single DimensionJoinLinkSpec.
@@ -229,8 +271,6 @@ class NodeSpecBulkValidator:
         - Dim-side columns exist on the dim node (if loaded).
         """
         dim_name = link.rendered_dimension_node
-        assert link.rendered_join_on  # guarded by caller
-
         dim_node = self._dim_link_nodes.get(dim_name)
 
         if dim_node is not None and dim_node.type != NodeType.DIMENSION:
@@ -263,7 +303,7 @@ class NodeSpecBulkValidator:
         try:
             with fast_parse_mode():
                 tree = DimensionLink.parse_join_sql(
-                    link.rendered_join_on,
+                    join_on,
                     link.join_type,
                     node_name,
                     dim_name,

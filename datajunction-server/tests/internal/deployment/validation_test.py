@@ -8,6 +8,7 @@ import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from datajunction_server.database.attributetype import AttributeType, ColumnAttribute
 from datajunction_server.database.catalog import Catalog
 from datajunction_server.database.column import Column
 from datajunction_server.database.node import Node, NodeRevision
@@ -24,6 +25,7 @@ from datajunction_server.models.deployment import (
     ColumnSpec,
     DimensionJoinLinkSpec,
     DimensionReferenceLinkSpec,
+    DimensionSpec,
     MetricSpec,
     SourceSpec,
     TransformSpec,
@@ -1160,8 +1162,9 @@ def _make_validator(session: AsyncSession) -> NodeSpecBulkValidator:
 def _make_source_result(
     node_name: str,
     col_names: list[str],
-    join_on: str,
+    join_on: str | None,
     dim_name: str,
+    node_column: str | None = None,
 ) -> NodeValidationResult:
     """Build a NodeValidationResult for a source node with one dimension link."""
     spec = SourceSpec(
@@ -1174,6 +1177,7 @@ def _make_source_result(
             DimensionJoinLinkSpec(
                 dimension_node=dim_name,
                 join_on=join_on,
+                node_column=node_column,
             ),
         ],
     )
@@ -1281,7 +1285,8 @@ class TestDimLinkValidation:
         assert result.errors == []
 
     def test_join_link_with_no_join_on_is_skipped(self, session: AsyncSession):
-        """A DimensionJoinLinkSpec with no join_on is silently skipped."""
+        """A DimensionJoinLinkSpec with no join_on is skipped when the dimension is
+        neither in this batch nor deployed, since its primary key is unknown here."""
         validator = _make_validator(session)
         spec = SourceSpec(
             name="facts",
@@ -1381,19 +1386,181 @@ def _make_dim_node_for_link(
     name: str,
     col_names: list[str],
     node_type=NodeType.DIMENSION,
+    primary_key: list[str] | None = None,
 ) -> Node:
     """Build an in-memory Node to use as a dimension link target."""
+    pk_attribute = AttributeType(namespace="system", name="primary_key")
     node = Node(name=name, type=node_type)
     revision = NodeRevision(
         name=name,
         type=node_type,
         version="v1",
         columns=[
-            Column(name=c, type=StringType(), order=i) for i, c in enumerate(col_names)
+            Column(
+                name=c,
+                type=StringType(),
+                order=i,
+                attributes=[ColumnAttribute(attribute_type=pk_attribute)]
+                if c in (primary_key or [])
+                else [],
+            )
+            for i, c in enumerate(col_names)
         ],
     )
     node.current = revision
     return node
+
+
+class TestDimLinkJoinOnInference:
+    """A join link that omits join_on has its ON clause inferred from the
+    dimension node's primary key, and the inferred clause is validated too."""
+
+    def test_inferred_clause_is_validated_against_dim_node(
+        self,
+        session: AsyncSession,
+    ):
+        """Inference from an already-deployed dimension's primary key validates clean."""
+        validator = _make_validator(session)
+        validator._dim_link_nodes = {
+            "test.customer": _make_dim_node_for_link(
+                "test.customer",
+                ["id", "name"],
+                primary_key=["id"],
+            ),
+        }
+        validator._dim_link_col_names = {"test.customer": {"id", "name"}}
+        result = _make_source_result(
+            node_name="test.orders",
+            col_names=["order_id", "customer_id"],
+            join_on=None,
+            dim_name="test.customer",
+            node_column="customer_id",
+        )
+        validator._validate_dimension_link_specs([result])
+        assert result.status == NodeStatus.VALID
+        assert result.errors == []
+
+    def test_inferred_clause_catches_unknown_node_column(
+        self,
+        session: AsyncSession,
+    ):
+        """A node_column that isn't on the node is caught in the inferred clause."""
+        validator = _make_validator(session)
+        validator._dim_link_nodes = {
+            "test.customer": _make_dim_node_for_link(
+                "test.customer",
+                ["id"],
+                primary_key=["id"],
+            ),
+        }
+        validator._dim_link_col_names = {"test.customer": {"id"}}
+        result = _make_source_result(
+            node_name="test.orders",
+            col_names=["order_id"],
+            join_on=None,
+            dim_name="test.customer",
+            node_column="nonexistent_fk",
+        )
+        validator._validate_dimension_link_specs([result])
+        assert result.status == NodeStatus.INVALID
+        assert any("nonexistent_fk" in error.message for error in result.errors)
+
+    def test_infers_from_primary_key_of_dimension_in_same_batch(
+        self,
+        session: AsyncSession,
+    ):
+        """A dimension deployed in the same batch is not in the DB yet, so its
+        primary key comes from its spec."""
+        validator = _make_validator(session)
+        dim_spec = DimensionSpec(
+            name="customer",
+            query="SELECT id, name FROM test.customers",
+            primary_key=["id"],
+        )
+        dim_spec.namespace = "test"
+        dim_result = NodeValidationResult(
+            spec=dim_spec,
+            status=NodeStatus.VALID,
+            inferred_columns=[ColumnSpec(name="id", type="int")],
+            errors=[],
+            dependencies=[],
+        )
+        result = _make_source_result(
+            node_name="test.orders",
+            col_names=["order_id", "customer_id"],
+            join_on=None,
+            dim_name="test.customer",
+            node_column="customer_id",
+        )
+        validator._validate_dimension_link_specs([result, dim_result])
+        assert result.status == NodeStatus.VALID
+        assert result.errors == []
+
+    def test_dimension_without_primary_key_is_invalid(self, session: AsyncSession):
+        """A dimension with no primary key gives nothing to infer against."""
+        validator = _make_validator(session)
+        validator._dim_link_nodes = {
+            "test.customer": _make_dim_node_for_link("test.customer", ["id"]),
+        }
+        validator._dim_link_col_names = {"test.customer": {"id"}}
+        result = _make_source_result(
+            node_name="test.orders",
+            col_names=["customer_id"],
+            join_on=None,
+            dim_name="test.customer",
+            node_column="customer_id",
+        )
+        validator._validate_dimension_link_specs([result])
+        assert result.status == NodeStatus.INVALID
+        assert any("has no primary key" in error.message for error in result.errors)
+
+    def test_compound_primary_key_infers_by_column_name(self, session: AsyncSession):
+        """With no node_column, each primary key column is matched by name."""
+        validator = _make_validator(session)
+        validator._dim_link_nodes = {
+            "test.product_price": _make_dim_node_for_link(
+                "test.product_price",
+                ["product_id", "currency", "amount"],
+                primary_key=["product_id", "currency"],
+            ),
+        }
+        validator._dim_link_col_names = {
+            "test.product_price": {"product_id", "currency", "amount"},
+        }
+        result = _make_source_result(
+            node_name="test.orders",
+            col_names=["product_id", "currency"],
+            join_on=None,
+            dim_name="test.product_price",
+        )
+        validator._validate_dimension_link_specs([result])
+        assert result.status == NodeStatus.VALID
+        assert result.errors == []
+
+    def test_compound_primary_key_with_node_column_is_invalid(
+        self,
+        session: AsyncSession,
+    ):
+        """A single node_column cannot join a compound primary key."""
+        validator = _make_validator(session)
+        validator._dim_link_nodes = {
+            "test.product_price": _make_dim_node_for_link(
+                "test.product_price",
+                ["product_id", "currency"],
+                primary_key=["product_id", "currency"],
+            ),
+        }
+        validator._dim_link_col_names = {"test.product_price": {"product_id"}}
+        result = _make_source_result(
+            node_name="test.orders",
+            col_names=["product_id"],
+            join_on=None,
+            dim_name="test.product_price",
+            node_column="product_id",
+        )
+        validator._validate_dimension_link_specs([result])
+        assert result.status == NodeStatus.INVALID
+        assert any("compound primary key" in error.message for error in result.errors)
 
 
 class TestDimLinkValidationExtended:

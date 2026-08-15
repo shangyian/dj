@@ -422,7 +422,9 @@ class DimensionJoinLinkSpec(DimensionLinkSpec):
     Specification for a dimension join link
 
     If a custom `join_on` clause is not specified, DJ will automatically set
-    this clause to be on the selected column and the dimension node's primary key
+    this clause to be on the selected column and the dimension node's primary key.
+    Omitting `node_column` as well matches the primary key by column name, which is
+    how a compound primary key is joined without an explicit `join_on`.
     """
 
     dimension_node: str
@@ -449,6 +451,37 @@ class DimensionJoinLinkSpec(DimensionLinkSpec):
             if self.join_on
             else None
         )
+
+    def infer_join_on(self, node_name: str, primary_key: list[str]) -> str:
+        """
+        Build the ON clause documented for an omitted `join_on`: this node's column
+        equated to the dimension node's primary key. With no `node_column` the
+        predicates are keyed by name, the only unambiguous way to match up a
+        compound primary key.
+        """
+        dimension_name = self.rendered_dimension_node
+        # A cross join has no ON clause by definition, so there is nothing to infer.
+        if self.join_type == JoinType.CROSS:
+            return ""
+        if not primary_key:
+            raise DJInvalidInputException(
+                f"Dimension node `{dimension_name}` has no primary key, so the join "
+                f"clause for its link from `{node_name}` cannot be inferred. Set a "
+                "primary key on the dimension or specify `join_on` explicitly.",
+            )
+        if not self.node_column:
+            return " AND ".join(
+                f"{node_name}.{column} = {dimension_name}.{column}"
+                for column in primary_key
+            )
+        if len(primary_key) > 1:
+            raise DJInvalidInputException(
+                f"Dimension node `{dimension_name}` has a compound primary key "
+                f"({', '.join(primary_key)}), which a link on the single column "
+                f"`{self.node_column}` cannot join correctly. Specify `join_on` "
+                "explicitly, or drop `node_column` to join on matching column names.",
+            )
+        return f"{node_name}.{self.node_column} = {dimension_name}.{primary_key[0]}"
 
     def __hash__(self) -> int:
         return hash(
