@@ -226,10 +226,12 @@ Two further limits are worth being explicit about, because both look like the fe
 - **Coverage is per-table.** A request spanning `org_id` *and* `country` matches neither
   registration, and DJ falls back to building from the metric's own parent. Pre-aggregations are
   candidates evaluated independently; DJ does not union or join two of them to cover one request.
-- **The measure has to be the same measure.** Matching is on the expression and aggregation derived
-  from the metric's own definition, so each registered column must hold that measure at that table's
-  grain. If the tables disagree about what they count, they are different metrics and registering
-  them here would silently return one table's answer under the other's name.
+- **Sameness of the measure is asserted, not checked.** The identity comes from the metric node you
+  name, and DJ never inspects how the registered column was produced — only that it exists and
+  typechecks. So tables whose columns were computed by different logic register cleanly and route
+  normally. That makes registering genuinely different definitions under one metric possible but
+  ill-advised: which one answers depends on coverage, grain and freshness, so it shifts silently as
+  pre-aggregations are added or go stale, and nothing in the model records that they disagree.
 
 ### The core modeling rule: only measures can be mapped
 
