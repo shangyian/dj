@@ -82,6 +82,14 @@ a finer-grained fallback when no whole cube fits. A pre-aggregation is eligible 
 3. It contains **all the measures** the requested metrics decompose into, and
 4. It has data available.
 
+Rule 2 relaxes to a **subset** match only when every required measure is fully additive. Rolling
+rows up means re-aggregating them, which a measure like `COUNT(DISTINCT ...)` cannot survive — two
+groups' distinct counts can't be summed into their combined distinct count. When any required
+measure is not fully additive, the pre-aggregation's grain must therefore match the requested grain
+**exactly**, and no roll-up (or join-back, which implies one) is attempted. This narrows what a
+pre-aggregation is worth for such metrics considerably: it answers requests at precisely its own
+grain and nothing coarser.
+
 A requested dimension that *isn't* in the grain can still be covered when the grain holds that
 dimension's **whole primary key**, at the same role, reachable over a single `LEFT` or `INNER` link: DJ
 joins the dimension back on the retained key and groups by the attribute. The whole key is required
@@ -157,6 +165,62 @@ Everything above assumes DJ built the pre-aggregation itself, but the matcher do
 the table — only that its shape and grain are known. So you can register a table an external pipeline
 already produces: you tell DJ where it lives and how its columns map to measures, and routing then
 treats it exactly like a pre-aggregation DJ built.
+
+### One metric, several fact tables
+
+The word "pre-aggregation" suggests a rollup of the table the metric is defined over, but nothing in
+registration requires that. A pre-aggregation is an assertion: *this physical table holds these
+measures at this grain*. Sibling fact tables fit that description as well as rollups do.
+
+This is what to reach for when the same measure already exists in several tables, each carrying a
+different set of dimensions — the same headcount in one table broken out by organization and in
+another by location, say. You do **not** model that as several metrics, or as a metric over a union.
+Define the metric once over whichever table you treat as canonical, then register the others:
+
+```yaml
+# headcount.yaml
+name: headcount
+node_type: metric
+query: SELECT SUM(is_active) FROM fct_worker_day
+
+# headcount_by_org.yaml
+kind: preagg
+name: headcount_by_org
+catalog: warehouse
+schema: agg
+table: worker_day_by_org
+metrics:
+  headcount: active_sum
+dimensions:
+  date_dim.day: day
+  org_dim.org_id: org_id
+
+# headcount_by_location.yaml
+kind: preagg
+name: headcount_by_location
+catalog: warehouse
+schema: agg
+table: worker_day_by_location
+metrics:
+  headcount: active_sum
+dimensions:
+  date_dim.day: day
+  location_dim.country: country
+```
+
+Callers keep asking for `headcount`. A request grouped by `org_id` routes to the first table, one
+grouped by `country` routes to the second, and one grouped by `day` alone takes whichever has the
+smaller grain.
+
+Two limits are worth being explicit about, because both look like the feature is broken:
+
+- **Coverage is per-table.** A request spanning `org_id` *and* `country` matches neither
+  registration, and DJ falls back to building from the metric's own parent. Pre-aggregations are
+  candidates evaluated independently; DJ does not union or join two of them to cover one request.
+- **The measure has to be the same measure.** Matching is on the expression and aggregation derived
+  from the metric's own definition, so each registered column must hold that measure at that table's
+  grain. If the tables disagree about what they count, they are different metrics and registering
+  them here would silently return one table's answer under the other's name.
 
 ### The core modeling rule: only measures can be mapped
 
