@@ -212,7 +212,16 @@ Callers keep asking for `headcount`. A request grouped by `org_id` routes to the
 grouped by `country` routes to the second, and one grouped by `day` alone takes whichever has the
 smaller grain.
 
-Two limits are worth being explicit about, because both look like the feature is broken:
+Which table you make canonical is forced rather than chosen. Dimensions are resolved against the
+**metric's** parent, not against the table being registered, and registration runs that resolution — so
+naming a dimension the canonical node can't join to fails with `Cannot find join path`, even though the
+external table plainly has the column. The canonical node therefore has to reach the *union* of every
+dimension you intend to register, which usually means consolidating dimension links onto it. It is also
+the fallback for every uncovered request, and it defines the metric's value: registration verifies that
+the declared columns exist and typecheck, but never that two tables agree on a population, so a sibling
+covering a narrower population returns a different number under the same name.
+
+Two further limits are worth being explicit about, because both look like the feature is broken:
 
 - **Coverage is per-table.** A request spanning `org_id` *and* `country` matches neither
   registration, and DJ falls back to building from the metric's own parent. Pre-aggregations are
