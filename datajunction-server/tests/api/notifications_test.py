@@ -5,10 +5,14 @@ from unittest import mock
 
 import pytest
 from httpx import AsyncClient
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from datajunction_server.api.notifications import get_notifier
 from datajunction_server.database.history import History
+from datajunction_server.database.notification_preference import NotificationPreference
+from datajunction_server.database.user import OAuthProvider, PrincipalKind, User
 from datajunction_server.internal.history import ActivityType, EntityType
+from datajunction_server.utils import get_current_user
 
 
 class TestNotification(unittest.TestCase):
@@ -201,6 +205,94 @@ async def test_notification_list_users(
     assert response.status_code == 200
     assert len(response.json()) > 0
     assert response.json()[0] == "dj"
+
+
+@pytest.mark.asyncio
+async def test_service_account_cannot_subscribe(
+    module__client: AsyncClient,
+    module__session: AsyncSession,
+) -> None:
+    """
+    Test that a service account gets no notification preference.
+    """
+    service_account = User(
+        username="data.project.materialization",
+        oauth_provider=OAuthProvider.BASIC,
+        kind=PrincipalKind.SERVICE_ACCOUNT,
+    )
+    module__session.add(service_account)
+    await module__session.commit()
+
+    module__client.app.dependency_overrides[get_current_user] = lambda: service_account
+    try:
+        response = await module__client.post(
+            "/notifications/subscribe",
+            json={
+                "entity_name": "some_node_name5",
+                "entity_type": EntityType.NODE,
+                "activity_types": [ActivityType.REFRESH],
+                "alert_types": ["slack"],
+            },
+        )
+    finally:
+        del module__client.app.dependency_overrides[get_current_user]
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "message": "Only users can subscribe to notifications",
+    }
+
+    response = await module__client.get(
+        "/notifications/users",
+        params={"entity_name": "some_node_name5", "entity_type": EntityType.NODE},
+    )
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+@pytest.mark.asyncio
+async def test_service_account_left_out_of_users(
+    module__client: AsyncClient,
+    module__session: AsyncSession,
+) -> None:
+    """
+    Test that an existing service account preference is left out.
+    """
+    service_account = User(
+        username="bdpscheduledjob",
+        oauth_provider=OAuthProvider.BASIC,
+        kind=PrincipalKind.SERVICE_ACCOUNT,
+    )
+    module__session.add(service_account)
+    await module__session.commit()
+    module__session.add(
+        NotificationPreference(
+            user_id=service_account.id,
+            entity_type=EntityType.NODE,
+            entity_name="some_node_name6",
+            activity_types=[ActivityType.REFRESH],
+            alert_types=["slack"],
+        ),
+    )
+    await module__session.commit()
+
+    response = await module__client.post(
+        "/notifications/subscribe",
+        json={
+            "entity_name": "some_node_name6",
+            "entity_type": EntityType.NODE,
+            "activity_types": [ActivityType.REFRESH],
+            "alert_types": ["slack"],
+        },
+    )
+    assert response.status_code == 201
+
+    response = await module__client.get(
+        "/notifications/users",
+        params={"entity_name": "some_node_name6", "entity_type": EntityType.NODE},
+    )
+    assert response.status_code == 200
+    assert response.json() == ["dj"]
 
 
 @pytest.mark.asyncio

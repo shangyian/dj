@@ -14,7 +14,7 @@ from sqlalchemy.future import select
 
 from datajunction_server.database.history import History
 from datajunction_server.database.notification_preference import NotificationPreference
-from datajunction_server.database.user import User
+from datajunction_server.database.user import PrincipalKind, User
 from datajunction_server.errors import DJDoesNotExistException
 from datajunction_server.internal.access.authentication.http import SecureAPIRouter
 from datajunction_server.internal.history import ActivityType, EntityType
@@ -54,6 +54,12 @@ async def subscribe(
     Subscribes to notifications by upserting a notification preference.
     If one exists, update it. Otherwise, create a new one.
     """
+    if current_user.kind != PrincipalKind.USER:
+        return JSONResponse(
+            status_code=200,
+            content={"message": "Only users can subscribe to notifications"},
+        )
+
     stmt = (
         insert(NotificationPreference)
         .values(
