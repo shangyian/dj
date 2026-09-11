@@ -7,10 +7,32 @@ import { useContext } from 'react';
 import { displayMessageAfterSubmit } from '../../utils/form';
 import Tooltip from './Tooltip';
 
-export default function NodeListActions({ nodeName, iconSize = 20 }) {
+export default function NodeListActions({ nodeName, nodeType, iconSize = 20 }) {
   const [deleted, setDeleted] = React.useState(false);
+  const [dependents, setDependents] = React.useState([]);
 
   const djClient = useContext(DJClientContext).DataJunctionAPI;
+
+  // A source node cannot be deleted while other nodes depend on it
+  React.useEffect(() => {
+    if (String(nodeType).toLowerCase() !== 'source') {
+      return undefined;
+    }
+    let current = true;
+    djClient.downstreams(nodeName).then(downstreams => {
+      if (current) {
+        setDependents(Array.isArray(downstreams) ? downstreams : []);
+      }
+    });
+    return () => {
+      current = false;
+    };
+  }, [djClient, nodeName, nodeType]);
+
+  const deleteBlockedReason = dependents.length
+    ? `${dependents.length} node(s) depend on this source`
+    : null;
+
   const deleteNode = async (values, { setStatus }) => {
     if (
       !window.confirm('Deleting node ' + values.nodeName + '. Are you sure?')
@@ -58,15 +80,18 @@ export default function NodeListActions({ nodeName, iconSize = 20 }) {
               {displayMessageAfterSubmit(status)}
               {
                 <>
-                  <Tooltip content="Delete node">
+                  <Tooltip content={deleteBlockedReason ?? 'Delete node'}>
                     <button
                       type="submit"
                       aria-label={`Delete ${nodeName}`}
+                      disabled={deleteBlockedReason !== null}
+                      title={deleteBlockedReason ?? undefined}
                       style={{
                         marginLeft: 0,
                         all: 'unset',
                         color: '#005c72',
-                        cursor: 'pointer',
+                        cursor: deleteBlockedReason ? 'default' : 'pointer',
+                        opacity: deleteBlockedReason ? 0.4 : 1,
                       }}
                     >
                       <DeleteIcon size={iconSize} />

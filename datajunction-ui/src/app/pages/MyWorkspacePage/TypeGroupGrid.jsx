@@ -155,7 +155,7 @@ function TypeCard({ type, nodes, hasMore, username, activeTab }) {
                 </span>
               )}
               <div className="type-group-node-actions">
-                <NodeListActions nodeName={node.name} />
+                <NodeListActions nodeName={node.name} nodeType={node.type} />
               </div>
             </div>
           );

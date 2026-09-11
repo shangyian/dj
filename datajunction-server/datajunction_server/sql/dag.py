@@ -20,6 +20,7 @@ from sqlalchemy.sql.operators import is_
 from datajunction_server.database.attributetype import ColumnAttribute
 from datajunction_server.database.column import Column
 from datajunction_server.database.dimensionlink import DimensionLink
+from datajunction_server.database.hierarchy import Hierarchy, HierarchyLevel
 from datajunction_server.database.node import (
     CubeRelationship,
     Node,
@@ -1881,3 +1882,107 @@ async def get_dimension_outbound_bfs(
         edges,
         key=lambda e: (e.source, e.target),
     )
+
+
+async def get_nodes_referencing(
+    session: AsyncSession,
+    node_names: set[str],
+    include_deactivated: bool = True,
+) -> dict[str, list[str]]:
+    """
+    Find the nodes that reference the given nodes, via parent relationships,
+    dimension links or hierarchy levels. References from within ``node_names``
+    are ignored. Returns a dict mapping each referenced node name to the names
+    of the nodes referencing it. An empty dict means nothing references them.
+    Deactivated nodes can be left out of the references.
+    """
+    if not node_names:
+        return {}
+
+    # Map of referenced node to a list of nodes that reference it
+    references: dict[str, list[str]] = {}
+
+    # Query just IDs and names of the given nodes (more efficient than loading full objects)
+    stmt = select(Node.id, Node.name).where(Node.name.in_(list(node_names)))
+    result = await session.execute(stmt)
+    id_to_name = {node_id: node_name for node_id, node_name in result}
+    referenced_node_ids = set(id_to_name.keys())
+    if not referenced_node_ids:
+        return {}  # None of the nodes exist
+
+    # Find nodes that have any of the given nodes as parents
+    # NodeRelationship: parent_id -> Node.id, child_id -> NodeRevision.id
+    # We need to find NodeRevisions that depend on the given nodes, then get their Node
+    stmt = (
+        select(NodeRevision, NodeRelationship)
+        .join(
+            NodeRelationship,
+            NodeRevision.id == NodeRelationship.child_id,
+        )
+        .options(joinedload(NodeRevision.node).joinedload(Node.current))
+        .where(NodeRelationship.parent_id.in_(referenced_node_ids))
+    )
+    result = await session.execute(stmt)
+    for child_revision, relationship in result:
+        # Get the node that owns this revision
+        child_node = child_revision.node
+        # Only count if this is the current revision of the node
+        if child_node.current != child_revision:
+            continue  # pragma: no cover
+        if child_node.name in node_names:
+            continue
+        if not include_deactivated and child_node.deactivated_at is not None:
+            continue
+        # Get the parent node name from id_to_name mapping
+        parent_name = id_to_name.get(relationship.parent_id)
+        if parent_name:  # pragma: no branch
+            references.setdefault(parent_name, []).append(child_node.name)
+
+    # Find dimension links that reference any of the given nodes
+    # DimensionLink: node_revision_id -> NodeRevision.id, dimension_id -> Node.id
+    stmt = (
+        select(NodeRevision, DimensionLink)
+        .join(
+            DimensionLink,
+            NodeRevision.id == DimensionLink.node_revision_id,
+        )
+        .options(joinedload(NodeRevision.node).joinedload(Node.current))
+        .where(DimensionLink.dimension_id.in_(referenced_node_ids))
+    )
+    result = await session.execute(stmt)
+    for node_revision, link in result:
+        # Get the node that owns this revision
+        node = node_revision.node
+        # Only count if this is the current revision of the node
+        if node.current != node_revision:
+            continue  # pragma: no cover
+        if node.name in node_names:
+            continue  # pragma: no cover
+        if not include_deactivated and node.deactivated_at is not None:
+            continue  # pragma: no cover
+        # Get the dimension node name from id_to_name mapping
+        dim_name = id_to_name.get(link.dimension_id)
+        if dim_name:  # pragma: no branch
+            references.setdefault(dim_name, []).append(
+                f"{node.name} (dimension link)",
+            )
+
+    # Find hierarchy levels that reference any of the given nodes.
+    # HierarchyLevel.dimension_node_id -> Node.id has no ON DELETE CASCADE, so
+    # a dimension still referenced by a hierarchy level cannot be hard-deleted
+    # (the bulk delete would hit a ForeignKeyViolation). Treat it as a
+    # reference that blocks deletion, like NodeRelationship / DimensionLink.
+    stmt = (
+        select(HierarchyLevel.dimension_node_id, Hierarchy.name)
+        .join(Hierarchy, HierarchyLevel.hierarchy_id == Hierarchy.id)
+        .where(HierarchyLevel.dimension_node_id.in_(referenced_node_ids))
+    )
+    result = await session.execute(stmt)
+    for dimension_node_id, hierarchy_name in result:
+        dim_name = id_to_name.get(dimension_node_id)
+        if dim_name:  # pragma: no branch
+            references.setdefault(dim_name, []).append(
+                f"{hierarchy_name} (hierarchy)",
+            )
+
+    return references

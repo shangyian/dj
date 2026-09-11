@@ -607,9 +607,38 @@ class TestNodeCRUD:
         """
         Test deleting a node
         """
-        # Delete a node
+        # A source node with dependents cannot be deleted
+        response = await client_with_basic.delete("/nodes/basic.source.users/")
+        assert response.status_code == 409
+        assert response.json() == {
+            "message": (
+                "Cannot delete source node `basic.source.users` because other nodes "
+                "depend on it: `basic.dimension.countries`, `basic.dimension.users`, "
+                "`basic.transform.country_agg`. Delete or repoint them first."
+            ),
+            "errors": [],
+            "warnings": [],
+        }
+
+        # Delete its dependents, then the source node
+        for dependent in (
+            "basic.num_users",
+            "basic.dimension.users",
+            "basic.dimension.countries",
+            "basic.transform.country_agg",
+        ):
+            response = await client_with_basic.delete(f"/nodes/{dependent}/")
+            assert response.status_code == 200
         response = await client_with_basic.delete("/nodes/basic.source.users/")
         assert response.status_code == 200
+        # Restore the dependents so that recreating the source propagates to them
+        for dependent in (
+            "basic.dimension.users",
+            "basic.dimension.countries",
+            "basic.transform.country_agg",
+        ):
+            response = await client_with_basic.post(f"/nodes/{dependent}/restore/")
+            assert response.status_code in (200, 201)
         # Check that then retrieving the node returns an error
         response = await client_with_basic.get("/nodes/basic.source.users/")
         assert response.status_code >= 400
@@ -618,30 +647,6 @@ class TestNodeCRUD:
             "errors": [],
             "warnings": [],
         }
-        # All downstream nodes should be invalid
-        expected_downstreams = [
-            "basic.dimension.users",
-            "basic.transform.country_agg",
-            "basic.dimension.countries",
-            "basic.num_users",
-        ]
-        for downstream in expected_downstreams:
-            response = await client_with_basic.get(f"/nodes/{downstream}/")
-            assert response.json()["status"] == NodeStatus.INVALID
-
-            # The downstreams' status change should be recorded in their histories
-            response = await client_with_basic.get(f"/history?node={downstream}")
-            assert [
-                (activity["pre"], activity["post"], activity["details"])
-                for activity in response.json()
-                if activity["activity_type"] == "status_change"
-            ] == [
-                (
-                    {"status": "valid"},
-                    {"status": "invalid"},
-                    {"upstream_node": "basic.source.users"},
-                ),
-            ]
 
         # Trying to create the node again should work.
         response = await client_with_basic.post(
@@ -740,9 +745,9 @@ class TestNodeCRUD:
         )
 
         # And the same on a node that was already deleted.
-        response = await client_with_basic.delete("/nodes/basic.source.users/")
+        response = await client_with_basic.delete("/nodes/basic.num_users/")
         assert response.status_code == 200
-        response = await client_with_basic.delete("/nodes/basic.source.users/")
+        response = await client_with_basic.delete("/nodes/basic.num_users/")
         assert response.status_code == 404
 
     @pytest.mark.asyncio
@@ -751,7 +756,7 @@ class TestNodeCRUD:
         client: AsyncClient,
     ):
         """
-        Test deleting a source that's upstream from a metric.
+        Test that deleting a source that's upstream from a metric is refused.
         NOTE: Uses unique namespace to avoid conflicts with template database.
         """
         response = await client.post("/catalogs/", json={"name": "warehouse"})
@@ -791,25 +796,23 @@ class TestNodeCRUD:
             },
         )
         assert response.status_code in (200, 201)
-        # Delete the source node
+        # Deleting the source node is refused while the metric depends on it
         response = await client.delete("/nodes/testdelsrc.users/")
-        assert response.status_code in (200, 201)
-        # The downstream metric should have an invalid status
-        assert (await client.get("/nodes/testdelsrc.num_users/")).json()[
-            "status"
-        ] == NodeStatus.INVALID
-        response = await client.get("/history?node=testdelsrc.num_users")
-        assert [
-            (activity["pre"], activity["post"], activity["details"])
-            for activity in response.json()
-            if activity["activity_type"] == "status_change"
-        ] == [
-            (
-                {"status": "valid"},
-                {"status": "invalid"},
-                {"upstream_node": "testdelsrc.users"},
+        assert response.status_code == 409
+        assert response.json() == {
+            "message": (
+                "Cannot delete source node `testdelsrc.users` because other nodes "
+                "depend on it: `testdelsrc.num_users`. Delete or repoint them first."
             ),
-        ]
+            "errors": [],
+            "warnings": [],
+        }
+
+        # Once the metric is gone, the source node can be deleted
+        response = await client.delete("/nodes/testdelsrc.num_users/")
+        assert response.status_code == 200
+        response = await client.delete("/nodes/testdelsrc.users/")
+        assert response.status_code == 200
 
         # Restore the source node
         response = await client.post("/nodes/testdelsrc.users/restore/")
@@ -817,27 +820,60 @@ class TestNodeCRUD:
         # Retrieving the restored node should work
         response = await client.get("/nodes/testdelsrc.users/")
         assert response.status_code in (200, 201)
-        # The downstream metric should have been changed to valid
-        response = await client.get("/nodes/testdelsrc.num_users/")
-        assert response.json()["status"] == NodeStatus.VALID
-        # Check activity history of downstream metric
-        response = await client.get("/history?node=testdelsrc.num_users")
-        assert [
-            (activity["pre"], activity["post"], activity["details"])
-            for activity in response.json()
-            if activity["activity_type"] == "status_change"
-        ] == [
-            (
-                {"status": "invalid"},
-                {"status": "valid"},
-                {"upstream_node": "testdelsrc.users"},
+
+    @pytest.mark.asyncio
+    async def test_deleting_source_with_many_dependents(
+        self,
+        client: AsyncClient,
+    ):
+        """
+        Test that a blocked delete only names the first few dependents.
+        NOTE: Uses unique namespace to avoid conflicts with template database.
+        """
+        response = await client.post("/catalogs/", json={"name": "warehouse"})
+        assert response.status_code in (200, 201, 409)  # May already exist in template
+        response = await client.post("/namespaces/testdelmany/")
+        assert response.status_code in (200, 201, 409)  # May already exist in template
+        response = await client.post(
+            "/nodes/source/",
+            json={
+                "name": "testdelmany.users",
+                "description": "A user table",
+                "columns": [{"name": "id", "type": "int"}],
+                "mode": "published",
+                "catalog": "warehouse",
+                "schema_": "db",
+                "table": "users",
+            },
+        )
+        assert response.status_code in (200, 201)
+        for idx in range(12):
+            response = await client.post(
+                "/nodes/transform/",
+                json={
+                    "name": f"testdelmany.users_{idx:02}",
+                    "description": "Users",
+                    "query": "SELECT id FROM testdelmany.users",
+                    "mode": "published",
+                },
+            )
+            assert response.status_code in (200, 201)
+
+        response = await client.delete("/nodes/testdelmany.users/")
+        assert response.status_code == 409
+        assert response.json() == {
+            "message": (
+                "Cannot delete source node `testdelmany.users` because other nodes "
+                "depend on it: `testdelmany.users_00`, `testdelmany.users_01`, "
+                "`testdelmany.users_02`, `testdelmany.users_03`, "
+                "`testdelmany.users_04`, `testdelmany.users_05`, "
+                "`testdelmany.users_06`, `testdelmany.users_07`, "
+                "`testdelmany.users_08`, `testdelmany.users_09` and 2 more. "
+                "Delete or repoint them first."
             ),
-            (
-                {"status": "valid"},
-                {"status": "invalid"},
-                {"upstream_node": "testdelsrc.users"},
-            ),
-        ]
+            "errors": [],
+            "warnings": [],
+        }
 
     @pytest.mark.asyncio
     async def test_deleting_transform_upstream_from_metric(
@@ -1580,8 +1616,10 @@ class TestNodeCRUD:
         response = await client_with_roads.get("/nodes/default.repair_order")
         assert response.json()["version"] == "v3.0"
 
-        # Hard delete all nodes and verify after each delete
+        # Hard delete all nodes and verify after each delete. Sources go last,
+        # since a source cannot be deleted while other nodes depend on it.
         default_nodes = (await client_with_roads.get("/namespaces/default/")).json()
+        default_nodes.sort(key=lambda node: node["type"] == "source")
         for node_name in default_nodes:
             await self.verify_complete_hard_delete(
                 session,
@@ -1620,8 +1658,24 @@ class TestNodeCRUD:
         """
         Test raising when restoring an already active node
         """
-        # Hard deleting a source node causes downstream nodes to become invalid
+        # Hard deleting a source node with dependents is refused
         response = await client_with_roads.delete("/nodes/default.repair_orders/hard/")
+        assert response.status_code == 409
+        assert response.json() == {
+            "message": (
+                "Cannot delete source node `default.repair_orders` because other "
+                "nodes depend on it: `default.regional_level_agg`, "
+                "`default.repair_order`, `default.repair_orders_fact`. "
+                "Delete or repoint them first."
+            ),
+            "errors": [],
+            "warnings": [],
+        }
+
+        # Hard deleting a transform causes downstream nodes to become invalid
+        response = await client_with_roads.delete(
+            "/nodes/default.repair_orders_fact/hard/",
+        )
         assert response.status_code in (200, 201)
         data = response.json()
         data["impact"] = sorted(data["impact"], key=lambda x: x["name"])
@@ -1659,26 +1713,6 @@ class TestNodeCRUD:
                 },
                 {
                     "effect": "downstream node is now invalid",
-                    "name": "default.regional_level_agg",
-                    "status": "invalid",
-                },
-                {
-                    "effect": "downstream node is now invalid",
-                    "name": "default.regional_repair_efficiency",
-                    "status": "invalid",
-                },
-                {
-                    "effect": "downstream node is now invalid",
-                    "name": "default.repair_order",
-                    "status": "invalid",
-                },
-                {
-                    "effect": "downstream node is now invalid",
-                    "name": "default.repair_orders_fact",
-                    "status": "invalid",
-                },
-                {
-                    "effect": "downstream node is now invalid",
                     "name": "default.total_repair_cost",
                     "status": "invalid",
                 },
@@ -1688,7 +1722,7 @@ class TestNodeCRUD:
                     "status": "invalid",
                 },
             ],
-            "message": "The node `default.repair_orders` has been completely removed.",
+            "message": "The node `default.repair_orders_fact` has been completely removed.",
         }
 
         # Hard deleting a dimension creates broken links
@@ -1700,6 +1734,11 @@ class TestNodeCRUD:
                 {
                     "effect": "broken link",
                     "name": "default.repair_order_details",
+                    "status": "valid",
+                },
+                {
+                    "effect": "broken link",
+                    "name": "default.repair_orders",
                     "status": "valid",
                 },
             ],
@@ -7835,37 +7874,33 @@ async def test_delete_recreate_for_all_nodes(client_with_roads: AsyncClient):
     """
     Test deleting and recreating for all node types
     """
-    # Delete a source node
-    await client_with_roads.delete("/nodes/default.dispatchers")
+    # Delete a source node that nothing depends on
+    source_payload = {
+        "columns": [
+            {"name": "dispatcher_id", "type": "int"},
+            {"name": "company_name", "type": "string"},
+            {"name": "phone", "type": "string"},
+        ],
+        "description": "Information on dispatchers",
+        "mode": "published",
+        "name": "default.more_dispatchers",
+        "catalog": "default",
+        "schema_": "roads",
+        "table": "more_dispatchers",
+    }
+    response = await client_with_roads.post("/nodes/source", json=source_payload)
+    assert response.status_code in (200, 201)
+    await client_with_roads.delete("/nodes/default.more_dispatchers")
     # Recreating it should succeed
-    response = await client_with_roads.post(
-        "/nodes/source",
-        json={
-            "columns": [
-                {"name": "dispatcher_id", "type": "int"},
-                {"name": "company_name", "type": "string"},
-                {"name": "phone", "type": "string"},
-            ],
-            "description": "Information on dispatchers",
-            "mode": "published",
-            "name": "default.dispatchers",
-            "catalog": "default",
-            "schema_": "roads",
-            "table": "dispatchers",
-        },
-    )
+    response = await client_with_roads.post("/nodes/source", json=source_payload)
     assert response.json()["version"] == "v2.0"
-    response = await client_with_roads.get("/history?node=default.dispatchers")
+    response = await client_with_roads.get("/history?node=default.more_dispatchers")
     assert [activity["activity_type"] for activity in response.json()] == [
         "restore",
         "update",
         "delete",
         "create",
     ]
-    await client_with_roads.patch(
-        "/nodes/default.dispatcher",
-        json={"primary_key": ["dispatcher_id"]},
-    )
 
     # Delete a dimension node
     await client_with_roads.delete("/nodes/default.us_state")

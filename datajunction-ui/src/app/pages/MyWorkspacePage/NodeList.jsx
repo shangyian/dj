@@ -36,7 +36,7 @@ export function NodeList({ nodes, showUpdatedAt }) {
               </span>
             )}
             <div className="node-list-item-actions-wrapper">
-              <NodeListActions nodeName={node.name} />
+              <NodeListActions nodeName={node.name} nodeType={node.type} />
             </div>
           </div>
         </div>

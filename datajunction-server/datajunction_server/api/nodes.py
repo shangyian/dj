@@ -124,6 +124,7 @@ from datajunction_server.sql.dag import (
     get_dimensions,
     get_downstream_nodes,
     get_filter_only_dimensions,
+    get_nodes_referencing,
     get_upstream_nodes,
 )
 from datajunction_server.sql.parsing.backends.antlr4 import parse
@@ -390,6 +391,41 @@ async def get_node(
     return output
 
 
+# Cap on how many dependents a blocked delete names in its error message
+MAX_REPORTED_DEPENDENTS = 10
+
+
+async def check_source_has_no_dependents(session: AsyncSession, name: str) -> None:
+    """
+    Refuse to delete a source node that other nodes still depend on.
+    """
+    node = await Node.get_by_name(session, name)
+    if node is None or node.type != NodeType.SOURCE:
+        return
+
+    referencing = await get_nodes_referencing(
+        session,
+        {name},
+        include_deactivated=False,
+    )
+    dependents = sorted(referencing.get(name, []))
+    if not dependents:
+        return
+
+    listed = ", ".join(
+        f"`{dependent}`" for dependent in dependents[:MAX_REPORTED_DEPENDENTS]
+    )
+    if len(dependents) > MAX_REPORTED_DEPENDENTS:
+        listed += f" and {len(dependents) - MAX_REPORTED_DEPENDENTS} more"
+    raise DJInvalidInputException(
+        message=(
+            f"Cannot delete source node `{name}` because other nodes depend on it: "
+            f"{listed}. Delete or repoint them first."
+        ),
+        http_status_code=HTTPStatus.CONFLICT,
+    )
+
+
 @router.delete("/nodes/{name}/")
 async def delete_node(
     name: str,
@@ -409,6 +445,7 @@ async def delete_node(
     await access_checker.check(on_denied=AccessDenialMode.RAISE)
     namespace = name.rsplit(".", 1)[0]
     await check_namespace_not_git_only(session, namespace)
+    await check_source_has_no_dependents(session, name)
 
     await deactivate_node(
         session=session,
@@ -443,6 +480,7 @@ async def hard_delete(
     await access_checker.check(on_denied=AccessDenialMode.RAISE)
     namespace = name.rsplit(".", 1)[0]
     await check_namespace_not_git_only(session, namespace)
+    await check_source_has_no_dependents(session, name)
 
     result = await hard_delete_node(
         name=name,

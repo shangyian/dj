@@ -869,7 +869,7 @@ export function NamespacePage() {
             </td>
             {showEditControls && (
               <td style={MIDDLE_CELL_STYLE}>
-                <NodeListActions nodeName={node?.name} />
+                <NodeListActions nodeName={node?.name} nodeType={node?.type} />
               </td>
             )}
           </tr>

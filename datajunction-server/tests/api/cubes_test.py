@@ -2278,14 +2278,16 @@ async def test_changing_node_upstream_from_cube(
     # Verify effects on cube after deactivating a node upstream from the cube
     await client_with_repairs_cube.request(
         "DELETE",
-        "/nodes/default.repair_orders__one/",
+        "/nodes/default.repair_order_dim__one/",
     )
     response = await client_with_repairs_cube.get("/nodes/default.repairs_cube_1/")
     data = response.json()
     assert data["status"] == "invalid"
 
     # Verify effects on cube after restoring a node upstream from the cube
-    await client_with_repairs_cube.post("/nodes/default.repair_orders__one/restore/")
+    await client_with_repairs_cube.post(
+        "/nodes/default.repair_order_dim__one/restore/",
+    )
     response = await client_with_repairs_cube.get("/nodes/default.repairs_cube_1/")
     data = response.json()
     assert data["status"] == "valid"
