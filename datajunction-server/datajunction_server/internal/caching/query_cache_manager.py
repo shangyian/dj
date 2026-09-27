@@ -48,10 +48,20 @@ settings = get_settings()
 # Per-process state for rate-limited refresh-ahead.
 # _pending_refresh_keys: deduplicates — if a refresh is already queued for a key,
 #   don't schedule another one (prevents N redundant rebuilds for the same query).
+# _last_refresh_monotonic: when each key last finished refreshing, so a hit can
+#   decline to schedule one. Both are per process, so the fleet-wide refresh rate
+#   is these limits times the number of server processes.
 # _refresh_semaphore: caps total concurrent refreshes across all keys to prevent
 #   DB connection spikes when many different cache entries need refreshing.
 _pending_refresh_keys: set[str] = set()
+_last_refresh_monotonic: dict[str, float] = {}
 _refresh_semaphore: asyncio.Semaphore | None = None
+
+# Bound on _last_refresh_monotonic. The timestamps only suppress refreshes, so
+# dropping them is safe — the next hit refreshes rather than skipping. Cleared
+# wholesale instead of evicting the oldest: finding those costs a sort of the
+# whole dict, and over-refreshing once beats paying that on a hot path.
+_MAX_TRACKED_REFRESH_KEYS = 100_000
 
 
 def _get_refresh_semaphore() -> asyncio.Semaphore:
@@ -61,6 +71,30 @@ def _get_refresh_semaphore() -> asyncio.Semaphore:
             settings.query_cache_max_concurrent_refreshes,
         )
     return _refresh_semaphore
+
+
+def _refresh_is_due(key: str) -> bool:
+    """
+    Whether enough time has passed since this key last refreshed.
+
+    Refresh-ahead is triggered by a cache hit, so this is what stops a client
+    polling a small set of keys from holding every process in a continuous
+    rebuild: without it a key is re-armed as soon as its previous refresh
+    finishes, and the refresh rate is set by rebuild latency rather than by
+    staleness.
+    """
+    interval = settings.query_cache_min_refresh_interval
+    if interval <= 0:
+        return True
+    last = _last_refresh_monotonic.get(key)
+    return last is None or (time.monotonic() - last) >= interval
+
+
+def _record_refresh(key: str) -> None:
+    """Note that `key` has just been refreshed."""
+    if len(_last_refresh_monotonic) >= _MAX_TRACKED_REFRESH_KEYS:
+        _last_refresh_monotonic.clear()
+    _last_refresh_monotonic[key] = time.monotonic()
 
 
 @dataclass
@@ -149,7 +183,11 @@ class QueryCacheManager(
         if not no_cache:
             try:
                 if cached := self.cache.get(key):
-                    if not no_store and key not in _pending_refresh_keys:
+                    if (
+                        not no_store
+                        and key not in _pending_refresh_keys
+                        and _refresh_is_due(key)
+                    ):
                         _pending_refresh_keys.add(key)
                         get_metrics_provider().gauge(
                             "dj.cache.refresh.pending",
@@ -340,14 +378,21 @@ class QueryCacheManager(
         Waits to acquire a process-wide semaphore before rebuilding, capping the
         number of simultaneous SQL rebuilds (and thus DB sessions) to
         settings.query_cache_max_concurrent_refreshes.  The deduplication key is
-        removed from _pending_refresh_keys in the finally block so the next cache
-        hit can schedule a new refresh once this one finishes.
+        removed from _pending_refresh_keys in the finally block so a later cache
+        hit can schedule a new refresh, subject to
+        settings.query_cache_min_refresh_interval.
+
+        The refresh is recorded whether or not it succeeded. A rebuild that keeps
+        failing would otherwise be retried by every hit, which is the load pattern
+        the interval exists to prevent, and hardest on a database that is already
+        the reason it failed.
         """
         semaphore = _get_refresh_semaphore()
         async with semaphore:
             try:
                 await self._timed_refresh(key, request, params)
             finally:
+                _record_refresh(key)
                 _pending_refresh_keys.discard(key)
                 get_metrics_provider().gauge(
                     "dj.cache.refresh.pending",

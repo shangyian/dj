@@ -333,3 +333,62 @@ async def test_cache_backend_error_falls_back_to_fresh_value():
 
         assert result == [{"sql": "FRESH"}]
         broken_cache.get.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    ("interval", "last_refresh", "now", "expected"),
+    [
+        (60, None, 1000.0, True),  # never refreshed
+        (60, 1000.0, 1030.0, False),  # inside the interval
+        (60, 1000.0, 1060.0, True),  # exactly at the interval
+        (60, 1000.0, 9999.0, True),  # long past it
+        (0, 1000.0, 1000.0, True),  # interval disabled
+        (-1, 1000.0, 1000.0, True),  # negative treated as disabled
+    ],
+)
+def test_refresh_is_due(interval, last_refresh, now, expected):
+    """A hit only re-arms a refresh once the interval has elapsed."""
+    from datajunction_server.internal.caching import query_cache_manager as qcm
+
+    qcm._last_refresh_monotonic.clear()
+    if last_refresh is not None:
+        qcm._last_refresh_monotonic["k"] = last_refresh
+    with (
+        patch.object(qcm.settings, "query_cache_min_refresh_interval", interval),
+        patch.object(qcm.time, "monotonic", return_value=now),
+    ):
+        assert qcm._refresh_is_due("k") is expected
+
+
+def test_record_refresh_clears_at_cap():
+    """The timestamp map is bounded; dropping it over-refreshes rather than leaking."""
+    from datajunction_server.internal.caching import query_cache_manager as qcm
+
+    qcm._last_refresh_monotonic.clear()
+    with patch.object(qcm, "_MAX_TRACKED_REFRESH_KEYS", 2):
+        qcm._record_refresh("a")
+        qcm._record_refresh("b")
+        assert set(qcm._last_refresh_monotonic) == {"a", "b"}
+        qcm._record_refresh("c")
+        assert set(qcm._last_refresh_monotonic) == {"c"}
+    qcm._last_refresh_monotonic.clear()
+
+
+@pytest.mark.asyncio
+async def test_failed_refresh_is_still_recorded():
+    """A rebuild that keeps failing must not be retried by every hit."""
+    from datajunction_server.internal.caching import query_cache_manager as qcm
+
+    qcm._pending_refresh_keys.clear()
+    qcm._last_refresh_monotonic.clear()
+    manager = QueryCacheManager(CachelibCache(), QueryBuildType.MEASURES)
+    with patch.object(
+        manager,
+        "_timed_refresh",
+        side_effect=RuntimeError("boom"),
+    ):
+        with pytest.raises(RuntimeError):
+            await manager._refresh_cache_rate_limited("k", DummyRequest(), None)
+    assert "k" in qcm._last_refresh_monotonic
+    assert "k" not in qcm._pending_refresh_keys
+    qcm._last_refresh_monotonic.clear()

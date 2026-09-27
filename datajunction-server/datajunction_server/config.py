@@ -283,7 +283,17 @@ class Settings(BaseSettings):  # pragma: no cover
 
     # Maximum number of concurrent background cache refreshes.
     # Caps how many SQL rebuilds run simultaneously to avoid DB connection spikes.
+    # Per process, not per deployment: the effective fleet-wide concurrency is this
+    # times the number of server processes, so size it against instances x workers.
     query_cache_max_concurrent_refreshes: int = 3
+
+    # Shortest gap between two background refreshes of the same cache key.
+    # Refresh-ahead is triggered by a cache hit, so without a floor the refresh rate
+    # is set by how fast rebuilds finish rather than by how stale anything is: a key
+    # is re-armed the moment its previous refresh completes, and a client polling a
+    # small set of keys keeps every process rebuilding continuously. Set to 0 to
+    # refresh on every hit, which is the behavior this setting replaces.
+    query_cache_min_refresh_interval: int = 60
 
     # How many parsed node definitions to keep. Each entry retains its parser
     # and token stream, per worker process.
