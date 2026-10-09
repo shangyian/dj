@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 
 from datajunction_server.construction.build_v3.decomposition import decompose_metric
 from datajunction_server.construction.build_v3.dimensions import (
@@ -138,3 +138,50 @@ async def find_matching_source(
             ),
         )
     return min(candidates, key=lambda c: c[0])[1]
+
+
+class _SourceRevision:
+    """A metric revision reading another query."""
+
+    def __init__(self, revision: Any, query: str):
+        self._revision = revision
+        self.query = query
+
+    def __getattr__(self, name: str) -> Any:
+        if name.startswith("_"):
+            raise AttributeError(name)
+        return getattr(self._revision, name)
+
+
+class _SourceMetric:
+    """A metric node built on one source."""
+
+    def __init__(self, node: Node, query: str):
+        self._node = node
+        self.current = _SourceRevision(node.current, query)
+
+    def __getattr__(self, name: str) -> Any:
+        if name.startswith("_"):
+            raise AttributeError(name)
+        return getattr(self._node, name)
+
+
+async def route_metric_sources(ctx: BuildContext) -> None:
+    """Build each multi-source metric on its best source."""
+    for name in ctx.source_metrics:
+        metric = ctx.nodes[name]
+        match = await find_matching_source(ctx, metric, ctx.dimensions, set())
+        if not match.ordinal:
+            continue
+        query = next(
+            source.query
+            for source in metric.current.additional_sources  # type: ignore[union-attr]
+            if source.ordinal == match.ordinal
+        )
+        replaced = ctx.get_parent_node(metric).name
+        parents = [
+            match.parent_node.name if parent == replaced else parent
+            for parent in ctx.parent_map[name]
+        ]
+        ctx.routed_metrics[name] = (cast("Node", _SourceMetric(metric, query)), parents)
+    ctx.apply_routes()

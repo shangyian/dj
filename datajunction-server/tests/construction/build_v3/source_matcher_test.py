@@ -4,6 +4,7 @@ import pytest
 
 from datajunction_server.construction.build_v3.source_matcher import (
     SourceMatch,
+    _SourceMetric,
     find_matching_source,
 )
 from datajunction_server.construction.build_v3.types import BuildContext
@@ -283,3 +284,17 @@ async def test_role_free_request_takes_any_role():
     swap_region_roles(ctx)
     match = await find_matching_source(ctx, metric, [f"{REGION}.name"], set())
     assert (match.parent_node, match.ordinal) == (ctx.nodes[REGIONAL], 1)
+
+
+def test_source_metric_reads_query():
+    node = make_node(1, METRIC, NodeType.METRIC, [], "SELECT SUM(a) FROM x")
+    metric = _SourceMetric(node, "SELECT SUM(a) FROM y")
+    assert (metric.name, metric.current.query, metric.current.version) == (
+        METRIC,
+        "SELECT SUM(a) FROM y",
+        "v1.0",
+    )
+    with pytest.raises(AttributeError):
+        metric._missing
+    with pytest.raises(AttributeError):
+        metric.current._missing

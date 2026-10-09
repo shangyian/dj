@@ -7,9 +7,10 @@ from __future__ import annotations
 import logging
 from collections import namedtuple
 
-from sqlalchemy import bindparam, select, text
+from sqlalchemy import Exists, Select, bindparam, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import joinedload, load_only, noload, selectinload
+from sqlalchemy.orm import aliased, joinedload, load_only, noload, selectinload
+from sqlalchemy.orm.attributes import set_committed_value
 
 from datajunction_server.construction.build_v3.dimensions import parse_dimension_ref
 from datajunction_server.construction.build_v3.preagg_freshness import preagg_is_fresh
@@ -19,6 +20,7 @@ from datajunction_server.construction.build_v3.utils import (
     iter_namespaced_columns,
 )
 from datajunction_server.database.dimensionlink import DimensionLink
+from datajunction_server.database.metricsource import MetricSource
 from datajunction_server.database.node import Column, Node, NodeRevision
 from datajunction_server.database.preaggregation import PreAggregation
 from datajunction_server.models.node_type import NodeType
@@ -69,7 +71,13 @@ async def batch_load_nodes_with_dependencies(
     single-node entrypoints like ``build_node_sql_v3`` that want the same
     eager-load shape without the metric-required scaffolding around it.
     """
-    stmt = (
+    result = await session.execute(_node_load_stmt(node_names))
+    return list(result.scalars().unique().all())
+
+
+def _node_load_stmt(node_names: set[str] | list[str]) -> Select:
+    """Select nodes with the v3 eager-load tree."""
+    return (
         select(Node)
         .where(Node.name.in_(node_names))
         .where(Node.deactivated_at.is_(None))
@@ -129,8 +137,55 @@ async def batch_load_nodes_with_dependencies(
             ),
         )
     )
-    result = await session.execute(stmt)
-    return list(result.scalars().unique().all())
+
+
+def _has_sources_column() -> Exists:
+    """Whether a node's current revision has sources."""
+    revision = aliased(NodeRevision)
+    return (
+        select(MetricSource.id)
+        .join(revision, MetricSource.node_revision_id == revision.id)
+        .where(
+            revision.node_id == Node.id,
+            revision.version == Node.current_version,
+        )
+        .exists()
+    )
+
+
+async def load_metric_sources(ctx: BuildContext) -> set[str]:
+    """Attach sources and load their parents."""
+    revisions = {
+        ctx.nodes[name].current.id: ctx.nodes[name].current  # type: ignore[union-attr]
+        for name in ctx.source_metrics
+    }
+    rows = (
+        await ctx.session.execute(
+            select(MetricSource, Node.name)
+            .outerjoin(Node, MetricSource.parent_node_id == Node.id)
+            .where(MetricSource.node_revision_id.in_(revisions))
+            .order_by(MetricSource.ordinal),
+        )
+    ).all()
+    sources: dict[int, list[MetricSource]] = {rev_id: [] for rev_id in revisions}
+    for source, _ in rows:
+        sources[source.node_revision_id].append(source)
+    parent_names = {parent_name for _, parent_name in rows} - {None}
+    for rev_id, revision in revisions.items():
+        set_committed_value(revision, "additional_sources", sources[rev_id])
+
+    missing = parent_names - ctx.nodes.keys()
+    if missing:
+        upstream, parent_map = await find_upstream_node_names(
+            ctx.session,
+            list(missing),
+        )
+        for child, parents in parent_map.items():
+            ctx.parent_map.setdefault(child, parents)
+        new_names = (upstream | missing) - ctx.nodes.keys()
+        for node in await batch_load_nodes_with_dependencies(ctx.session, new_names):
+            ctx.nodes[node.name] = node
+    return parent_names & ctx.nodes.keys()
 
 
 async def find_upstream_node_names(
@@ -477,11 +532,24 @@ async def load_nodes(ctx: BuildContext) -> None:
     all_node_names.update(initial_node_names)
 
     # Query 2: Batch load all nodes with appropriate eager loading
-    nodes = await batch_load_nodes_with_dependencies(ctx.session, all_node_names)
+    loaded = (
+        await ctx.session.execute(
+            _node_load_stmt(all_node_names).add_columns(_has_sources_column()),
+        )
+    ).unique()
 
     # Cache all loaded nodes
-    for node in nodes:
+    ctx.source_metrics = []
+    for node, has_sources in loaded:
         ctx.nodes[node.name] = node
+        if has_sources:
+            ctx.source_metrics.append(node.name)
+
+    source_parents: set[str] = set()
+    if ctx.source_metrics:
+        source_parents = await load_metric_sources(ctx)
+        all_node_names |= ctx.nodes.keys()
+    ctx.apply_routes()
 
     # Map column-level reference-dimension ids -> dimension node names. The
     # Column.dimension relationship doesn't reliably eager-load in this build,
@@ -570,6 +638,10 @@ async def load_nodes(ctx: BuildContext) -> None:
 
     for metric_name in ctx.metrics:
         collect_fact_parents(metric_name, set())
+    parent_revision_ids.update(
+        ctx.nodes[name].current.id  # type: ignore[union-attr]
+        for name in source_parents
+    )
 
     # Preload join paths for ALL parent nodes in a single batch
     await preload_join_paths(ctx, parent_revision_ids, target_dim_names)

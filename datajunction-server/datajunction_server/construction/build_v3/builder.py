@@ -40,6 +40,9 @@ from datajunction_server.construction.build_v3.metrics import (
     classify_filters,
     generate_metrics_sql,
 )
+from datajunction_server.construction.build_v3.source_matcher import (
+    route_metric_sources,
+)
 from datajunction_server.construction.build_v3.types import (
     BuildContext,
     GeneratedMeasuresSQL,
@@ -321,6 +324,8 @@ async def setup_build_context(
 
     if not ctx.metrics:
         return ctx
+
+    await route_metric_sources(ctx)
 
     # Decompose metrics and group by parent node
     ctx.metric_groups, ctx.decomposed_metrics = await decompose_and_group_metrics(ctx)

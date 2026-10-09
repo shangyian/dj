@@ -87,6 +87,12 @@ class BuildContext:
     # Column.dimension relationship (which doesn't reliably eager-load here).
     reference_dimension_names: dict[int, str] = field(default_factory=dict)
 
+    # Metrics declaring more than one query
+    source_metrics: list[str] = field(default_factory=list)
+
+    # Metric name -> (node on chosen source, parents)
+    routed_metrics: dict[str, tuple[Node, list[str]]] = field(default_factory=dict)
+
     # Table alias counter for generating unique aliases
     _table_alias_counter: int = field(default=0)
 
@@ -199,6 +205,13 @@ class BuildContext:
         query_ast = parse(node.current.query)
         self._parsed_query_cache[node.name] = query_ast
         return query_ast
+
+    def apply_routes(self) -> None:
+        """Swap in each metric's chosen source."""
+        for name, (node, parents) in self.routed_metrics.items():
+            self.nodes[name] = node
+            self.parent_map[name] = list(parents)
+            self._parsed_query_cache.pop(name, None)
 
     def get_parent_node(self, metric_node: Node) -> Node:
         """Get the parent node of a metric (the node it's defined on)."""
