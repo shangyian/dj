@@ -57,7 +57,9 @@ async def test_no_source_reaches_dimension(multi_source_client):
 @pytest.mark.asyncio
 async def test_unknown_column_first_source(multi_source_client):
     assert await check(
-        multi_source_client, "ms.total_amount", ["ms.customer.nope"],
+        multi_source_client,
+        "ms.total_amount",
+        ["ms.customer.nope"],
     ) == (
         200,
         {
