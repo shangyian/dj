@@ -35,8 +35,12 @@ def upgrade():
             sa.BigInteger().with_variant(sa.Integer(), "sqlite"),
             nullable=True,
         ),
-        sa.ForeignKeyConstraint(["node_revision_id"], ["noderevision.id"]),
-        sa.ForeignKeyConstraint(["parent_node_id"], ["node.id"]),
+        sa.ForeignKeyConstraint(
+            ["node_revision_id"],
+            ["noderevision.id"],
+            ondelete="CASCADE",
+        ),
+        sa.ForeignKeyConstraint(["parent_node_id"], ["node.id"], ondelete="SET NULL"),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("node_revision_id", "ordinal"),
     )

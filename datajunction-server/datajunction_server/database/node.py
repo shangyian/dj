@@ -1743,6 +1743,7 @@ class NodeRevision(
         foreign_keys="MetricSource.node_revision_id",
         order_by="MetricSource.ordinal",
         cascade="all, delete-orphan",
+        passive_deletes=True,
     )
 
     @property

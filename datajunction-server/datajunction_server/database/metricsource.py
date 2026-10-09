@@ -22,13 +22,13 @@ class MetricSource(Base):
         primary_key=True,
     )
     node_revision_id: Mapped[int] = mapped_column(
-        sa.ForeignKey("noderevision.id"),
+        sa.ForeignKey("noderevision.id", ondelete="CASCADE"),
         nullable=False,
     )
     ordinal: Mapped[int] = mapped_column(sa.Integer, nullable=False)
     query: Mapped[str] = mapped_column(sa.String, nullable=False)
     parent_node_id: Mapped[int | None] = mapped_column(
-        sa.ForeignKey("node.id"),
+        sa.ForeignKey("node.id", ondelete="SET NULL"),
         nullable=True,
     )
 
