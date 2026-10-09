@@ -90,6 +90,9 @@ class BuildContext:
     # Metrics declaring more than one query
     source_metrics: list[str] = field(default_factory=list)
 
+    # Upstream edges of source parents
+    source_edges: dict[str, list[str]] = field(default_factory=dict)
+
     # Metric name -> (node on chosen source, parents)
     routed_metrics: dict[str, tuple[Node, list[str]]] = field(default_factory=dict)
 
@@ -208,6 +211,8 @@ class BuildContext:
 
     def apply_routes(self) -> None:
         """Swap in each metric's chosen source."""
+        for child, parents in self.source_edges.items():
+            self.parent_map.setdefault(child, list(parents))
         for name, (node, parents) in self.routed_metrics.items():
             self.nodes[name] = node
             self.parent_map[name] = list(parents)

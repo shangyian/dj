@@ -13,6 +13,8 @@ from datajunction_server.models.decompose import MetricComponent
 from datajunction_server.models.node_type import NodeType
 from datajunction_server.sql.decompose import MetricComponentExtractor
 
+MULTI_SOURCE_NEEDS_V3 = "Multi-source metrics require the v3 SQL build."
+
 
 async def resolve_metric_sources(
     session: AsyncSession,
@@ -75,6 +77,23 @@ async def decompose_source(
         validate_fixed_grain_windows=False,
     )
     return components, str(derived_sql)
+
+
+async def reject_multi_source(session: AsyncSession, metrics: list[str]) -> None:
+    """Fail when a metric has additional sources."""
+    found = await session.scalar(
+        select(Node.name)
+        .join(
+            NodeRevision,
+            (NodeRevision.node_id == Node.id)
+            & (NodeRevision.version == Node.current_version),
+        )
+        .join(MetricSource, MetricSource.node_revision_id == NodeRevision.id)
+        .where(Node.name.in_(metrics))
+        .limit(1),
+    )
+    if found:
+        raise DJInvalidInputException(MULTI_SOURCE_NEEDS_V3)
 
 
 async def copy_metric_sources(

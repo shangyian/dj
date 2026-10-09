@@ -43,6 +43,7 @@ from datajunction_server.internal.access.authorization import (
     AccessDenialMode,
 )
 from datajunction_server.internal.engines import get_engine
+from datajunction_server.internal.metric_sources import reject_multi_source
 from datajunction_server.models import access
 from datajunction_server.models.column import SemanticType
 from datajunction_server.models.cube_materialization import Aggregability
@@ -456,6 +457,7 @@ async def build_sql_for_multiple_metrics(
         dimensions,
         require_dimensions=False,
     )
+    await reject_multi_source(session, metrics)
     leading_metric_node = await Node.get_by_name(
         session,
         metrics[0],
@@ -634,6 +636,7 @@ async def get_measures_query(
 
     metrics_sorting_order = {val: idx for idx, val in enumerate(metrics)}
     metric_nodes = await check_metrics_exist(session, metrics)
+    await reject_multi_source(session, metrics)
     await check_dimension_attributes_exist(session, dimensions)
 
     common_parents = await group_metrics_by_parent(session, metric_nodes)

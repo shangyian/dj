@@ -3,6 +3,8 @@
 import pytest
 from httpx import AsyncClient
 
+from datajunction_server.construction.build_v3.builder import setup_build_context
+
 from . import assert_sql_equal
 
 ORDER_LINES_CTE = """
@@ -296,3 +298,23 @@ async def test_single_source_metric_sql_is_unchanged(client_with_build_v3):
         GROUP BY order_details_0.status
         """,
     )
+
+
+@pytest.mark.asyncio
+async def test_second_pass_keeps_source_upstream(client_with_build_v3, session):
+    """A required dimension forces a second load pass."""
+    await create_multi_source_metric(client_with_build_v3)
+    response = await client_with_build_v3.patch(
+        "/nodes/v3.multi_source_quantity/",
+        json={"required_dimensions": ["v3.product.product_id"]},
+    )
+    assert response.status_code == 200, response.json()
+    ctx = await setup_build_context(
+        session,
+        ["v3.multi_source_quantity"],
+        ["v3.customer.name[customer]"],
+    )
+    assert (
+        ctx.parent_map["v3.multi_source_quantity"],
+        sorted(ctx.parent_map["v3.order_details"]),
+    ) == (["v3.order_details"], ["v3.src_order_items", "v3.src_orders"])

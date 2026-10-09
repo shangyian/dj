@@ -181,7 +181,7 @@ async def load_metric_sources(ctx: BuildContext) -> set[str]:
             list(missing),
         )
         for child, parents in parent_map.items():
-            ctx.parent_map.setdefault(child, parents)
+            ctx.source_edges.setdefault(child, parents)
         new_names = (upstream | missing) - ctx.nodes.keys()
         for node in await batch_load_nodes_with_dependencies(ctx.session, new_names):
             ctx.nodes[node.name] = node
