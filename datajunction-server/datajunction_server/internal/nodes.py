@@ -76,6 +76,7 @@ from datajunction_server.internal.materializations import (
     stop_materialization_workflows,
     swap_cube_materializations,
 )
+from datajunction_server.internal.metric_sources import resolve_metric_sources
 from datajunction_server.internal.validation import (
     NodeValidator,
     validate_node_data,
@@ -692,6 +693,16 @@ async def create_node_revision(
                 if structured is not None:
                     node_revision.columns[0].unit = structured
     node_revision.catalog_id = catalog_id
+    if data.additional_queries:
+        if node_type != NodeType.METRIC:
+            raise DJInvalidInputException(
+                "Only metric nodes can have additional queries.",
+            )
+        node_revision.additional_sources = await resolve_metric_sources(
+            session,
+            node_revision.name,
+            data.additional_queries,
+        )
     return node_revision
 
 

@@ -17,7 +17,7 @@ from pydantic import (
     field_validator,
     model_validator,
 )
-from sqlalchemy.orm import joinedload, selectinload
+from sqlalchemy.orm import joinedload, noload, selectinload
 from sqlalchemy.sql.schema import Column as SqlaColumn
 from sqlalchemy.types import Enum
 from typing_extensions import TypedDict
@@ -900,6 +900,8 @@ class CreateNode(
     Create non-source node object.
     """
 
+    additional_queries: list[str] | None = None
+
 
 class CreateSourceNode(ImmutableNodeFields, MutableNodeFields, SourceNodeFields):
     """
@@ -1045,6 +1047,18 @@ class NodeRevisionOutput(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class MetricSourceOutput(BaseModel):
+    """
+    An additional query source of a metric.
+    """
+
+    ordinal: int
+    query: str
+    parent_node: NodeNameOutput | None = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 class NodeOutput(GenericNodeOutputModel):
     """
     Output for a node that shows the current revision.
@@ -1082,6 +1096,7 @@ class NodeOutput(GenericNodeOutputModel):
     custom_metadata: dict | None = None
     owners: list[UserNameOnly] = Field(default_factory=list)
     cube_filters: list[str] | None = None
+    additional_sources: list[MetricSourceOutput] = Field(default_factory=list)
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -1090,13 +1105,19 @@ class NodeOutput(GenericNodeOutputModel):
         """
         ORM options to successfully load this object
         """
+        from datajunction_server.database.metricsource import MetricSource
         from datajunction_server.database.node import (
             Node,
             NodeRevision,
         )
 
         return [
-            selectinload(Node.current).options(*NodeRevision.default_load_options()),
+            selectinload(Node.current).options(
+                *NodeRevision.default_load_options(),
+                selectinload(NodeRevision.additional_sources)
+                .joinedload(MetricSource.parent_node)
+                .options(noload(Node.created_by), noload(Node.tags)),
+            ),
             joinedload(Node.tags),
             selectinload(Node.created_by),
             selectinload(Node.owners),
