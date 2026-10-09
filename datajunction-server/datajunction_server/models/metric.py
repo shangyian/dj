@@ -163,3 +163,17 @@ class V3TranslatedSQL(BaseModel):
     scan_estimate: ScanEstimate | None = None
 
     warnings: list[DJWarning] = []
+
+
+class CompatibleDimensionsInput(BaseModel):
+    """Dimensions to check against a metric."""
+
+    dimensions: list[str] = []
+
+
+class CompatibleDimensions(BaseModel):
+    """Whether a metric source serves the dimensions."""
+
+    compatible: bool
+    source: int | None = None
+    reason: str | None = None

@@ -8,9 +8,18 @@ from fastapi import BackgroundTasks, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
+from sqlalchemy.orm.attributes import set_committed_value
 from sqlalchemy.sql.operators import is_
 
 from datajunction_server.api.nodes import list_nodes
+from datajunction_server.construction.build_v3.decomposition import (
+    is_derived_metric,
+)
+from datajunction_server.construction.build_v3.loaders import load_nodes
+from datajunction_server.construction.build_v3.source_matcher import (
+    find_matching_source,
+)
+from datajunction_server.construction.build_v3.types import BuildContext
 from datajunction_server.database.node import Node, NodeRevision
 from datajunction_server.errors import DJError, DJInvalidInputException, ErrorCode
 from datajunction_server.internal.access.authentication.http import SecureAPIRouter
@@ -20,7 +29,11 @@ from datajunction_server.internal.access.authorization import (
 )
 from datajunction_server.internal.caching.cachelib_cache import get_cache
 from datajunction_server.internal.caching.interface import Cache
-from datajunction_server.models.metric import Metric
+from datajunction_server.models.metric import (
+    CompatibleDimensions,
+    CompatibleDimensionsInput,
+    Metric,
+)
 from datajunction_server.models.node import (
     DimensionAttributeOutput,
     MetricDirection,
@@ -111,6 +124,32 @@ async def get_a_metric(
     dims = await get_dimensions(session, node)
     metric = await Metric.parse_node(node, dims, session)
     return metric
+
+
+@router.post(
+    "/metrics/{name}/compatible-dimensions/",
+    response_model=CompatibleDimensions,
+)
+async def check_compatible_dimensions(
+    name: str,
+    data: CompatibleDimensionsInput,
+    *,
+    session: AsyncSession = Depends(get_session),
+) -> CompatibleDimensions:
+    """Check whether one metric source serves the dimensions."""
+    await get_metric(session, name)
+    ctx = BuildContext(session=session, metrics=[name], dimensions=data.dimensions)
+    await load_nodes(ctx)
+    metric = ctx.nodes[name]
+    if is_derived_metric(ctx, metric):
+        raise DJInvalidInputException(f"Cannot check derived metric {name}.")
+    if name not in ctx.source_metrics:
+        set_committed_value(metric.current, "additional_sources", [])
+    try:
+        match = await find_matching_source(ctx, metric, ctx.dimensions, set())
+    except DJInvalidInputException as exc:
+        return CompatibleDimensions(compatible=False, reason=exc.message)
+    return CompatibleDimensions(compatible=True, source=match.ordinal)
 
 
 @router.get(
