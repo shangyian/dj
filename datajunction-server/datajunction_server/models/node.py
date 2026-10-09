@@ -15,6 +15,7 @@ from pydantic import (
     RootModel,
     create_model,
     field_validator,
+    model_serializer,
     model_validator,
 )
 from sqlalchemy.orm import joinedload, noload, selectinload
@@ -787,6 +788,15 @@ class DimensionAttributeOutput(BaseModel):
     type: str | None
     path: list[str]
     filter_only: bool = False
+    # Metric source ordinal; multi-source metrics only
+    source: int | None = None
+
+    @model_serializer(mode="wrap")
+    def _omit_null_source(self, handler):
+        data = handler(self)
+        if data.get("source") is None:
+            data.pop("source", None)
+        return data
 
 
 class ColumnOutput(BaseModel):

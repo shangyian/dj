@@ -7,6 +7,7 @@ import itertools
 import logging
 import time
 from collections import namedtuple
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import cast
 
@@ -20,6 +21,7 @@ from sqlalchemy.sql.operators import is_
 from datajunction_server.database.attributetype import ColumnAttribute
 from datajunction_server.database.column import Column
 from datajunction_server.database.dimensionlink import DimensionLink
+from datajunction_server.database.metricsource import MetricSource
 from datajunction_server.database.node import (
     CubeRelationship,
     Node,
@@ -403,16 +405,102 @@ async def get_dimension_attributes(
         elif non_metric_parents:
             # Base metric - use the first non-metric parent (fact/transform)
             await refresh_if_needed(session, non_metric_parents[0], ["current"])
+            sources = await metric_source_parents(session, node)
             node = non_metric_parents[0]
         elif dimension_parents:
             # Base metric defined directly on a dimension node - inherit that
             # dimension node's own attributes and linked dimensions.
             await refresh_if_needed(session, dimension_parents[0], ["current"])
+            sources = await metric_source_parents(session, node)
             node = dimension_parents[0]
         else:
             # No valid parents found
             return []  # pragma: no cover
+        if sources:
+            return await _per_source_attributes(
+                session,
+                sources,
+                node_name,
+                include_deactivated,
+                depth,
+            )
 
+    return await _node_dimension_attributes(
+        session,
+        node,
+        node_name,
+        include_deactivated,
+        depth,
+    )
+
+
+async def metric_source_parents(
+    session: AsyncSession,
+    metric: Node,
+) -> list[tuple[int, Node]]:
+    """Parent per source ordinal; empty if single-source."""
+    extras = (
+        (
+            await session.execute(
+                select(MetricSource)
+                .where(MetricSource.node_revision_id == metric.current.id)
+                .options(
+                    selectinload(MetricSource.parent_node).joinedload(Node.current),
+                )
+                .order_by(MetricSource.ordinal),
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if not extras:
+        return []
+    await refresh_if_needed(session, metric.current, ["parents"])
+    first = sorted(
+        (p for p in metric.current.parents if p.type != NodeType.METRIC),
+        key=lambda p: p.type == NodeType.DIMENSION,
+    )
+    return [(0, parent) for parent in first[:1]] + [
+        (source.ordinal, source.parent_node)
+        for source in extras
+        if source.parent_node is not None
+    ]
+
+
+async def _per_source_attributes(
+    session: AsyncSession,
+    sources: list[tuple[int, Node]],
+    node_name: str,
+    include_deactivated: bool,
+    depth: int,
+) -> list[DimensionAttributeOutput]:
+    """Dimension attributes tagged per reaching source."""
+    by_parent: dict[int, list[DimensionAttributeOutput]] = {}
+    tagged: list[DimensionAttributeOutput] = []
+    for ordinal, parent in sources:
+        if parent.id not in by_parent:
+            await refresh_if_needed(session, parent, ["current"])
+            by_parent[parent.id] = await _node_dimension_attributes(
+                session,
+                parent,
+                node_name,
+                include_deactivated,
+                depth,
+            )
+        tagged.extend(
+            attr.model_copy(update={"source": ordinal}) for attr in by_parent[parent.id]
+        )
+    return tagged
+
+
+async def _node_dimension_attributes(
+    session: AsyncSession,
+    node: Node,
+    node_name: str,
+    include_deactivated: bool,
+    depth: int,
+) -> list[DimensionAttributeOutput]:
+    """Dimension attributes reachable from one node."""
     # Discover all dimension nodes in the given node's dimensions graph
     dimension_nodes_and_paths = await get_dimension_nodes(
         session,
@@ -987,6 +1075,25 @@ async def get_dimensions(
     )
 
 
+def _filter_only_options() -> list[ExecutableOption]:
+    """Load options for filter-only dimension upstreams."""
+    return [
+        selectinload(Node.current).options(
+            selectinload(NodeRevision.dimension_links).options(
+                selectinload(DimensionLink.dimension).options(
+                    selectinload(Node.current).options(
+                        selectinload(NodeRevision.columns).options(
+                            selectinload(Column.attributes).joinedload(
+                                ColumnAttribute.attribute_type,
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        ),
+    ]
+
+
 async def get_filter_only_dimensions(
     session: AsyncSession,
     node_name: str,
@@ -995,27 +1102,66 @@ async def get_filter_only_dimensions(
     Get dimensions for this node that can only be filtered by and cannot be grouped by
     or retrieved as a part of the node's SELECT clause.
     """
-    filter_only_dimensions = []
-    upstreams = await get_upstream_nodes(
+    node = await Node.get_by_name(
         session,
         node_name,
-        node_type=NodeType.SOURCE,
-        options=[
-            selectinload(Node.current).options(
-                selectinload(NodeRevision.dimension_links).options(
-                    selectinload(DimensionLink.dimension).options(
-                        selectinload(Node.current).options(
-                            selectinload(NodeRevision.columns).options(
-                                selectinload(Column.attributes).joinedload(
-                                    ColumnAttribute.attribute_type,
-                                ),
-                            ),
-                        ),
-                    ),
-                ),
-            ),
-        ],
+        options=[joinedload(Node.current)],
     )
+    sources = (
+        await metric_source_parents(session, node)
+        if node and node.type == NodeType.METRIC
+        else []
+    )
+    if not sources:
+        upstreams = await get_upstream_nodes(
+            session,
+            node_name,
+            node_type=NodeType.SOURCE,
+            options=_filter_only_options(),
+        )
+        return _filter_only_attributes(upstreams)
+    tagged: list[DimensionAttributeOutput] = []
+    for ordinal, parent in sources:
+        upstream_ids = {
+            upstream.id
+            for upstream in await get_upstream_nodes(
+                session,
+                parent.name,
+                node_type=NodeType.SOURCE,
+                options=[
+                    load_only(Node.id),
+                    noload(Node.created_by),
+                    noload(Node.tags),
+                ],
+            )
+        }
+        if parent.type == NodeType.SOURCE:
+            upstream_ids.add(parent.id)
+        upstreams = (
+            (
+                await session.execute(
+                    select(Node)
+                    .where(Node.id.in_(upstream_ids))
+                    .order_by(Node.name)
+                    .options(*_filter_only_options()),
+                )
+            )
+            .unique()
+            .scalars()
+            .all()
+        )
+        tagged.extend(
+            attr.model_copy(update={"source": ordinal})
+            for attr in _filter_only_attributes(upstreams)
+        )
+    return tagged
+
+
+def _filter_only_attributes(
+    upstreams: Sequence[Node],
+) -> list[DimensionAttributeOutput]:
+    """Filter-only attributes from upstream links."""
+    filter_only_dimensions = []
     for upstream in upstreams:
         for link in upstream.current.dimension_links:
             column_mapping = {col.name: col for col in link.dimension.current.columns}
