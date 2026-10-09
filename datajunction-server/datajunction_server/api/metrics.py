@@ -15,6 +15,7 @@ from datajunction_server.api.nodes import list_nodes
 from datajunction_server.construction.build_v3.decomposition import (
     is_derived_metric,
 )
+from datajunction_server.construction.build_v3.dimensions import resolve_dimensions
 from datajunction_server.construction.build_v3.loaders import load_nodes
 from datajunction_server.construction.build_v3.source_matcher import (
     find_matching_source,
@@ -147,6 +148,7 @@ async def check_compatible_dimensions(
         set_committed_value(metric.current, "additional_sources", [])
     try:
         match = await find_matching_source(ctx, metric, ctx.dimensions, set())
+        resolve_dimensions(ctx, match.parent_node)
     except DJInvalidInputException as exc:
         return CompatibleDimensions(compatible=False, reason=exc.message)
     return CompatibleDimensions(compatible=True, source=match.ordinal)

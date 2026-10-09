@@ -55,6 +55,42 @@ async def test_no_source_reaches_dimension(multi_source_client):
 
 
 @pytest.mark.asyncio
+async def test_unknown_column_first_source(multi_source_client):
+    assert await check(
+        multi_source_client, "ms.total_amount", ["ms.customer.nope"],
+    ) == (
+        200,
+        {
+            "compatible": False,
+            "source": None,
+            "reason": (
+                "Column `nope` does not exist on node `ms.customer` "
+                "(referenced as `ms.customer.nope`)."
+            ),
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_unknown_column_second_source(multi_source_client):
+    assert await check(
+        multi_source_client,
+        "ms.total_amount",
+        ["ms.customer.customer_size", "ms.region.nope"],
+    ) == (
+        200,
+        {
+            "compatible": False,
+            "source": None,
+            "reason": (
+                "Column `nope` does not exist on node `ms.region` "
+                "(referenced as `ms.region.nope`)."
+            ),
+        },
+    )
+
+
+@pytest.mark.asyncio
 async def test_unknown_dimension_node(multi_source_client):
     assert await check(multi_source_client, "ms.total_amount", ["ms.nope.x"]) == (
         200,
@@ -160,6 +196,9 @@ async def test_agrees_with_v3_sql(multi_source_client):
         ("ms.total_amount", ["ms.region.region_size[home]"]),
         ("ms.daily_amount", ["ms.customer.customer_size"]),
         ("ms.daily_amount", ["ms.region.region_size"]),
+        ("ms.total_amount", ["ms.customer.nope"]),
+        ("ms.total_amount", ["ms.customer.customer_size", "ms.region.nope"]),
+        ("ms.daily_amount", ["ms.customer.nope"]),
     ]
     answers = []
     for metric, dimensions in requests:
@@ -174,5 +213,8 @@ async def test_agrees_with_v3_sql(multi_source_client):
         (True, 200),
         (False, 422),
         (True, 200),
+        (False, 422),
+        (False, 422),
+        (False, 422),
         (False, 422),
     ]
