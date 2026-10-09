@@ -5,6 +5,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from datajunction_server.construction.build_v3.loaders import find_upstream_node_names
 from datajunction_server.database.metricsource import MetricSource
 from datajunction_server.database.node import Node, NodeRevision
 from datajunction_server.errors import DJInvalidInputException
@@ -80,7 +81,8 @@ async def decompose_source(
 
 
 async def reject_multi_source(session: AsyncSession, metrics: list[str]) -> None:
-    """Fail when a metric has additional sources."""
+    """Fail when a metric or its bases have sources."""
+    upstream, _ = await find_upstream_node_names(session, metrics)
     found = await session.scalar(
         select(Node.name)
         .join(
@@ -89,7 +91,7 @@ async def reject_multi_source(session: AsyncSession, metrics: list[str]) -> None
             & (NodeRevision.version == Node.current_version),
         )
         .join(MetricSource, MetricSource.node_revision_id == NodeRevision.id)
-        .where(Node.name.in_(metrics))
+        .where(Node.name.in_(upstream))
         .limit(1),
     )
     if found:
