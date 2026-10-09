@@ -160,3 +160,150 @@ async def test_non_metric_rejects_additional_queries(
         "errors": [],
         "warnings": [],
     }
+
+
+DETAILS_QUERY = "SELECT COUNT(repair_order_id) FROM default.repair_order_details"
+FACT_QUERY = "SELECT COUNT(repair_order_id) FROM default.repair_orders_fact"
+DETAILS_SOURCE = {
+    "ordinal": 1,
+    "query": DETAILS_QUERY,
+    "parent_node": {"name": "default.repair_order_details"},
+}
+METRIC_NAME = "default.multi_source_order_count"
+
+
+async def get_sources(client: AsyncClient, name: str = METRIC_NAME):
+    body = (await client.get(f"/nodes/{name}/")).json()
+    return body["version"], body["additional_sources"]
+
+
+@pytest.mark.asyncio
+async def test_unrelated_patch_keeps_sources(
+    client_with_roads: AsyncClient,
+) -> None:
+    await post_metric(client_with_roads, [DETAILS_QUERY])
+    response = await client_with_roads.patch(
+        f"/nodes/{METRIC_NAME}/",
+        json={"description": "New description"},
+    )
+    assert response.status_code == 200
+    assert await get_sources(client_with_roads) == ("v1.1", [DETAILS_SOURCE])
+
+
+@pytest.mark.asyncio
+async def test_patch_replaces_sources_and_bumps_version(
+    client_with_roads: AsyncClient,
+) -> None:
+    await post_metric(client_with_roads, [DETAILS_QUERY])
+    response = await client_with_roads.patch(
+        f"/nodes/{METRIC_NAME}/",
+        json={"additional_queries": [FACT_QUERY]},
+    )
+    assert response.status_code == 200
+    assert await get_sources(client_with_roads) == (
+        "v2.0",
+        [
+            {
+                "ordinal": 1,
+                "query": FACT_QUERY,
+                "parent_node": {"name": "default.repair_orders_fact"},
+            },
+        ],
+    )
+
+
+@pytest.mark.asyncio
+async def test_patch_with_empty_list_clears_sources(
+    client_with_roads: AsyncClient,
+) -> None:
+    await post_metric(client_with_roads, [DETAILS_QUERY])
+    response = await client_with_roads.patch(
+        f"/nodes/{METRIC_NAME}/",
+        json={"additional_queries": []},
+    )
+    assert response.status_code == 200
+    assert await get_sources(client_with_roads) == ("v2.0", [])
+
+
+@pytest.mark.asyncio
+async def test_patch_with_same_sources_keeps_version(
+    client_with_roads: AsyncClient,
+) -> None:
+    await post_metric(client_with_roads, [DETAILS_QUERY])
+    response = await client_with_roads.patch(
+        f"/nodes/{METRIC_NAME}/",
+        json={"additional_queries": [DETAILS_QUERY]},
+    )
+    assert response.status_code == 200
+    assert await get_sources(client_with_roads) == ("v1.0", [DETAILS_SOURCE])
+
+
+@pytest.mark.asyncio
+async def test_patch_rejects_invalid_source(
+    client_with_roads: AsyncClient,
+) -> None:
+    await post_metric(client_with_roads, [DETAILS_QUERY])
+    response = await client_with_roads.patch(
+        f"/nodes/{METRIC_NAME}/",
+        json={"additional_queries": ["SELECT default.num_repair_orders * 2"]},
+    )
+    assert response.status_code == 422
+    assert response.json() == {
+        "message": "Additional query 1 must reference exactly one non-metric node.",
+        "errors": [],
+        "warnings": [],
+    }
+    assert await get_sources(client_with_roads) == ("v1.0", [DETAILS_SOURCE])
+
+
+@pytest.mark.asyncio
+async def test_patch_non_metric_rejects_additional_queries(
+    client_with_roads: AsyncClient,
+) -> None:
+    response = await client_with_roads.patch(
+        "/nodes/default.repair_orders_fact/",
+        json={"additional_queries": [DETAILS_QUERY]},
+    )
+    assert response.status_code == 422
+    assert response.json() == {
+        "message": "Only metric nodes can have additional queries.",
+        "errors": [],
+        "warnings": [],
+    }
+
+
+@pytest.mark.asyncio
+async def test_copy_and_revalidate_keep_sources(
+    client_with_roads: AsyncClient,
+) -> None:
+    await post_metric(client_with_roads, [DETAILS_QUERY])
+    response = await client_with_roads.post(
+        f"/nodes/{METRIC_NAME}/copy",
+        params={"new_name": "default.copied_order_count"},
+    )
+    assert response.status_code == 200
+    assert await get_sources(client_with_roads, "default.copied_order_count") == (
+        "v1.0",
+        [DETAILS_SOURCE],
+    )
+    response = await client_with_roads.post(f"/nodes/{METRIC_NAME}/validate/")
+    assert response.status_code == 200
+    assert await get_sources(client_with_roads) == ("v1.0", [DETAILS_SOURCE])
+
+
+@pytest.mark.asyncio
+async def test_recreate_inactive_metric_uses_new_sources(
+    client_with_roads: AsyncClient,
+) -> None:
+    await post_metric(client_with_roads, [DETAILS_QUERY])
+    response = await client_with_roads.delete(f"/nodes/{METRIC_NAME}/")
+    assert response.status_code == 200
+    response = await post_metric(client_with_roads, [FACT_QUERY])
+    assert response.status_code == 201
+    assert (await get_sources(client_with_roads))[1] == [
+        {
+            "ordinal": 1,
+            "query": FACT_QUERY,
+            "parent_node": {"name": "default.repair_orders_fact"},
+        },
+    ]

@@ -873,6 +873,14 @@ class CubeNodeFields(BaseModel):
     mode: NodeMode
 
 
+class MetricSourceFields(BaseModel):
+    """
+    Metric queries beyond the main query.
+    """
+
+    additional_queries: list[str] | None = None
+
+
 class MetricNodeFields(BaseModel):
     """
     Metric node fields that can be changed
@@ -895,12 +903,11 @@ class CreateNode(
     MutableNodeFields,
     MutableNodeQueryField,
     MetricNodeFields,
+    MetricSourceFields,
 ):
     """
     Create non-source node object.
     """
-
-    additional_queries: list[str] | None = None
 
 
 class CreateSourceNode(ImmutableNodeFields, MutableNodeFields, SourceNodeFields):
@@ -928,6 +935,7 @@ def build_update_node_fields():
         SourceNodeFields,
         MutableNodeQueryField,
         MetricNodeFields,
+        MetricSourceFields,
         CubeNodeFields,
     ]:
         for field_name, field_info in parent_class.model_fields.items():

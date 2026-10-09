@@ -76,7 +76,10 @@ from datajunction_server.internal.materializations import (
     stop_materialization_workflows,
     swap_cube_materializations,
 )
-from datajunction_server.internal.metric_sources import resolve_metric_sources
+from datajunction_server.internal.metric_sources import (
+    copy_metric_sources,
+    resolve_metric_sources,
+)
 from datajunction_server.internal.validation import (
     NodeValidator,
     validate_node_data,
@@ -1242,6 +1245,7 @@ async def copy_to_new_node(
         lineage=old_revision.lineage,
         created_by_id=current_user.id,
         custom_metadata=old_revision.custom_metadata,
+        additional_sources=await copy_metric_sources(session, old_revision),
     )
 
     # Assemble new dimension links, where each link will need to have their join SQL rewritten
@@ -2724,6 +2728,7 @@ async def create_node_from_inactive(
 
             if isinstance(data, CreateNode):
                 update_node.query = data.query
+                update_node.additional_queries = data.additional_queries or []
 
             await update_node_with_query(
                 name=data.name,
@@ -2887,8 +2892,18 @@ async def create_new_revision_from_existing(
     reaggregate_changes = reaggregate_was_set and dump_reaggregate_spec(
         old_revision.reaggregate,
     ) != dump_reaggregate_spec(data.reaggregate if data else None)
+    new_queries = data.additional_queries if data else None
+    if new_queries and old_revision.type != NodeType.METRIC:
+        raise DJInvalidInputException(
+            "Only metric nodes can have additional queries.",
+        )
+    old_sources = await copy_metric_sources(session, old_revision)
+    source_changes = new_queries is not None and new_queries != [
+        source.query for source in old_sources
+    ]
     major_changes = (
         query_changes
+        or source_changes
         or column_changes
         or pk_changes
         or required_dim_changes
@@ -3089,6 +3104,11 @@ async def create_new_revision_from_existing(
             new_revision.version,
             [p.name for p in new_revision.parents],
         )
+    new_revision.additional_sources = (
+        await resolve_metric_sources(session, new_revision.name, new_queries)
+        if source_changes and new_queries is not None
+        else old_sources
+    )
     return new_revision
 
 
@@ -3887,6 +3907,10 @@ async def create_new_revision_for_dimension_link_update(
     node.current_version = fresh_version
 
     new_revision = copy_existing_node_revision(current_revision, current_user)
+    new_revision.additional_sources = await copy_metric_sources(
+        session,
+        current_revision,
+    )
     new_revision.version = str(Version.parse(fresh_version).next_minor_version())
     node.current_version = new_revision.version
     new_revision.node = node
@@ -4473,6 +4497,10 @@ async def revalidate_node(
     # Only create a new revision if the columns have been updated
     if updated_columns:  # type: ignore
         new_revision = copy_existing_node_revision(node.current, current_user)  # type: ignore
+        new_revision.additional_sources = await copy_metric_sources(
+            session,
+            node.current,  # type: ignore
+        )
         new_revision.version = bump_version(node.current.version, change_tier)  # type: ignore
 
         new_revision.status = node_validator.status

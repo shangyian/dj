@@ -1,5 +1,6 @@
 """Resolve the additional query sources of a metric."""
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from datajunction_server.database.metricsource import MetricSource
@@ -40,3 +41,26 @@ async def resolve_metric_sources(
             ),
         )
     return sources
+
+
+async def copy_metric_sources(
+    session: AsyncSession,
+    revision: NodeRevision,
+) -> list[MetricSource]:
+    """Copy a revision's sources as new rows."""
+    with session.no_autoflush:
+        rows = (
+            await session.execute(
+                select(MetricSource)
+                .where(MetricSource.node_revision_id == revision.id)
+                .order_by(MetricSource.ordinal),
+            )
+        ).scalars()
+        return [
+            MetricSource(
+                ordinal=row.ordinal,
+                query=row.query,
+                parent_node_id=row.parent_node_id,
+            )
+            for row in rows
+        ]
