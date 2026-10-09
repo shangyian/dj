@@ -1,5 +1,7 @@
 """Resolve the additional query sources of a metric."""
 
+from typing import Any
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -16,11 +18,20 @@ async def resolve_metric_sources(
     session: AsyncSession,
     metric_name: str,
     queries: list[str],
+    *,
+    reaggregate: dict[str, Any] | None = None,
+    fixed_grain: list[str] | None = None,
 ) -> list[MetricSource]:
     """Build one MetricSource per query, each bound to its parent node."""
     sources = []
     for ordinal, query in enumerate(queries, start=1):
-        probe = NodeRevision(name=metric_name, type=NodeType.METRIC, query=query)
+        probe = NodeRevision(
+            name=metric_name,
+            type=NodeType.METRIC,
+            query=query,
+            reaggregate=reaggregate,
+            fixed_grain=fixed_grain,
+        )
         validator = await validate_node_data(probe, session)
         if validator.errors:
             raise DJInvalidInputException(

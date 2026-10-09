@@ -50,8 +50,7 @@ COUNT_COMPONENTS = [
     ),
 ]
 COUNT_DERIVED = (
-    "SELECT  SUM(repair_order_id_count_bd241964) \n"
-    " FROM default.repair_orders_fact\n\n"
+    "SELECT  SUM(repair_order_id_count_bd241964) \n FROM default.repair_orders_fact\n\n"
 )
 
 
@@ -139,3 +138,103 @@ async def test_unrelated_patch_keeps_source_decomposition(
     sources = await current_sources(session)
     assert [s.node_revision.version for s in sources] == ["v2.0"]
     assert decomposition(sources) == [(1, AVG_COMPONENTS, AVG_DERIVED)]
+
+
+FACT_SUM_QUERY = "SELECT SUM(price) FROM default.repair_orders_fact"
+REAGGREGATE = {
+    "rules": [
+        {
+            "dimension": "default.repair_orders_fact.repair_order_id",
+            "fn": "last_value",
+        },
+    ],
+}
+METRIC_SETTINGS = [{"reaggregate": REAGGREGATE}, {"fixed_grain": []}]
+
+
+async def plain_decomposition(
+    client: AsyncClient,
+    session: AsyncSession,
+    settings: dict,
+) -> list[tuple]:
+    response = await client.post(
+        "/nodes/metric/",
+        json={"name": "default.plain_fact_price", "query": FACT_SUM_QUERY, **settings},
+    )
+    assert response.status_code == 201
+    plain = await Node.get_by_name(session, "default.plain_fact_price")
+    components, derived = await MetricComponentExtractor(
+        plain.current.id,  # type: ignore
+    ).extract(session, validate_fixed_grain_windows=False)
+    return [(1, components, str(derived))]
+
+
+def source_rules(sources: list[MetricSource]) -> list[list[AggregationRule]]:
+    return [[c.rule for c in s.components or []] for s in sources]
+
+
+EXPECTED_RULES = {
+    "reaggregate": [
+        [
+            AggregationRule(
+                type=Aggregability.FULL,
+                reaggregate=REAGGREGATE["rules"][0],
+            ),
+        ],
+    ],
+    "fixed_grain": [[AggregationRule(type=Aggregability.FULL, fixed_grain=[])]],
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("settings", METRIC_SETTINGS)
+async def test_source_uses_metric_settings(
+    client_with_roads: AsyncClient,
+    session: AsyncSession,
+    settings: dict,
+) -> None:
+    response = await client_with_roads.post(
+        "/nodes/metric/",
+        json={
+            "name": METRIC_NAME,
+            "query": COUNT_QUERY,
+            "additional_queries": [FACT_SUM_QUERY],
+            **settings,
+        },
+    )
+    assert response.status_code == 201
+    sources = await current_sources(session)
+    assert source_rules(sources) == EXPECTED_RULES[next(iter(settings))]
+    assert decomposition(sources) == await plain_decomposition(
+        client_with_roads,
+        session,
+        settings,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("settings", METRIC_SETTINGS)
+async def test_settings_patch_refreshes_sources(
+    client_with_roads: AsyncClient,
+    session: AsyncSession,
+    settings: dict,
+) -> None:
+    response = await client_with_roads.post(
+        "/nodes/metric/",
+        json={
+            "name": METRIC_NAME,
+            "query": COUNT_QUERY,
+            "additional_queries": [FACT_SUM_QUERY],
+        },
+    )
+    assert response.status_code == 201
+    response = await client_with_roads.patch(f"/nodes/{METRIC_NAME}/", json=settings)
+    assert response.status_code == 200
+    sources = await current_sources(session)
+    assert [s.node_revision.version for s in sources] == ["v2.0"]
+    assert source_rules(sources) == EXPECTED_RULES[next(iter(settings))]
+    assert decomposition(sources) == await plain_decomposition(
+        client_with_roads,
+        session,
+        settings,
+    )

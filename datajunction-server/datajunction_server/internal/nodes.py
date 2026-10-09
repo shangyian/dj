@@ -705,6 +705,8 @@ async def create_node_revision(
             session,
             node_revision.name,
             data.additional_queries,
+            reaggregate=node_revision.reaggregate,
+            fixed_grain=node_revision.fixed_grain,
         )
     return node_revision
 
@@ -3104,11 +3106,18 @@ async def create_new_revision_from_existing(
             new_revision.version,
             [p.name for p in new_revision.parents],
         )
-    new_revision.additional_sources = (
-        await resolve_metric_sources(session, new_revision.name, new_queries)
-        if source_changes and new_queries is not None
-        else old_sources
-    )
+    if source_changes or reaggregate_changes or fixed_grain_changes:
+        new_revision.additional_sources = await resolve_metric_sources(
+            session,
+            new_revision.name,
+            new_queries
+            if source_changes and new_queries is not None
+            else [source.query for source in old_sources],
+            reaggregate=new_revision.reaggregate,
+            fixed_grain=new_revision.fixed_grain,
+        )
+    else:
+        new_revision.additional_sources = old_sources
     return new_revision
 
 
