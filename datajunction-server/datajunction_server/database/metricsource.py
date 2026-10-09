@@ -5,7 +5,8 @@ from typing import TYPE_CHECKING
 import sqlalchemy as sa
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from datajunction_server.database.base import Base
+from datajunction_server.database.base import Base, PydanticListType
+from datajunction_server.models.decompose import MetricComponent
 
 if TYPE_CHECKING:
     from datajunction_server.database.node import Node, NodeRevision
@@ -31,6 +32,11 @@ class MetricSource(Base):
         sa.ForeignKey("node.id", ondelete="SET NULL"),
         nullable=True,
     )
+    components: Mapped[list[MetricComponent] | None] = mapped_column(
+        PydanticListType(MetricComponent),
+        nullable=True,
+    )
+    derived_expression: Mapped[str | None] = mapped_column(sa.Text, nullable=True)
 
     node_revision: Mapped["NodeRevision"] = relationship(
         "NodeRevision",
