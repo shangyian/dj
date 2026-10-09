@@ -273,7 +273,7 @@ async def test_patch_non_metric_rejects_additional_queries(
 
 
 @pytest.mark.asyncio
-async def test_copy_and_revalidate_keep_sources(
+async def test_copy_keeps_sources(
     client_with_roads: AsyncClient,
 ) -> None:
     await post_metric(client_with_roads, [DETAILS_QUERY])
@@ -286,9 +286,52 @@ async def test_copy_and_revalidate_keep_sources(
         "v1.0",
         [DETAILS_SOURCE],
     )
+
+
+def amounts_source(amount_type: str) -> dict:
+    return {
+        "name": "default.multi_source_amounts",
+        "catalog": "default",
+        "schema_": "roads",
+        "table": "multi_source_amounts",
+        "mode": "published",
+        "columns": [{"name": "amount", "type": amount_type}],
+    }
+
+
+@pytest.mark.asyncio
+async def test_revalidate_after_column_change_keeps_sources(
+    client_with_roads: AsyncClient,
+) -> None:
+    response = await client_with_roads.post(
+        "/nodes/source/",
+        json=amounts_source("int"),
+    )
+    assert response.status_code == 200
+    response = await client_with_roads.post(
+        "/nodes/metric/",
+        json={
+            "name": METRIC_NAME,
+            "query": "SELECT SUM(amount) FROM default.multi_source_amounts",
+            "additional_queries": [DETAILS_QUERY],
+        },
+    )
+    assert response.status_code == 201
+    assert await get_sources(client_with_roads) == ("v1.0", [DETAILS_SOURCE])
+
+    response = await client_with_roads.patch(
+        "/nodes/default.multi_source_amounts/",
+        json={"columns": amounts_source("double")["columns"]},
+    )
+    assert response.status_code == 200
     response = await client_with_roads.post(f"/nodes/{METRIC_NAME}/validate/")
     assert response.status_code == 200
-    assert await get_sources(client_with_roads) == ("v1.0", [DETAILS_SOURCE])
+    body = (await client_with_roads.get(f"/nodes/{METRIC_NAME}/")).json()
+    assert body["columns"][0]["type"] == "double"
+    assert (body["version"], body["additional_sources"]) == (
+        "v2.0",
+        [DETAILS_SOURCE],
+    )
 
 
 @pytest.mark.asyncio
