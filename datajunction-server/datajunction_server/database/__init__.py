@@ -13,6 +13,7 @@ __all__ = [
     "GroupMember",
     "History",
     "Measure",
+    "MetricSource",
     "Node",
     "NodeNamespace",
     "NodeRevision",
@@ -39,6 +40,7 @@ from datajunction_server.database.dimensionlink import DimensionLink
 from datajunction_server.database.engine import Engine
 from datajunction_server.database.group_member import GroupMember
 from datajunction_server.database.measure import Measure
+from datajunction_server.database.metricsource import MetricSource
 from datajunction_server.database.namespace import NodeNamespace
 from datajunction_server.database.node import Node, NodeRevision
 from datajunction_server.database.notification_preference import NotificationPreference

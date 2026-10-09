@@ -101,6 +101,7 @@ from datajunction_server.utils import SEPARATOR, execute_with_retry
 if TYPE_CHECKING:
     from datajunction_server.database.dimensionlink import DimensionLink
     from datajunction_server.database.measure import FrozenMeasure
+    from datajunction_server.database.metricsource import MetricSource
     from datajunction_server.database.namespace import NodeNamespace
 
 
@@ -1736,6 +1737,20 @@ class NodeRevision(
         lazy="selectin",
     )
     query: Mapped[str | None] = mapped_column(String)
+    additional_sources: Mapped[list[MetricSource]] = relationship(
+        "MetricSource",
+        back_populates="node_revision",
+        foreign_keys="MetricSource.node_revision_id",
+        order_by="MetricSource.ordinal",
+        cascade="all, delete-orphan",
+    )
+
+    @property
+    def queries(self) -> list[str]:
+        """All query sources; `query` first."""
+        extra = sorted(self.additional_sources, key=lambda s: s.ordinal)
+        return ([self.query] if self.query else []) + [s.query for s in extra]
+
     mode: Mapped[NodeMode] = mapped_column(
         Enum(NodeMode),
         default=NodeMode.PUBLISHED,
