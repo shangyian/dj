@@ -71,10 +71,10 @@ def token(expression: str) -> str:
     return measure_identity_token(compute_expression_hash(expression), "SUM")
 
 
-def link_to(ctx: BuildContext, parent: Node, *dims: Node) -> None:
+def link_to(ctx: BuildContext, parent: Node, *dims: Node, role: str = "") -> None:
     """Preload a join path from parent through dims."""
     links = [DimensionLink(join_sql="a = b", dimension=dim) for dim in dims]
-    ctx.join_paths[(parent.current.id, dims[-1].name, "")] = links
+    ctx.join_paths[(parent.current.id, dims[-1].name, role)] = links
     for dim in dims:
         ctx.nodes[dim.name] = dim
 
@@ -241,3 +241,45 @@ async def test_missing_local_column_is_unreachable():
         f"Source 0: cannot reach {REGIONAL}.nope. "
         f"Source 1: cannot reach {REGIONAL}.nope."
     )
+
+
+def swap_region_roles(ctx: BuildContext) -> None:
+    """Source 0 links region as home, source 1 as shipping."""
+    daily, regional = ctx.nodes[DAILY], ctx.nodes[REGIONAL]
+    del ctx.join_paths[(daily.current.id, REGION, "")]
+    del ctx.join_paths[(regional.current.id, REGION, "")]
+    customer, region = ctx.nodes[CUSTOMER], ctx.nodes[REGION]
+    link_to(ctx, daily, customer, region, role="home")
+    link_to(ctx, regional, region, role="shipping")
+
+
+@pytest.mark.asyncio
+async def test_role_routes_to_source_with_role():
+    """The source linking the role wins despite more joins."""
+    ctx, metric = build_ctx(REGIONAL, [sum_of("amount")])
+    swap_region_roles(ctx)
+    match = await find_matching_source(ctx, metric, [f"{REGION}.name[home]"], set())
+    assert (match.parent_node, match.ordinal) == (ctx.nodes[DAILY], 0)
+
+
+@pytest.mark.asyncio
+async def test_unlinked_role_is_unreachable():
+    """A role no source links names every source."""
+    ctx, metric = build_ctx(REGIONAL, [sum_of("amount")])
+    swap_region_roles(ctx)
+    with pytest.raises(DJInvalidInputException) as exc_info:
+        await find_matching_source(ctx, metric, [f"{REGION}.name[billing]"], set())
+    assert exc_info.value.message == (
+        f"No source of {METRIC} covers the request. "
+        f"Source 0: cannot reach {REGION}.name[billing]. "
+        f"Source 1: cannot reach {REGION}.name[billing]."
+    )
+
+
+@pytest.mark.asyncio
+async def test_role_free_request_takes_any_role():
+    """A bare reference still picks the fewest joins."""
+    ctx, metric = build_ctx(REGIONAL, [sum_of("amount")])
+    swap_region_roles(ctx)
+    match = await find_matching_source(ctx, metric, [f"{REGION}.name"], set())
+    assert (match.parent_node, match.ordinal) == (ctx.nodes[REGIONAL], 1)

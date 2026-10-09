@@ -10,6 +10,7 @@ from datajunction_server.construction.build_v3.dimensions import (
     _local_reference_dimension_column,
     find_join_path,
     parse_dimension_ref,
+    roles_reaching_dimension,
 )
 from datajunction_server.database.preaggregation import (
     compute_expression_hash,
@@ -51,6 +52,12 @@ def _source_gaps(
                 gaps.append(f"cannot reach {ref}")
             continue
         join_path = find_join_path(ctx, parent, dim_ref.node_name, dim_ref.role)
+        if dim_ref.role and dim_ref.role not in roles_reaching_dimension(
+            ctx,
+            parent.current.id,  # type: ignore[union-attr]
+            dim_ref.node_name,
+        ):
+            join_path = None
         if join_path:
             joins += len(join_path.links)
         elif _local_reference_dimension_column(ctx, parent, dim_ref) is None:
