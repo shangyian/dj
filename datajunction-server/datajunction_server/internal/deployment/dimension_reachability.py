@@ -133,6 +133,14 @@ class DimensionReachability:
             set(),
         )
 
+    def roles_reaching(self, source_rev_id: int, dim_name: str) -> set[str]:
+        """Non-empty roles under which the dimension is reachable from a source."""
+        return {
+            role
+            for name, role in self._reachable_roles.get(source_rev_id, set())
+            if name == dim_name and role
+        }
+
     def reachable_from(self, source_rev_id: int) -> set[str]:
         """All dimension names reachable from a source node."""
         return self._reachable.get(source_rev_id, set())

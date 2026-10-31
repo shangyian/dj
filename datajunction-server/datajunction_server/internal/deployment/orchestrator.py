@@ -79,6 +79,10 @@ from datajunction_server.internal.deployment.checks import (
 from datajunction_server.internal.deployment.dimension_reachability import (
     DimensionReachability,
 )
+from datajunction_server.internal.deployment.roleless_refs import (
+    roleless_ref_warnings,
+    roleless_refs,
+)
 from datajunction_server.internal.deployment.fingerprints import (
     FingerprintMap,
     build_deployment_fingerprints,
@@ -2518,6 +2522,9 @@ class DeploymentOrchestrator:
                 derived = await self._derive_measures_for_deployed_metrics()
                 p.append(f"{derived} metrics")
 
+            with timer.phase("check role-less dimension refs"):
+                await self._warn_roleless_dimension_refs()
+
         # Hierarchies run unconditionally so that hierarchy-only pushes
         # (no node changes) are not silently dropped.
         with timer.phase("deploy hierarchies"):
@@ -2601,6 +2608,97 @@ class DeploymentOrchestrator:
 
         return downstream
 
+    def _touched_metric_names(self) -> list[str]:
+        """Metrics created or updated in this deployment, in deployed order."""
+        metric_spec_names = {
+            spec.rendered_name
+            for spec in self.deployment_spec.nodes
+            if spec.node_type == NodeType.METRIC
+        }
+        return [
+            r.name
+            for r in self.deployed_results
+            if r.deploy_type == DeploymentResult.Type.NODE
+            and r.name in metric_spec_names
+            and r.status != DeploymentResult.Status.SKIPPED
+            and r.operation
+            in (
+                DeploymentResult.Operation.CREATE,
+                DeploymentResult.Operation.UPDATE,
+            )
+        ]
+
+    async def _warn_roleless_dimension_refs(self) -> None:
+        """Warn (never fail) about metrics' role-less dimension refs that the
+        metric's facts reach only through roles. Runs after nodes and links are
+        saved, so one batched reachability build sees the final link graph.
+        """
+        try:
+            # A savepoint, so a database error here rolls back only this check
+            # and leaves the deployment's own transaction usable.
+            async with self.session.begin_nested():
+                warnings = await self._roleless_dimension_ref_warnings()
+            self.warnings.extend(warnings)
+        except Exception:  # pragma: no cover
+            logger.exception("Skipped role-less dimension ref check")
+
+    async def _roleless_dimension_ref_warnings(self) -> list[DJError]:
+        touched = self._touched_metric_names()
+        if not touched:
+            return []
+        metrics = await Node.get_by_names(
+            self.session,
+            touched,
+            options=[
+                joinedload(Node.current).options(
+                    selectinload(NodeRevision.required_dimensions),
+                ),
+            ],
+        )
+        metric_refs = {}
+        for node in metrics:
+            try:
+                refs = roleless_refs(node.current)
+            except Exception:  # pragma: no cover
+                logger.exception("Skipped role-less ref check for %s", node.name)
+                continue
+            if refs:
+                metric_refs[node.name] = refs
+        if not metric_refs:
+            return []
+        parents = await get_metric_parents_map(
+            self.session,
+            [node for node in metrics if node.name in metric_refs],
+        )
+        fact_names = [p.name for facts in parents.values() for p in facts]
+        fact_nodes = {
+            fact.name: fact
+            for fact in await Node.get_by_names(
+                self.session,
+                sorted(set(fact_names)),
+                options=[joinedload(Node.current)],
+            )
+        }
+        metric_facts = {
+            name: {
+                p.name: fact_nodes[p.name].current.id
+                for p in facts
+                if p.name in fact_nodes
+            }
+            for name, facts in parents.items()
+        }
+        reachability = await DimensionReachability.build(
+            self.session,
+            {rev_id for facts in metric_facts.values() for rev_id in facts.values()},
+            {
+                ref.rsplit(SEPARATOR, 1)[0]
+                for refs in metric_refs.values()
+                for _, ref in refs
+            },
+            local_names={fact.current.id: fact.name for fact in fact_nodes.values()},
+        )
+        return roleless_ref_warnings(metric_refs, metric_facts, reachability)
+
     async def _derive_measures_for_deployed_metrics(self) -> int:
         """Run ``derive_frozen_measures`` inline for every metric that was
         created or updated in this deployment.
@@ -2620,23 +2718,7 @@ class DeploymentOrchestrator:
         it in append order produces correct base-before-derived ordering
         within a single deployment.
         """
-        metric_spec_names = {
-            spec.rendered_name
-            for spec in self.deployment_spec.nodes
-            if spec.node_type == NodeType.METRIC
-        }
-        touched_metric_names = [
-            r.name
-            for r in self.deployed_results
-            if r.deploy_type == DeploymentResult.Type.NODE
-            and r.name in metric_spec_names
-            and r.status != DeploymentResult.Status.SKIPPED
-            and r.operation
-            in (
-                DeploymentResult.Operation.CREATE,
-                DeploymentResult.Operation.UPDATE,
-            )
-        ]
+        touched_metric_names = self._touched_metric_names()
         if not touched_metric_names:
             return 0
 
